@@ -1,0 +1,14 @@
+[package]
+name = "bench-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cell-sdk = { path = "../../cell-sdk" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[build-dependencies]
+cell-sdk = { path = "../../cell-sdk", features = ["build"] }
+blake3 = "1.5"
