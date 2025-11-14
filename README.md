@@ -96,6 +96,7 @@ examples/
 
 ## Roadmap / global mesh mode
 
+- [ ] `async` 
 - [ ] `cell publish` – sign & upload service manifest to IPFS.  
 - [ ] `cell replicate` – auto-spawn closest copy when latency > 40 ms.  
 - [ ] GPU / SIMD resource descriptors.  
