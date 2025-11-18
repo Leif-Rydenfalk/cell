@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 description = "Procedural macros for the cell-sdk RPC framework"
 repository = "https://github.com/Leif-Rydenfalk/cell"
 keywords = ["rpc", "macro", "schema", "unix-socket"]
-categories = ["development-tools::procedural-macro"]
+categories = ["development-tools"]
 
 [lib]
 proc-macro = true
