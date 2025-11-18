@@ -1,6 +1,0 @@
-[cell]
-name = "calculator"
-binary = "target/release/calculator"
-schema = true
-
-[deps] # empty for now

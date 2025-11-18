@@ -1,22 +1,16 @@
-//! cell-sdk  –  Biological-cell RPC framework (runtime-only version)
-//! https://github.com/Leif-Rydenfalk/cell
+//! cell-sdk  –  Biological-cell RPC framework (runtime-only edition)
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::os::unix::io::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 pub use cell_macros::{call_as, service_schema};
 
-// ------------------------------------------------------------------
-// 1.  Server side – unchanged from 0.1.1
-// ------------------------------------------------------------------
-
-/// Run a service with schema introspection.
-/// If CELL_SOCKET_FD is present we use the inherited listener, otherwise we bind ourselves.
+// ---------- server side ----------
 pub fn run_service_with_schema<F>(service_name: &str, schema_json: &str, handler: F) -> Result<()>
 where
     F: Fn(&str) -> Result<String> + Send + Sync + 'static,
@@ -66,7 +60,6 @@ fn handle_one_client(
     schema_json: &str,
     handler: &dyn Fn(&str) -> Result<String>,
 ) -> Result<()> {
-    // read 4-byte length header
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
@@ -77,7 +70,6 @@ fn handle_one_client(
     let mut msg_buf = vec![0u8; len];
     stream.read_exact(&mut msg_buf)?;
 
-    // schema introspection
     if &msg_buf == b"__SCHEMA__" {
         let resp = schema_json.as_bytes();
         stream.write_all(&(resp.len() as u32).to_be_bytes())?;
@@ -85,7 +77,6 @@ fn handle_one_client(
         return Ok(());
     }
 
-    // normal request
     let request = std::str::from_utf8(&msg_buf).context("invalid utf-8")?;
     let response_json = handler(request)?;
     let resp = response_json.as_bytes();
@@ -95,17 +86,18 @@ fn handle_one_client(
     Ok(())
 }
 
-// ------------------------------------------------------------------
-// 2.  Runtime-only schema fetch (replaces OUT_DIR requirement)
-// ------------------------------------------------------------------
+// ---------- runtime schema fetch ----------
+lazy_static::lazy_static! {
+    static ref SCHEMA_CACHE: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
+}
 
-static SCHEMA_CACHE: OnceLock<std::collections::HashMap<String, String>> = OnceLock::new();
-
-/// Fetch schema at runtime (with memoisation).
 pub fn fetch_schema_runtime(service: &str) -> Result<String> {
-    let cache = SCHEMA_CACHE.get_or_init(Default::default);
-    if let Some(cached) = cache.get(service) {
-        return Ok(cached.clone());
+    // Check cache first
+    {
+        let cache = SCHEMA_CACHE.lock().unwrap();
+        if let Some(cached) = cache.get(service) {
+            return Ok(cached.clone());
+        }
     }
 
     let sock_path = format!("/tmp/cell/sockets/{}.sock", service);
@@ -125,24 +117,36 @@ pub fn fetch_schema_runtime(service: &str) -> Result<String> {
     s.read_exact(&mut schema_bytes)?;
 
     let schema = String::from_utf8_lossy(&schema_bytes).into_owned();
-    cache.insert(service.to_string(), schema.clone());
+
+    // Cache the schema
+    {
+        let mut cache = SCHEMA_CACHE.lock().unwrap();
+        cache.insert(service.to_string(), schema.clone());
+    }
+
     Ok(schema)
 }
 
-// ------------------------------------------------------------------
-// 3.  Optional build-time helper (kept for backward compat)
-// ------------------------------------------------------------------
+// ---------- build helper (kept for compat) ----------
 #[cfg(feature = "build")]
 pub mod build {
     use super::*;
     use std::fs;
     use std::path::Path;
 
-    /// Fetch schema and cache it in `out_dir`.
     pub fn fetch_and_cache_schema(service_name: &str, out_dir: &Path) -> Result<(), String> {
         let schema = fetch_schema_runtime(service_name).map_err(|e| e.to_string())?;
+
+        // Write JSON schema
         let schema_path = out_dir.join(format!("{}_schema.json", service_name));
         fs::write(&schema_path, &schema).map_err(|e| format!("failed to write schema: {}", e))?;
+
+        // Generate Rust code from schema
+        let rust_code = generate_rust_from_schema(&schema)
+            .map_err(|e| format!("failed to generate Rust code: {}", e))?;
+        let code_path = out_dir.join(format!("{}_types.rs", service_name));
+        fs::write(&code_path, rust_code).map_err(|e| format!("failed to write types: {}", e))?;
+
         println!(
             "cargo:warning=✓ Cached schema for '{}' (runtime fetch)",
             service_name
@@ -150,14 +154,46 @@ pub mod build {
         Ok(())
     }
 
-    /// Tiny helper to be called from build.rs when users *want* build-time caching.
-    pub fn run_build_script() -> Result<()> {
-        let out_dir = std::env::var("OUT_DIR").map_err(|_| "OUT_DIR not set")?;
-        let out_path = Path::new(&out_dir);
-        for dep in &["worker", "aggregator"] {
-            // parse cell.toml in real life; here we keep it short
-            let _ = fetch_and_cache_schema(dep, out_path);
+    fn generate_rust_from_schema(schema_json: &str) -> Result<String, String> {
+        let schema: serde_json::Value =
+            serde_json::from_str(schema_json).map_err(|e| format!("invalid schema JSON: {}", e))?;
+
+        let req_name = schema["request"]["name"]
+            .as_str()
+            .ok_or("missing request name")?;
+        let resp_name = schema["response"]["name"]
+            .as_str()
+            .ok_or("missing response name")?;
+
+        let req_fields = schema["request"]["fields"]
+            .as_array()
+            .ok_or("missing request fields")?;
+        let resp_fields = schema["response"]["fields"]
+            .as_array()
+            .ok_or("missing response fields")?;
+
+        let mut code = String::new();
+        code.push_str("// Auto-generated types from schema\n\n");
+        code.push_str("#[allow(dead_code)]\n");
+        code.push_str("#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]\n");
+        code.push_str(&format!("pub struct {} {{\n", req_name));
+        for field in req_fields {
+            let name = field["name"].as_str().ok_or("missing field name")?;
+            let ty = field["type"].as_str().ok_or("missing field type")?;
+            code.push_str(&format!("    pub {}: {},\n", name, ty));
         }
-        Ok(())
+        code.push_str("}\n\n");
+
+        code.push_str("#[allow(dead_code)]\n");
+        code.push_str("#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]\n");
+        code.push_str(&format!("pub struct {} {{\n", resp_name));
+        for field in resp_fields {
+            let name = field["name"].as_str().ok_or("missing field name")?;
+            let ty = field["type"].as_str().ok_or("missing field type")?;
+            code.push_str(&format!("    pub {}: {},\n", name, ty));
+        }
+        code.push_str("}\n");
+
+        Ok(code)
     }
 }

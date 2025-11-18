@@ -94,7 +94,12 @@ fn main() -> Result<()> {
 
 /// Run = 1. build if missing  2. spawn nucleus  3. nucleus execs real binary
 fn cmd_run(dir: &Path) -> Result<()> {
-    let mf = read_manifest(dir)?;
+    // Canonicalize the directory path first
+    let dir = dir
+        .canonicalize()
+        .with_context(|| format!("directory not found: {}", dir.display()))?;
+
+    let mf = read_manifest(&dir)?;
     let run_dir = dir.join("run");
     let sock_path = run_dir.join("cell.sock");
     let bin_path = dir.join(&mf.cell.binary);
@@ -104,7 +109,7 @@ fn cmd_run(dir: &Path) -> Result<()> {
     // 1. guarantee executable (build if missing)
     if !bin_path.is_file() {
         println!("🔨  Building …");
-        build_in_place(dir, Path::new(&mf.cell.binary))?;
+        build_in_place(&dir, Path::new(&mf.cell.binary))?;
     }
 
     // 2. spawn nucleus (same binary, sub-command)
@@ -114,7 +119,7 @@ fn cmd_run(dir: &Path) -> Result<()> {
     cmd.arg("nucleus")
         .arg(&sock_path)
         .arg(fs::canonicalize(&bin_path)?)
-        .current_dir(dir)
+        .current_dir(&dir)
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file.try_clone()?));
 
@@ -167,24 +172,62 @@ fn cmd_use(dir: &Path, args: &str) -> Result<()> {
 fn build_in_place(root: &Path, bin_rel: &Path) -> Result<()> {
     if root.join("Cargo.toml").exists() {
         println!("   Building Rust project …");
-        run_command(
-            Command::new("cargo")
-                .args(&["build", "--release"])
-                .current_dir(root)
-                .stdout(Stdio::null()),
-            "cargo build --release",
-        )?;
-        let name = bin_rel
-            .file_name()
-            .ok_or_else(|| anyhow!("binary path has no file name"))?;
-        let cargo_out = root.join("target/release").join(name);
-        let wanted = root.join(bin_rel);
-        if !cargo_out.exists() {
-            bail!("cargo succeeded but {} not found", cargo_out.display());
+
+        // Check if we're in a workspace
+        let workspace_root = find_workspace_root(root)?;
+        let is_workspace_member = workspace_root != root;
+
+        if is_workspace_member {
+            // Build from workspace root with package filter
+            let package_name = extract_package_name(root)?;
+            println!("   Detected workspace member: {}", package_name);
+            println!(
+                "   Building from workspace root: {}",
+                workspace_root.display()
+            );
+
+            run_command(
+                Command::new("cargo")
+                    .args(&["build", "--release", "-p", &package_name])
+                    .current_dir(&workspace_root)
+                    .stdout(Stdio::null()),
+                &format!("cargo build --release -p {}", package_name),
+            )?;
+
+            // Find the binary in workspace target directory
+            let name = bin_rel
+                .file_name()
+                .ok_or_else(|| anyhow!("binary path has no file name"))?;
+            let cargo_out = workspace_root.join("target/release").join(name);
+            let wanted = root.join(bin_rel);
+
+            if !cargo_out.exists() {
+                bail!("cargo succeeded but {} not found", cargo_out.display());
+            }
+            fs::create_dir_all(wanted.parent().unwrap())?;
+            fs::copy(&cargo_out, &wanted)?;
+            println!("   Copied {} → {}", cargo_out.display(), wanted.display());
+        } else {
+            // Regular standalone crate
+            run_command(
+                Command::new("cargo")
+                    .args(&["build", "--release"])
+                    .current_dir(root)
+                    .stdout(Stdio::null()),
+                "cargo build --release",
+            )?;
+            let name = bin_rel
+                .file_name()
+                .ok_or_else(|| anyhow!("binary path has no file name"))?;
+            let cargo_out = root.join("target/release").join(name);
+            let wanted = root.join(bin_rel);
+            if !cargo_out.exists() {
+                bail!("cargo succeeded but {} not found", cargo_out.display());
+            }
+            fs::create_dir_all(wanted.parent().unwrap())?;
+            fs::copy(&cargo_out, &wanted)?;
+            println!("   Copied {} → {}", cargo_out.display(), wanted.display());
         }
-        fs::create_dir_all(wanted.parent().unwrap())?;
-        fs::copy(&cargo_out, &wanted)?;
-        println!("   Copied {} → {}", cargo_out.display(), wanted.display());
     } else if root.join("Makefile").exists() {
         println!("   Building with Makefile …");
         run_command(Command::new("make").current_dir(root), "make")?
@@ -195,6 +238,90 @@ fn build_in_place(root: &Path, bin_rel: &Path) -> Result<()> {
         bail!("no build recipe (Cargo.toml, Makefile, build.sh)")
     }
     Ok(())
+}
+
+// ---------- WORKSPACE DETECTION ----------
+
+fn find_workspace_root(start: &Path) -> Result<PathBuf> {
+    let mut current = start.canonicalize()?;
+
+    // Walk up the directory tree looking for a workspace root
+    loop {
+        // Check parent for workspace
+        if let Some(parent) = current.parent() {
+            let parent_cargo = parent.join("Cargo.toml");
+            if parent_cargo.exists() {
+                let content = fs::read_to_string(&parent_cargo)
+                    .context("failed to read parent Cargo.toml")?;
+                if content.contains("[workspace]") {
+                    // Verify we're a member
+                    if is_workspace_member(parent, &start.canonicalize()?)? {
+                        return Ok(parent.to_path_buf());
+                    }
+                }
+            }
+            current = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+
+    // Not in a workspace, return the starting directory
+    Ok(start.to_path_buf())
+}
+
+fn is_workspace_member(workspace_root: &Path, member_path: &Path) -> Result<bool> {
+    let cargo_toml = workspace_root.join("Cargo.toml");
+    let content = fs::read_to_string(&cargo_toml)?;
+
+    // Parse the workspace members
+    let cargo: toml::Value = toml::from_str(&content)?;
+    if let Some(workspace) = cargo.get("workspace") {
+        if let Some(members) = workspace.get("members") {
+            if let Some(members_array) = members.as_array() {
+                let member_canonical = member_path.canonicalize()?;
+
+                for member in members_array {
+                    if let Some(member_str) = member.as_str() {
+                        let member_full_path = workspace_root.join(member_str).canonicalize().ok();
+
+                        // Direct match
+                        if member_full_path == Some(member_canonical.clone()) {
+                            return Ok(true);
+                        }
+
+                        // Handle wildcards like "examples/*"
+                        if member_str.contains('*') {
+                            let pattern = member_str.replace('*', "");
+                            if let Ok(member_parent) = workspace_root
+                                .join(pattern.trim_end_matches('/'))
+                                .canonicalize()
+                            {
+                                if member_canonical.starts_with(&member_parent) {
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn extract_package_name(root: &Path) -> Result<String> {
+    let cargo_toml = root.join("Cargo.toml");
+    let content = fs::read_to_string(&cargo_toml)?;
+    let cargo: toml::Value = toml::from_str(&content)?;
+
+    cargo
+        .get("package")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow!("No package.name found in Cargo.toml"))
 }
 
 // ---------- UTILS ----------

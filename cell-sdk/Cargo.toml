@@ -1,9 +1,9 @@
 [package]
 name = "cell-sdk"
-version = "0.1.1"                                           # bump to 0.1.1 if you already tried 0.1
+version = "0.1.1"
 edition = "2021"
 authors = ["Leif Rydenfalk"]
-license = "MIT OR Apache-2.0"                               # required
+license = "MIT OR Apache-2.0"
 description = "Biological-cell RPC framework for Rust"
 repository = "https://github.com/Leif-Rydenfalk/cell"
 keywords = ["rpc", "microservice", "unix-socket", "schema"]
@@ -14,6 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 humantime = "2.1"
+lazy_static = "1.4"
 blake3 = { version = "1.5", optional = true }
 
 cell-macros = "0.1"
