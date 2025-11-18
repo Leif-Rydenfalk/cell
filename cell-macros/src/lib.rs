@@ -2,7 +2,7 @@
 
 extern crate proc_macro;
 use proc_macro::TokenStream;
-use quote::{quote, ToTokens}; // Added ToTokens
+use quote::{quote, ToTokens};
 use std::fs;
 use std::path::PathBuf;
 use syn::parse::{Parse, ParseStream};
@@ -21,13 +21,9 @@ pub fn service_schema(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-        pub struct #req_name {
-            #(pub #req_fields),*
-        }
+        pub struct #req_name { #(pub #req_fields),* }
         #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-        pub struct #resp_name {
-            #(pub #resp_fields),*
-        }
+        pub struct #resp_name { #(pub #resp_fields),* }
         #[doc(hidden)]
         pub const __CELL_SCHEMA__: &str = #schema_json;
         #[doc(hidden)]
@@ -41,9 +37,7 @@ pub fn call_as(input: TokenStream) -> TokenStream {
     let CallArgs { service, request } = parse_macro_input!(input as CallArgs);
     let service_lit = service.to_string();
 
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR environment variable not set");
-
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let schema_path = PathBuf::from(&manifest_dir)
         .join(".cell-schemas")
         .join(format!("{}.json", service_lit));
@@ -51,12 +45,9 @@ pub fn call_as(input: TokenStream) -> TokenStream {
     let schema_json = match fs::read_to_string(&schema_path) {
         Ok(content) => content,
         Err(_) => {
-            let err_msg = format!(
-                "Missing schema snapshot for service '{}'.\nPath: {}\nRun 'cell run .' to fetch.",
-                service_lit,
-                schema_path.display()
-            );
-            return TokenStream::from(quote! { compile_error!(#err_msg) });
+            return TokenStream::from(
+                quote! { compile_error!("Missing schema snapshot. Run 'cell run .' first.") },
+            )
         }
     };
 
@@ -67,48 +58,28 @@ pub fn call_as(input: TokenStream) -> TokenStream {
                 #resp_struct
 
                 (|| -> ::anyhow::Result<#resp_type> {
-                    use ::std::io::{Read, Write};
-
                     let env_key = format!("CELL_DEP_{}_SOCK", #service_lit.to_uppercase());
                     let sock_path = match ::std::env::var(&env_key) {
                         Ok(p) => p,
                         Err(_) => format!("../{}/run/cell.sock", #service_lit)
                     };
 
-                    let mut stream = ::std::os::unix::net::UnixStream::connect(&sock_path)
-                        .map_err(|e| ::anyhow::anyhow!("Connect failed to {}: {}", sock_path, e))?;
-
                     let request: #req_type = #request;
-                    let json_req = ::serde_json::to_vec(&request)?;
+                    let payload = ::bincode::serialize(&request).map_err(|e| ::anyhow::anyhow!("Serialize error: {}", e))?;
 
-                    stream.write_all(&(json_req.len() as u32).to_be_bytes())?;
-                    stream.write_all(&json_req)?;
-                    stream.flush()?;
+                    let response_bytes = ::cell_sdk::invoke_rpc(#service_lit, &sock_path, &payload)?;
 
-                    let mut len_buf = [0u8; 4];
-                    stream.read_exact(&mut len_buf)?;
-                    let len = u32::from_be_bytes(len_buf) as usize;
-
-                    if len > 16 * 1024 * 1024 {
-                         return Err(::anyhow::anyhow!("Response too large"));
-                    }
-
-                    let mut resp_buf = vec![0u8; len];
-                    stream.read_exact(&mut resp_buf)?;
-
-                    ::serde_json::from_slice(&resp_buf).map_err(|e| e.into())
+                    ::bincode::deserialize(&response_bytes).map_err(|e| ::anyhow::anyhow!("Deserialize error: {}", e))
                 })()
             }};
             TokenStream::from(expanded)
         }
         Err(e) => {
-            let err = format!("Schema parsing failed for '{}': {}", service_lit, e);
+            let err = format!("Schema parsing failed: {}", e);
             TokenStream::from(quote! { compile_error!(#err) })
         }
     }
 }
-
-// --- GENERATION ---
 
 fn parse_and_generate_types(
     schema_json: &str,
@@ -123,7 +94,6 @@ fn parse_and_generate_types(
 > {
     let schema: serde_json::Value =
         serde_json::from_str(schema_json).map_err(|e| format!("Invalid JSON: {}", e))?;
-
     let req_name = schema["request"]["name"]
         .as_str()
         .ok_or("Missing request name")?;
@@ -150,13 +120,11 @@ fn parse_and_generate_types(
         #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone)]
         struct #req_ident { #(#req_fields),* }
     };
-
     let resp_struct = quote! {
         #[allow(non_camel_case_types, dead_code)]
         #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone)]
         struct #resp_ident { #(#resp_fields),* }
     };
-
     Ok((
         req_struct,
         resp_struct,
@@ -170,23 +138,13 @@ fn generate_fields(fields: &[serde_json::Value]) -> Result<Vec<proc_macro2::Toke
     for f in fields {
         let name = f["name"].as_str().ok_or("Field missing name")?;
         let ty_str = f["type"].as_str().ok_or("Field missing type")?;
-
         let ident = syn::Ident::new(name, proc_macro2::Span::call_site());
-
-        // --- IMPROVED ERROR REPORTING ---
-        let ty_ident: syn::Type = syn::parse_str(ty_str).map_err(|e| {
-            format!(
-                "Failed to parse type '{}' for field '{}': {}",
-                ty_str, name, e
-            )
-        })?;
-
+        let ty_ident: syn::Type = syn::parse_str(ty_str)
+            .map_err(|e| format!("Failed to parse type '{}': {}", ty_str, e))?;
         out.push(quote! { pub #ident: #ty_ident });
     }
     Ok(out)
 }
-
-// --- PARSING ---
 
 struct ServiceSchema {
     request_name: Ident,
@@ -194,7 +152,6 @@ struct ServiceSchema {
     response_name: Ident,
     response_fields: Vec<Field>,
 }
-
 impl Parse for ServiceSchema {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         input.parse::<Ident>()?;
@@ -208,14 +165,12 @@ impl Parse for ServiceSchema {
         braced!(content in input);
         let request_fields = parse_fields(&content)?;
         input.parse::<Token![,]>()?;
-
         input.parse::<Ident>()?;
         input.parse::<Token![:]>()?;
         let response_name = input.parse()?;
         let content;
         braced!(content in input);
         let response_fields = parse_fields(&content)?;
-
         Ok(ServiceSchema {
             request_name,
             request_fields,
@@ -260,22 +215,15 @@ impl Parse for CallArgs {
 }
 
 fn generate_schema_json(schema: &ServiceSchema) -> String {
-    let jsonify = |fields: &[Field]| {
-        fields
-            .iter()
-            .map(|f| {
-                // Use ToTokens to get a clean string representation of the type
-                let ty_tokens = &f.ty;
-                let ty_str = quote!(#ty_tokens).to_string();
-
-                serde_json::json!({
-                    "name": f.ident.as_ref().unwrap().to_string(),
-                    "type": ty_str
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-
+    let jsonify =
+        |fields: &[Field]| {
+            fields.iter().map(|f| {
+        let mut ts = proc_macro2::TokenStream::new();
+        f.ty.to_tokens(&mut ts);
+        let ty_str = ts.to_string();
+        serde_json::json!({ "name": f.ident.as_ref().unwrap().to_string(), "type": ty_str })
+    }).collect::<Vec<_>>()
+        };
     serde_json::json!({
         "request": { "name": schema.request_name.to_string(), "fields": jsonify(&schema.request_fields) },
         "response": { "name": schema.response_name.to_string(), "fields": jsonify(&schema.response_fields) }
