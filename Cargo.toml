@@ -1,10 +1,6 @@
 [workspace]
-members = [
-    "cell-sdk",
-    "cell-macros",
-    "cell-cli",
-    "examples/*",
-]
+members = ["cell-sdk", "cell-macros", "cell-cli"]
+exclude = ["examples/*"]
 resolver = "2"
 
 [workspace.dependencies]

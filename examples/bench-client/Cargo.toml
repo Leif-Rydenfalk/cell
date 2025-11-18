@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cell-sdk = { path = "../../cell-sdk" }
+cell-sdk = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 
 [build-dependencies]
-cell-sdk = { path = "../../cell-sdk", features = ["build"] }
+cell-sdk = { workspace = true, features = ["build"] }
 blake3 = "1.5"

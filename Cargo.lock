@@ -71,37 +71,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
-name = "bench-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "cell-sdk",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "bench-echo"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cell-sdk",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "bench-processor"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cell-sdk",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "blake3"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -112,16 +81,6 @@ dependencies = [
  "cc",
  "cfg-if",
  "constant_time_eq",
-]
-
-[[package]]
-name = "calculator"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cell-sdk",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -221,17 +180,6 @@ name = "constant_time_eq"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
-
-[[package]]
-name = "consumer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "cell-sdk",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "find-msvc-tools"
