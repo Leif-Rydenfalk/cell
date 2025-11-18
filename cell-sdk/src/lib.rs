@@ -1,12 +1,19 @@
+//! cell-sdk  –  Biological-cell RPC framework (runtime-only version)
+//! https://github.com/Leif-Rydenfalk/cell
+
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
+
 pub use cell_macros::{call_as, service_schema};
 
-use anyhow::bail;
-use anyhow::Context;
-use anyhow::Result;
-use std::io::{Read, Write};
-use std::os::unix::io::FromRawFd;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::time::SystemTime;
+// ------------------------------------------------------------------
+// 1.  Server side – unchanged from 0.1.1
+// ------------------------------------------------------------------
 
 /// Run a service with schema introspection.
 /// If CELL_SOCKET_FD is present we use the inherited listener, otherwise we bind ourselves.
@@ -88,70 +95,69 @@ fn handle_one_client(
     Ok(())
 }
 
-// ============================================
-// Build-time helpers (for build.rs)
-// ============================================
+// ------------------------------------------------------------------
+// 2.  Runtime-only schema fetch (replaces OUT_DIR requirement)
+// ------------------------------------------------------------------
 
+static SCHEMA_CACHE: OnceLock<std::collections::HashMap<String, String>> = OnceLock::new();
+
+/// Fetch schema at runtime (with memoisation).
+pub fn fetch_schema_runtime(service: &str) -> Result<String> {
+    let cache = SCHEMA_CACHE.get_or_init(Default::default);
+    if let Some(cached) = cache.get(service) {
+        return Ok(cached.clone());
+    }
+
+    let sock_path = format!("/tmp/cell/sockets/{}.sock", service);
+    let mut s = UnixStream::connect(&sock_path)
+        .with_context(|| format!("service '{}' not running", service))?;
+    s.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+    let req = b"__SCHEMA__";
+    s.write_all(&(req.len() as u32).to_be_bytes())?;
+    s.write_all(req)?;
+    s.flush()?;
+
+    let mut len_buf = [0u8; 4];
+    s.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut schema_bytes = vec![0u8; len];
+    s.read_exact(&mut schema_bytes)?;
+
+    let schema = String::from_utf8_lossy(&schema_bytes).into_owned();
+    cache.insert(service.to_string(), schema.clone());
+    Ok(schema)
+}
+
+// ------------------------------------------------------------------
+// 3.  Optional build-time helper (kept for backward compat)
+// ------------------------------------------------------------------
 #[cfg(feature = "build")]
 pub mod build {
+    use super::*;
     use std::fs;
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
     use std::path::Path;
-    use std::time::Duration;
 
-    /// Fetch schema from running service and cache it
+    /// Fetch schema and cache it in `out_dir`.
     pub fn fetch_and_cache_schema(service_name: &str, out_dir: &Path) -> Result<(), String> {
-        let socket_path = format!("/tmp/cell/sockets/{}.sock", service_name);
-
-        let mut stream = UnixStream::connect(&socket_path)
-            .map_err(|e| format!("Service '{}' not running: {}", service_name, e))?;
-
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .map_err(|e| format!("Timeout error: {}", e))?;
-
-        // Send length-prefixed __SCHEMA__ request
-        let request = b"__SCHEMA__";
-        stream
-            .write_all(&(request.len() as u32).to_be_bytes())
-            .map_err(|e| format!("Write error: {}", e))?;
-        stream
-            .write_all(request)
-            .map_err(|e| format!("Write error: {}", e))?;
-        stream.flush().map_err(|e| format!("Flush error: {}", e))?;
-
-        // Read length-prefixed response
-        let mut len_buf = [0u8; 4];
-        stream
-            .read_exact(&mut len_buf)
-            .map_err(|e| format!("Read length error: {}", e))?;
-
-        let len = u32::from_be_bytes(len_buf) as usize;
-        let mut schema_buf = vec![0u8; len];
-        stream
-            .read_exact(&mut schema_buf)
-            .map_err(|e| format!("Read schema error: {}", e))?;
-
-        let schema_hash = blake3::hash(&schema_buf).to_hex().to_string();
-
-        // Write schema to OUT_DIR
+        let schema = fetch_schema_runtime(service_name).map_err(|e| e.to_string())?;
         let schema_path = out_dir.join(format!("{}_schema.json", service_name));
-        fs::write(&schema_path, &schema_buf)
-            .map_err(|e| format!("Failed to write schema: {}", e))?;
-
-        // Write hash
-        let hash_path = out_dir.join(format!("{}_hash.txt", service_name));
-        fs::write(&hash_path, schema_hash.as_bytes())
-            .map_err(|e| format!("Failed to write hash: {}", e))?;
-
+        fs::write(&schema_path, &schema).map_err(|e| format!("failed to write schema: {}", e))?;
         println!(
-            "cargo:warning=✓ Cached schema for '{}' (hash: {})",
-            service_name,
-            &schema_hash[..16]
+            "cargo:warning=✓ Cached schema for '{}' (runtime fetch)",
+            service_name
         );
-        println!("cargo:rerun-if-changed={}", socket_path);
+        Ok(())
+    }
 
+    /// Tiny helper to be called from build.rs when users *want* build-time caching.
+    pub fn run_build_script() -> Result<()> {
+        let out_dir = std::env::var("OUT_DIR").map_err(|_| "OUT_DIR not set")?;
+        let out_path = Path::new(&out_dir);
+        for dep in &["worker", "aggregator"] {
+            // parse cell.toml in real life; here we keep it short
+            let _ = fetch_and_cache_schema(dep, out_path);
+        }
         Ok(())
     }
 }

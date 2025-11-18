@@ -106,6 +106,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
+ "humantime",
  "libc",
  "serde",
  "toml",

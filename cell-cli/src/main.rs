@@ -1,5 +1,3 @@
-mod nucleus;
-
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -11,9 +9,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+mod nucleus;
+
 #[derive(Parser)]
 #[command(name = "cell")]
 #[command(about = "Cell-native orchestrator (directory-centric MVP)")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -22,17 +23,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run (build if needed) and start the cell inside its own directory
-    Run {
-        /// Path to cell directory (must contain cell.toml)
-        dir: PathBuf,
-    },
+    Run { dir: PathBuf },
     /// Stop the cell (send SIGTERM, clean run/, keep rest)
     Stop { dir: PathBuf },
     /// Use a cell (invoke a function via Unix socket)
     Use {
         dir: PathBuf,
+        #[arg(name = "FN_NAME")]
         fn_name: String,
-        /// JSON args (or "-" to read stdin)
         args: String,
     },
     /// Garbage-collect unused cells (no-op in this version)
@@ -42,6 +40,7 @@ enum Commands {
 }
 
 // ---------- DATA ----------
+
 #[derive(Deserialize, Debug)]
 struct CellManifest {
     cell: CellMeta,
@@ -63,13 +62,13 @@ struct CellMeta {
 
 #[derive(Deserialize, Debug, Default)]
 struct LifeCycle {
-    idle_timeout: Option<u64>, // seconds
+    idle_timeout: Option<u64>,
     auto_cleanup: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Default)]
 struct Artefact {
-    artefact_type: Option<String>, // "source" | "binary"
+    artefact_type: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -77,12 +76,17 @@ fn default_true() -> bool {
 }
 
 // ---------- MAIN ----------
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Run { dir } => cmd_run(&dir),
         Commands::Stop { dir } => cmd_stop(&dir),
-        Commands::Use { dir, fn_name, args } => cmd_use(&dir, &fn_name, &args),
+        Commands::Use {
+            dir,
+            fn_name: _,
+            args,
+        } => cmd_use(&dir, &args),
         Commands::Gc => cmd_gc(),
         Commands::Nucleus { socket, binary } => nucleus::run_nucleus(&socket, &binary),
     }
@@ -97,46 +101,37 @@ fn cmd_run(dir: &Path) -> Result<()> {
 
     fs::create_dir_all(&run_dir)?;
 
-    // 1.  guarantee executable (build if missing)
+    // 1. guarantee executable (build if missing)
     if !bin_path.is_file() {
         println!("🔨  Building …");
         build_in_place(dir, Path::new(&mf.cell.binary))?;
     }
 
-    // 2.  spawn nucleus (same binary, sub-command)
+    // 2. spawn nucleus (same binary, sub-command)
     let current_exe = std::env::current_exe()?;
     let log_file = fs::File::create(run_dir.join("nucleus.log"))?;
     let mut cmd = Command::new(current_exe);
     cmd.arg("nucleus")
         .arg(&sock_path)
-        .arg(&fs::canonicalize(&bin_path)?)
+        .arg(fs::canonicalize(&bin_path)?)
         .current_dir(dir)
-        .stdout(Stdio::inherit())
+        .stdout(Stdio::null())
         .stderr(Stdio::from(log_file.try_clone()?));
 
-    let mut child = cmd.spawn().context("spawn nucleus failed")?;
+    let child = cmd.spawn().context("spawn nucleus failed")?;
+    fs::write(run_dir.join("pid"), child.id().to_string())?;
 
-    // 3.  wait until socket appears (or die with stderr)
-    for i in 0..50 {
+    // 3. wait until socket appears (or die with stderr)
+    for _ in 0..50 {
         if sock_path.exists() {
-            if i > 0 {
-                // require *at least one* retry
-                println!("✓ Started {} (nucleus pid {})", mf.cell.name, child.id());
-                return Ok(());
-            }
+            println!("✓ Started {} (pid {})", mf.cell.name, child.id());
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+
     let stderr = fs::read_to_string(run_dir.join("nucleus.log"))?;
-    let last = stderr
-        .lines()
-        .rev()
-        .take(20)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
+    let last = stderr.lines().rev().take(20).collect::<Vec<_>>().join("\n");
     bail!("nucleus failed to create socket:\n{}", last);
 }
 
@@ -154,7 +149,7 @@ fn cmd_stop(dir: &Path) -> Result<()> {
 }
 
 // ---------- USE ----------
-fn cmd_use(dir: &Path, fn_name: &str, args: &str) -> Result<()> {
+fn cmd_use(dir: &Path, args: &str) -> Result<()> {
     let _mf = read_manifest(dir)?; // ensure dir is a cell
     let sock = dir.join("run/cell.sock");
     let req_json = if args == "-" {
@@ -234,6 +229,5 @@ fn unix_rpc(sock: &Path, req: &str) -> Result<String> {
 }
 
 fn cmd_gc() -> Result<()> {
-    // no-op: cells live in user-controlled directories
     Ok(())
 }
