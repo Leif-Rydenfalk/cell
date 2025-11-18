@@ -21,25 +21,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the cell inside its own directory
-    Start { dir: PathBuf },
+    /// Run (build if needed) and start the cell inside its own directory
+    Run {
+        /// Path to cell directory (must contain cell.toml)
+        dir: PathBuf,
+    },
     /// Stop the cell (send SIGTERM, clean run/, keep rest)
     Stop { dir: PathBuf },
-    /// Use a cell (race local + foreign, auto-clone on SLO breach)
+    /// Use a cell (invoke a function via Unix socket)
     Use {
         dir: PathBuf,
         fn_name: String,
         /// JSON args (or "-" to read stdin)
         args: String,
     },
-    /// Clone & build a foreign cell repo once
-    Clone {
-        repo: String, // gh:owner/repo@ref
-        name: String, // local directory name
-    },
-    /// Garbage-collect unused foreign mirrors
+    /// Garbage-collect unused cells (no-op in this version)
     Gc,
-    /// Internal: wrap a cell binary (used by cell start)
+    /// Internal: wrap a cell binary (used by cell run)
     Nucleus { socket: PathBuf, binary: PathBuf },
 }
 
@@ -82,21 +80,20 @@ fn default_true() -> bool {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Start { dir } => cmd_start(&dir),
+        Commands::Run { dir } => cmd_run(&dir),
         Commands::Stop { dir } => cmd_stop(&dir),
         Commands::Use { dir, fn_name, args } => cmd_use(&dir, &fn_name, &args),
-        Commands::Clone { repo, name } => cmd_clone(&repo, &name),
         Commands::Gc => cmd_gc(),
         Commands::Nucleus { socket, binary } => nucleus::run_nucleus(&socket, &binary),
     }
 }
 
-/// Start = 1. build if missing  2. spawn nucleus  3. nucleus execs real binary
-fn cmd_start(dir: &Path) -> Result<()> {
+/// Run = 1. build if missing  2. spawn nucleus  3. nucleus execs real binary
+fn cmd_run(dir: &Path) -> Result<()> {
     let mf = read_manifest(dir)?;
     let run_dir = dir.join("run");
     let sock_path = run_dir.join("cell.sock");
-    let bin_path = fs::canonicalize(dir.join(&mf.cell.binary))?;
+    let bin_path = dir.join(&mf.cell.binary);
 
     fs::create_dir_all(&run_dir)?;
 
@@ -108,17 +105,28 @@ fn cmd_start(dir: &Path) -> Result<()> {
 
     // 2.  spawn nucleus (same binary, sub-command)
     let current_exe = std::env::current_exe()?;
+    let log_file = fs::File::create(run_dir.join("nucleus.log"))?;
     let mut cmd = Command::new(current_exe);
     cmd.arg("nucleus")
         .arg(&sock_path)
-        .arg(&bin_path)
+        .arg(&fs::canonicalize(&bin_path)?)
         .current_dir(dir)
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        .stderr(Stdio::from(log_file.try_clone()?));
 
-    let child = cmd.spawn()?;
-    println!("✓ Started {} (nucleus pid {})", mf.cell.name, child.id());
-    Ok(())
+    let mut child = cmd.spawn().context("spawn nucleus failed")?;
+
+    // 3.  wait until socket appears (or die with stderr)
+    for _ in 0..50 {
+        if sock_path.exists() {
+            println!("✓ Started {} (nucleus pid {})", mf.cell.name, child.id());
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let stderr = fs::read_to_string(run_dir.join("nucleus.log"))?;
+    bail!("nucleus failed to create socket:\n{}", stderr)
 }
 
 // ---------- STOP ----------
@@ -134,96 +142,22 @@ fn cmd_stop(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-// ---------- USE  ----------
+// ---------- USE ----------
 fn cmd_use(dir: &Path, fn_name: &str, args: &str) -> Result<()> {
-    let mf = read_manifest(dir)?;
+    let _mf = read_manifest(dir)?; // ensure dir is a cell
     let sock = dir.join("run/cell.sock");
-
     let req_json = if args == "-" {
         std::io::read_to_string(std::io::stdin())?
     } else {
         args.into()
     };
-
-    let resp = unix_rpc(&sock, &req_json)?;
+    let resp = unix_rpc(&sock, &req_json)
+        .with_context(|| format!("cannot connect to socket {}", sock.display()))?;
     println!("{}", resp);
     Ok(())
 }
 
-// ---------- CLONE ----------
-fn cmd_clone(repo_spec: &str, name: &str) -> Result<()> {
-    let (repo, rev) = repo_spec
-        .strip_prefix("gh:")
-        .ok_or_else(|| anyhow!("only gh:owner/repo[@ref] supported"))?
-        .split_once('@')
-        .unwrap_or((repo_spec, "main"));
-
-    let root = PathBuf::from(name);
-    if root.exists() {
-        println!("already cloned → pull only");
-        run_command(
-            Command::new("git")
-                .args(&["-C", root.to_str().unwrap(), "fetch", "origin"])
-                .stdout(Stdio::null()),
-            "git fetch",
-        )?;
-        run_command(
-            Command::new("git")
-                .args(&[
-                    "-C",
-                    root.to_str().unwrap(),
-                    "reset",
-                    "--hard",
-                    &format!("origin/{}", rev),
-                ])
-                .stdout(Stdio::null()),
-            "git reset",
-        )?;
-    } else {
-        fs::create_dir_all(&root)?;
-        run_command(
-            Command::new("git")
-                .args(&[
-                    "clone",
-                    &format!("https://github.com/{}", repo),
-                    root.to_str().unwrap(),
-                ])
-                .stdout(Stdio::null()),
-            "git clone",
-        )?;
-    }
-
-    // build
-    let mf = read_manifest(&root)?;
-    let bin_path = root.join(&mf.cell.binary);
-    if !bin_path.is_file() {
-        build_in_place(&root, Path::new(&mf.cell.binary))?;
-    }
-
-    println!("✓ Cell ready at {}", root.display());
-    Ok(())
-}
-
-// ---------- GC ----------
-fn cmd_gc() -> Result<()> {
-    // nothing to do – we no longer keep a hidden cache
-    Ok(())
-}
-
-// ---------- COMMAND RUNNER ----------
-fn run_command(cmd: &mut Command, desc: &str) -> Result<()> {
-    println!("   > {}", format!("{:?}", cmd).replace('"', ""));
-    let status = cmd
-        .status()
-        .with_context(|| format!("Failed to execute: {}", desc))?;
-    if !status.success() {
-        bail!("Command failed with status {}: {}", status, desc);
-    }
-    Ok(())
-}
-
-/// Build source however the repo wants, **then** place the final artefact
-/// exactly at `bin_rel` (relative to repo root).
+// ---------- BUILD ----------
 fn build_in_place(root: &Path, bin_rel: &Path) -> Result<()> {
     if root.join("Cargo.toml").exists() {
         println!("   Building Rust project …");
@@ -263,6 +197,17 @@ fn read_manifest(dir: &Path) -> Result<CellManifest> {
     toml::from_str(&txt).context("bad cell.toml")
 }
 
+fn run_command(cmd: &mut Command, desc: &str) -> Result<()> {
+    println!("   > {}", format!("{:?}", cmd).replace('"', ""));
+    let status = cmd
+        .status()
+        .with_context(|| format!("Failed to execute: {}", desc))?;
+    if !status.success() {
+        bail!("Command failed with status {}: {}", status, desc);
+    }
+    Ok(())
+}
+
 fn unix_rpc(sock: &Path, req: &str) -> Result<String> {
     let mut s = UnixStream::connect(sock)?;
     let req = req.as_bytes();
@@ -277,39 +222,7 @@ fn unix_rpc(sock: &Path, req: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Start the nucleus wrapper (bind socket, exec real binary on first connection).
-/// Returns immediately after spawning the nucleus process.
-fn nucleus_start(dir: &Path) -> Result<()> {
-    let run = dir.join("run");
-    fs::create_dir_all(&run)?;
-
-    let sock = run.join("cell.sock");
-    let pid_file = run.join("pid");
-
-    // Already running?
-    if pid_file.exists() {
-        return Ok(());
-    }
-
-    // Path to the real service binary (relative to cell dir)
-    let mf = read_manifest(dir)?;
-    let real_bin = dir.join(&mf.cell.binary);
-
-    // Re-exec *this* binary in nucleus mode
-    let current_exe = std::env::current_exe().context("cannot locate own executable")?;
-
-    let mut cmd = Command::new(current_exe);
-    cmd.arg("nucleus")
-        .arg(&sock)
-        .arg(&real_bin)
-        .current_dir(dir)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-
-    let child = cmd.spawn().context("spawn nucleus failed")?;
-
-    // Write PID so `cell stop` can find us
-    fs::write(&pid_file, child.id().to_string())?;
-
+fn cmd_gc() -> Result<()> {
+    // no-op: cells live in user-controlled directories
     Ok(())
 }
