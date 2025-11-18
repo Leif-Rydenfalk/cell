@@ -13,7 +13,7 @@ mod nucleus;
 
 #[derive(Parser)]
 #[command(name = "cell")]
-#[command(about = "Cell-native orchestrator (directory-centric MVP)")]
+#[command(about = "Cell-native orchestrator")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -39,7 +39,7 @@ enum Commands {
     Nucleus { socket: PathBuf, binary: PathBuf },
 }
 
-// ---------- DATA ----------
+// ---------- CONFIGURATION DATA ----------
 
 #[derive(Deserialize, Debug)]
 struct CellManifest {
@@ -75,7 +75,7 @@ fn default_true() -> bool {
     true
 }
 
-// ---------- MAIN ----------
+// ---------- MAIN ENTRY POINT ----------
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -92,80 +92,134 @@ fn main() -> Result<()> {
     }
 }
 
-// ---------- RUN ----------
+// ---------- COMMAND: RUN ----------
 
 fn cmd_run(dir: &Path) -> Result<()> {
     let dir = dir
         .canonicalize()
-        .with_context(|| format!("directory not found: {}", dir.display()))?;
+        .with_context(|| format!("Directory not found: {}", dir.display()))?;
 
     let mf = read_manifest(&dir)?;
     let run_dir = dir.join("run");
     let sock_path = run_dir.join("cell.sock");
     let bin_path = dir.join(&mf.cell.binary);
 
-    fs::create_dir_all(&run_dir)?;
+    fs::create_dir_all(&run_dir).context("Failed to create run directory")?;
 
-    // This ensures the schemas exist so the macros can read them during compilation.
+    // 1. SNAPSHOT DEPENDENCIES (CRITICAL: MUST HAPPEN BEFORE BUILD)
+    // This ensures the compiler macros can find the .cell-schemas JSON files.
     if !mf.deps.is_empty() {
         println!("📸 Snapshotting dependencies...");
         if let Err(e) = snapshot_dependencies(&dir, &mf.deps) {
-            eprintln!("   ⚠️  Warning: failed to snapshot dependencies: {}", e);
-            eprintln!("   (Make sure 'worker' and 'aggregator' are running first!)");
+            eprintln!("   ❌ Snapshot failed.");
+            eprintln!("      Reason: {:#}", e);
+            eprintln!("      (Build may fail if macros cannot find schemas)");
         }
     }
 
-    // Build if binary missing
+    // 2. BUILD
+    // We only build if the binary is missing.
+    // In a production CI/CD, you might want a --force-rebuild flag.
     if !bin_path.is_file() {
-        println!("🔨  Building …");
-        build_in_place(&dir, Path::new(&mf.cell.binary))?;
+        println!("🔨  Building '{}'...", mf.cell.name);
+        build_in_place(&dir, Path::new(&mf.cell.binary)).context("Build failed")?;
     }
 
-    // Spawn nucleus
-    let current_exe = std::env::current_exe()?;
-    let log_file = fs::File::create(run_dir.join("nucleus.log"))?;
+    // 3. SPAWN NUCLEUS
+    // The nucleus acts as the supervisor/parent process.
+    let current_exe = std::env::current_exe().context("Failed to get current executable path")?;
+    let log_file =
+        fs::File::create(run_dir.join("nucleus.log")).context("Failed to create nucleus.log")?;
+
     let mut cmd = Command::new(current_exe);
     cmd.arg("nucleus")
         .arg(&sock_path)
-        .arg(fs::canonicalize(&bin_path)?)
+        .arg(fs::canonicalize(&bin_path).context("Binary disappeared after build")?)
         .current_dir(&dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::from(log_file.try_clone()?));
+        .stderr(Stdio::from(
+            log_file.try_clone().context("Failed to clone log handle")?,
+        ));
 
-    let child = cmd.spawn().context("spawn nucleus failed")?;
+    // Inject Dependency Locations as Environment Variables.
+    // This allows the SDK macros to find peers at runtime without hardcoding paths.
+    for (dep_name, _) in &mf.deps {
+        // Cell-centric logic: Peers are siblings in the parent directory.
+        let parent = dir
+            .parent()
+            .ok_or_else(|| anyhow!("Cell root has no parent"))?;
+        let dep_sock = parent.join(dep_name).join("run/cell.sock");
+
+        // We pass the path even if it doesn't exist yet (it might start later),
+        // but canonicalize requires existence. So we pass absolute path if possible.
+        let env_key = format!("CELL_DEP_{}_SOCK", dep_name.to_uppercase());
+
+        // Try to canonicalize, otherwise construct absolute path manually if possible
+        if let Ok(abs) = dep_sock.canonicalize() {
+            cmd.env(&env_key, abs);
+        } else {
+            // Best effort absolute path if service isn't running yet
+            cmd.env(&env_key, dep_sock);
+        }
+    }
+
+    let child = cmd.spawn().context("Failed to spawn nucleus")?;
     fs::write(run_dir.join("pid"), child.id().to_string())?;
 
-    // Wait for socket
-    for _ in 0..50 {
+    // 4. WAIT FOR SOCKET
+    println!("🚀 Spawning {} (pid {})...", mf.cell.name, child.id());
+
+    let timeout = Duration::from_secs(5);
+    let start = std::time::Instant::now();
+
+    while start.elapsed() < timeout {
         if sock_path.exists() {
-            println!("✓ Started {} (pid {})", mf.cell.name, child.id());
-            // (Removed snapshot logic from here)
-            return Ok(());
+            // Validate connection
+            if UnixStream::connect(&sock_path).is_ok() {
+                println!("✓ Started {} successfully.", mf.cell.name);
+                return Ok(());
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    let stderr = fs::read_to_string(run_dir.join("nucleus.log"))?;
-    let last = stderr.lines().rev().take(20).collect::<Vec<_>>().join("\n");
-    bail!("nucleus failed to create socket:\n{}", last);
+    // If we timed out, read the log to show user what happened
+    let stderr = fs::read_to_string(run_dir.join("nucleus.log"))
+        .unwrap_or_else(|_| "Could not read nucleus.log".into());
+    let last_lines = stderr.lines().rev().take(10).collect::<Vec<_>>().join("\n");
+
+    bail!(
+        "Timed out waiting for socket at {}.\nNucleus Log:\n{}",
+        sock_path.display(),
+        last_lines
+    );
 }
 
-// ---------- AUTO-SNAPSHOT DEPENDENCIES ----------
+// ---------- DEPENDENCY SNAPSHOTTING ----------
 
 fn snapshot_dependencies(cell_dir: &Path, deps: &HashMap<String, String>) -> Result<()> {
     let schema_dir = cell_dir.join(".cell-schemas");
-    fs::create_dir_all(&schema_dir)?;
+    fs::create_dir_all(&schema_dir).context("Failed to create .cell-schemas dir")?;
 
     for (service_name, _version) in deps {
-        // Try to fetch schema from running service
-        match fetch_schema_from_running_service(service_name) {
+        // Logic: Assume workspace layout.
+        // Cell:  /workspace/my-cell
+        // Dep:   /workspace/dep-cell/run/cell.sock
+        let parent = cell_dir
+            .parent()
+            .ok_or_else(|| anyhow!("Cell has no parent directory"))?;
+        let sibling_sock = parent.join(service_name).join("run/cell.sock");
+
+        print!("   → Checking '{}' ... ", service_name);
+        let _ = std::io::stdout().flush();
+
+        match fetch_schema(&sibling_path_to_connect(&sibling_sock)) {
             Ok(schema_json) => {
                 let hash = blake3::hash(schema_json.as_bytes()).to_hex().to_string();
 
                 let schema_path = schema_dir.join(format!("{}.json", service_name));
                 let hash_path = schema_dir.join(format!("{}.hash", service_name));
 
-                // Only update if changed
                 let needs_update = match fs::read_to_string(&hash_path) {
                     Ok(existing_hash) => existing_hash.trim() != hash,
                     Err(_) => true,
@@ -174,173 +228,207 @@ fn snapshot_dependencies(cell_dir: &Path, deps: &HashMap<String, String>) -> Res
                 if needs_update {
                     fs::write(&schema_path, &schema_json)?;
                     fs::write(&hash_path, &hash)?;
-                    println!("   ✓ {} ({}...)", service_name, &hash[..8]);
+                    println!("✓ UPDATED");
                 } else {
-                    println!("   ✓ {} (unchanged)", service_name);
+                    println!("✓ OK (Cached)");
                 }
             }
             Err(e) => {
-                // Service not running - that's okay, snapshot might exist from before
+                // Fallback: Check if we have a cached snapshot to allow offline builds
                 let schema_path = schema_dir.join(format!("{}.json", service_name));
                 if schema_path.exists() {
-                    println!(
-                        "   → {} (using cached snapshot, service not running)",
-                        service_name
-                    );
+                    println!("⚠️  OFFLINE (Using cached snapshot)");
                 } else {
-                    eprintln!("   ⚠️  {} not running and no cached snapshot", service_name);
-                    eprintln!("       Start it with: cell run <path-to-{}>", service_name);
+                    println!("❌ FAILED");
+                    bail!(
+                        "Dependency '{}' is unreachable at {}\nError: {}",
+                        service_name,
+                        sibling_sock.display(),
+                        e
+                    );
                 }
             }
         }
     }
-
     Ok(())
 }
 
-fn fetch_schema_from_running_service(service_name: &str) -> Result<String> {
-    let sock_path = format!("/tmp/cell/sockets/{}.sock", service_name);
+/// Helper to handle path ownership for connect
+fn sibling_path_to_connect(p: &Path) -> PathBuf {
+    p.to_path_buf()
+}
 
-    let mut stream = UnixStream::connect(&sock_path)
-        .with_context(|| format!("service '{}' not running", service_name))?;
+fn fetch_schema(sock_path: &Path) -> Result<String> {
+    let mut stream = UnixStream::connect(sock_path).with_context(|| "Connection refused")?;
 
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
 
-    // Send __SCHEMA__ request
+    // Protocol: Send length-prefixed request
     let req = b"__SCHEMA__";
     stream.write_all(&(req.len() as u32).to_be_bytes())?;
     stream.write_all(req)?;
     stream.flush()?;
 
-    // Read response
+    // Read length-prefixed response
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
 
     if len > 10 * 1024 * 1024 {
-        bail!("schema too large: {} bytes", len);
+        bail!("Schema too large ({} bytes)", len);
     }
 
     let mut schema_bytes = vec![0u8; len];
     stream.read_exact(&mut schema_bytes)?;
 
-    String::from_utf8(schema_bytes).context("invalid UTF-8 in schema")
+    String::from_utf8(schema_bytes).context("Invalid UTF-8 in schema")
 }
 
-// ---------- STOP ----------
+// ---------- COMMAND: STOP ----------
 
 fn cmd_stop(dir: &Path) -> Result<()> {
     let pid_file = dir.join("run/pid");
     if !pid_file.exists() {
-        bail!("not running");
+        bail!("Not running (no pid file found)");
     }
-    let pid = fs::read_to_string(&pid_file)?.trim().parse::<i32>()?;
+
+    let pid_str = fs::read_to_string(&pid_file)?;
+    let pid = pid_str
+        .trim()
+        .parse::<i32>()
+        .context("Invalid PID file content")?;
+
     unsafe { libc::kill(pid, libc::SIGTERM) };
-    fs::remove_file(pid_file)?;
-    println!("✓ Stopped");
+
+    // Cleanup
+    let _ = fs::remove_file(pid_file);
+
+    // Try to remove socket too
+    let sock = dir.join("run/cell.sock");
+    if sock.exists() {
+        let _ = fs::remove_file(sock);
+    }
+
+    println!("✓ Stopped (pid {})", pid);
     Ok(())
 }
 
-// ---------- USE ----------
+// ---------- COMMAND: USE ----------
 
 fn cmd_use(dir: &Path, args: &str) -> Result<()> {
-    let _mf = read_manifest(dir)?;
     let sock = dir.join("run/cell.sock");
+    if !sock.exists() {
+        bail!("Socket not found at {}", sock.display());
+    }
+
     let req_json = if args == "-" {
         std::io::read_to_string(std::io::stdin())?
     } else {
         args.into()
     };
-    let resp = unix_rpc(&sock, &req_json)
-        .with_context(|| format!("cannot connect to socket {}", sock.display()))?;
-    println!("{}", resp);
+
+    // Simple one-off RPC client
+    let mut stream = UnixStream::connect(&sock)
+        .with_context(|| format!("Failed to connect to {}", sock.display()))?;
+
+    let req_bytes = req_json.as_bytes();
+    stream.write_all(&(req_bytes.len() as u32).to_be_bytes())?;
+    stream.write_all(req_bytes)?;
+    stream.flush()?;
+
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut resp_buf = vec![0u8; len];
+    stream.read_exact(&mut resp_buf)?;
+
+    println!("{}", String::from_utf8_lossy(&resp_buf));
     Ok(())
 }
 
-// ---------- BUILD ----------
+// ---------- BUILD SYSTEM ----------
 
 fn build_in_place(root: &Path, bin_rel: &Path) -> Result<()> {
     if root.join("Cargo.toml").exists() {
-        println!("   Building Rust project …");
-
-        let workspace_root = find_workspace_root(root)?;
-        let is_workspace_member = workspace_root != root;
-
-        if is_workspace_member {
-            let package_name = extract_package_name(root)?;
-            println!("   Detected workspace member: {}", package_name);
-            println!(
-                "   Building from workspace root: {}",
-                workspace_root.display()
-            );
-
-            run_command(
-                Command::new("cargo")
-                    .args(&["build", "--release", "-p", &package_name])
-                    .current_dir(&workspace_root)
-                    .stdout(Stdio::null()),
-                &format!("cargo build --release -p {}", package_name),
-            )?;
-
-            let name = bin_rel
-                .file_name()
-                .ok_or_else(|| anyhow!("binary path has no file name"))?;
-            let cargo_out = workspace_root.join("target/release").join(name);
-            let wanted = root.join(bin_rel);
-
-            if !cargo_out.exists() {
-                bail!("cargo succeeded but {} not found", cargo_out.display());
-            }
-            fs::create_dir_all(wanted.parent().unwrap())?;
-            fs::copy(&cargo_out, &wanted)?;
-            println!("   Copied {} → {}", cargo_out.display(), wanted.display());
-        } else {
-            run_command(
-                Command::new("cargo")
-                    .args(&["build", "--release"])
-                    .current_dir(root)
-                    .stdout(Stdio::null()),
-                "cargo build --release",
-            )?;
-            let name = bin_rel
-                .file_name()
-                .ok_or_else(|| anyhow!("binary path has no file name"))?;
-            let cargo_out = root.join("target/release").join(name);
-            let wanted = root.join(bin_rel);
-            if !cargo_out.exists() {
-                bail!("cargo succeeded but {} not found", cargo_out.display());
-            }
-            fs::create_dir_all(wanted.parent().unwrap())?;
-            fs::copy(&cargo_out, &wanted)?;
-            println!("   Copied {} → {}", cargo_out.display(), wanted.display());
-        }
+        build_cargo(root, bin_rel)
     } else if root.join("Makefile").exists() {
         println!("   Building with Makefile …");
-        run_command(Command::new("make").current_dir(root), "make")?
+        run_command(Command::new("make").current_dir(root), "make")
     } else if root.join("build.sh").exists() {
         println!("   Running build.sh …");
-        run_command(Command::new("./build.sh").current_dir(root), "./build.sh")?
+        run_command(Command::new("./build.sh").current_dir(root), "./build.sh")
     } else {
-        bail!("no build recipe (Cargo.toml, Makefile, build.sh)")
+        bail!("No build recipe found (Cargo.toml, Makefile, or build.sh)")
     }
+}
+
+fn build_cargo(root: &Path, bin_rel: &Path) -> Result<()> {
+    println!("   Running cargo build --release...");
+
+    // Heuristic: Detect if we are inside a workspace
+    let workspace_root = find_workspace_root(root)?;
+    let is_member = workspace_root != root;
+
+    // If it's a member, we should ideally run from workspace root with -p <pkg>
+    // This prevents locking contention on target/ dir
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build").arg("--release");
+
+    if is_member {
+        let pkg_name = extract_package_name(root)?;
+        cmd.arg("-p").arg(&pkg_name);
+        cmd.current_dir(&workspace_root);
+    } else {
+        cmd.current_dir(root);
+    }
+
+    cmd.stdout(Stdio::null()); // Silence standard output
+
+    let status = cmd.status().context("Failed to execute cargo")?;
+    if !status.success() {
+        bail!("Cargo build failed");
+    }
+
+    // Locate the artifact.
+    // It could be in <ws_root>/target/release or <root>/target/release
+    let bin_name = bin_rel
+        .file_name()
+        .ok_or_else(|| anyhow!("Invalid binary name"))?;
+
+    let possible_paths = vec![
+        root.join("target/release").join(bin_name),
+        workspace_root.join("target/release").join(bin_name),
+    ];
+
+    let src = possible_paths.iter().find(|p| p.exists()).ok_or_else(|| {
+        anyhow!(
+            "Cargo succeeded, but binary not found. Checked: {:?}",
+            possible_paths
+        )
+    })?;
+
+    let dst = root.join(bin_rel);
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::copy(src, &dst).context("Failed to copy binary to destination")?;
+    println!("   Artifact ready: {}", dst.display());
     Ok(())
 }
 
-// ---------- WORKSPACE DETECTION ----------
+// ---------- UTILS ----------
 
 fn find_workspace_root(start: &Path) -> Result<PathBuf> {
     let mut current = start.canonicalize()?;
-
     loop {
         if let Some(parent) = current.parent() {
-            let parent_cargo = parent.join("Cargo.toml");
-            if parent_cargo.exists() {
-                let content = fs::read_to_string(&parent_cargo)
-                    .context("failed to read parent Cargo.toml")?;
+            let cargo = parent.join("Cargo.toml");
+            if cargo.exists() {
+                let content = fs::read_to_string(&cargo).unwrap_or_default();
                 if content.contains("[workspace]") {
-                    if is_workspace_member(parent, &start.canonicalize()?)? {
-                        return Ok(parent.to_path_buf());
-                    }
+                    return Ok(parent.to_path_buf());
                 }
             }
             current = parent.to_path_buf();
@@ -348,93 +436,37 @@ fn find_workspace_root(start: &Path) -> Result<PathBuf> {
             break;
         }
     }
-
     Ok(start.to_path_buf())
 }
 
-fn is_workspace_member(workspace_root: &Path, member_path: &Path) -> Result<bool> {
-    let cargo_toml = workspace_root.join("Cargo.toml");
-    let content = fs::read_to_string(&cargo_toml)?;
-
-    let cargo: toml::Value = toml::from_str(&content)?;
-    if let Some(workspace) = cargo.get("workspace") {
-        if let Some(members) = workspace.get("members") {
-            if let Some(members_array) = members.as_array() {
-                let member_canonical = member_path.canonicalize()?;
-
-                for member in members_array {
-                    if let Some(member_str) = member.as_str() {
-                        let member_full_path = workspace_root.join(member_str).canonicalize().ok();
-
-                        if member_full_path == Some(member_canonical.clone()) {
-                            return Ok(true);
-                        }
-
-                        if member_str.contains('*') {
-                            let pattern = member_str.replace('*', "");
-                            if let Ok(member_parent) = workspace_root
-                                .join(pattern.trim_end_matches('/'))
-                                .canonicalize()
-                            {
-                                if member_canonical.starts_with(&member_parent) {
-                                    return Ok(true);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(false)
-}
-
 fn extract_package_name(root: &Path) -> Result<String> {
-    let cargo_toml = root.join("Cargo.toml");
-    let content = fs::read_to_string(&cargo_toml)?;
+    let content = fs::read_to_string(root.join("Cargo.toml"))?;
     let cargo: toml::Value = toml::from_str(&content)?;
-
     cargo
         .get("package")
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| anyhow!("No package.name found in Cargo.toml"))
+        .ok_or_else(|| anyhow!("Could not determine package name"))
 }
 
-// ---------- UTILS ----------
-
 fn read_manifest(dir: &Path) -> Result<CellManifest> {
-    let txt = fs::read_to_string(dir.join("cell.toml"))?;
-    toml::from_str(&txt).context("bad cell.toml")
+    let txt = fs::read_to_string(dir.join("cell.toml"))
+        .with_context(|| format!("Could not read cell.toml in {}", dir.display()))?;
+    toml::from_str(&txt).context("Invalid TOML in cell.toml")
 }
 
 fn run_command(cmd: &mut Command, desc: &str) -> Result<()> {
-    println!("   > {}", format!("{:?}", cmd).replace('"', ""));
     let status = cmd
         .status()
-        .with_context(|| format!("Failed to execute: {}", desc))?;
+        .with_context(|| format!("Failed to start: {}", desc))?;
     if !status.success() {
-        bail!("Command failed with status {}: {}", status, desc);
+        bail!("{} failed with exit code: {}", desc, status);
     }
     Ok(())
 }
 
-fn unix_rpc(sock: &Path, req: &str) -> Result<String> {
-    let mut s = UnixStream::connect(sock)?;
-    let req = req.as_bytes();
-    s.write_all(&(req.len() as u32).to_be_bytes())?;
-    s.write_all(req)?;
-    s.flush()?;
-    let mut len_buf = [0u8; 4];
-    s.read_exact(&mut len_buf)?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; len];
-    s.read_exact(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
-
 fn cmd_gc() -> Result<()> {
+    println!("Garbage collection not implemented in MVP.");
     Ok(())
 }
