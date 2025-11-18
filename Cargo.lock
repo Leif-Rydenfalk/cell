@@ -124,12 +124,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "cell-macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f9c651ca57e21bcae0df1703af24b5d9aecdc54a37b341dc2adc6922fa4ff2c"
+dependencies = [
+ "blake3",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
 name = "cell-sdk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
- "cell-macros",
+ "cell-macros 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
 ]
