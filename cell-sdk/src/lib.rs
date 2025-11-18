@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 pub use cell_macros::{call_as, service_schema};
-// Re-export rkyv so macros can use ::cell_sdk::rkyv
 pub use rkyv;
+
+// --- Connection Pooling (Legacy / Easy Mode) ---
 
 thread_local! {
     static CONNECTION_POOL: RefCell<HashMap<String, UnixStream>> = RefCell::new(HashMap::new());
@@ -50,12 +51,50 @@ pub fn invoke_rpc(_service_name: &str, socket_path: &str, payload: &[u8]) -> Res
     Ok(resp)
 }
 
+// --- Direct Client (High Performance Mode) ---
+
+/// A persistent connection handle to a specific cell service.
+/// Bypasses the thread-local connection pool for maximum throughput.
+pub struct CellClient {
+    stream: UnixStream,
+}
+
+impl CellClient {
+    /// Connects to a service given its socket path.
+    pub fn connect(socket_path: &str) -> Result<Self> {
+        let stream = connect_new(socket_path)?;
+        Ok(Self { stream })
+    }
+
+    /// Connects to a named service using standard environment variable discovery.
+    pub fn connect_to_service(service_name: &str) -> Result<Self> {
+        let path = resolve_socket_path(service_name);
+        Self::connect(&path)
+    }
+
+    /// Sends a payload and waits for a response.
+    pub fn call(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
+        send_request(&mut self.stream, payload)?;
+        read_response(&mut self.stream).map_err(|e| e.into())
+    }
+}
+
+// --- Helpers ---
+
+/// Resolves the socket path for a dependency.
+/// Looks for CELL_DEP_<NAME>_SOCK, defaults to ../<name>/run/cell.sock
+pub fn resolve_socket_path(service_name: &str) -> String {
+    let env_key = format!("CELL_DEP_{}_SOCK", service_name.to_uppercase());
+    std::env::var(&env_key).unwrap_or_else(|_| format!("../{}/run/cell.sock", service_name))
+}
+
 fn connect_new(path: &str) -> Result<UnixStream> {
     let stream = UnixStream::connect(path).with_context(|| format!("Connect to {}", path))?;
     stream
         .set_nonblocking(false)
         .context("Failed to set blocking mode")?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    // Set a generous timeout so long benchmarks don't crash on a hiccup
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(60)))?;
     Ok(stream)
 }
 
@@ -73,6 +112,8 @@ fn read_response(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
     stream.read_exact(&mut buf)?;
     Ok(buf)
 }
+
+// --- Server Logic ---
 
 pub fn run_service_with_schema<F>(service_name: &str, schema_json: &str, handler: F) -> Result<()>
 where
