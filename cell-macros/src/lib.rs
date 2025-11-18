@@ -19,11 +19,18 @@ pub fn service_schema(input: TokenStream) -> TokenStream {
     let schema_json = generate_schema_json(&schema);
     let schema_hash = blake3::hash(schema_json.as_bytes()).to_hex().to_string();
 
+    // FIX: Added ::serde::Serialize and ::serde::Deserialize
     let expanded = quote! {
-        #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+        #[derive(::serde::Serialize, ::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
+        #[archive(check_bytes)]
+        #[archive_attr(derive(Debug))]
         pub struct #req_name { #(pub #req_fields),* }
-        #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+
+        #[derive(::serde::Serialize, ::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
+        #[archive(check_bytes)]
+        #[archive_attr(derive(Debug))]
         pub struct #resp_name { #(pub #resp_fields),* }
+
         #[doc(hidden)]
         pub const __CELL_SCHEMA__: &str = #schema_json;
         #[doc(hidden)]
@@ -58,6 +65,8 @@ pub fn call_as(input: TokenStream) -> TokenStream {
                 #resp_struct
 
                 (|| -> ::anyhow::Result<#resp_type> {
+                    use ::cell_sdk::rkyv::Deserialize;
+
                     let env_key = format!("CELL_DEP_{}_SOCK", #service_lit.to_uppercase());
                     let sock_path = match ::std::env::var(&env_key) {
                         Ok(p) => p,
@@ -65,11 +74,19 @@ pub fn call_as(input: TokenStream) -> TokenStream {
                     };
 
                     let request: #req_type = #request;
-                    let payload = ::bincode::serialize(&request).map_err(|e| ::anyhow::anyhow!("Serialize error: {}", e))?;
+
+                    let payload = ::cell_sdk::rkyv::to_bytes::<_, 1024>(&request)
+                        .map_err(|e| ::anyhow::anyhow!("Rkyv serialize error: {}", e))?;
 
                     let response_bytes = ::cell_sdk::invoke_rpc(#service_lit, &sock_path, &payload)?;
 
-                    ::bincode::deserialize(&response_bytes).map_err(|e| ::anyhow::anyhow!("Deserialize error: {}", e))
+                    let archived = ::cell_sdk::rkyv::check_archived_root::<#resp_type>(&response_bytes)
+                        .map_err(|e| ::anyhow::anyhow!("Rkyv validation error: {}", e))?;
+
+                    let deserialized: #resp_type = archived.deserialize(&mut ::cell_sdk::rkyv::Infallible)
+                         .map_err(|e| ::anyhow::anyhow!("Rkyv deserialize error: {}", e))?;
+
+                    Ok(deserialized)
                 })()
             }};
             TokenStream::from(expanded)
@@ -117,12 +134,16 @@ fn parse_and_generate_types(
 
     let req_struct = quote! {
         #[allow(non_camel_case_types, dead_code)]
-        #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone)]
+        #[derive(::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
+        #[archive(check_bytes)]
+        #[archive_attr(derive(Debug))]
         struct #req_ident { #(#req_fields),* }
     };
     let resp_struct = quote! {
         #[allow(non_camel_case_types, dead_code)]
-        #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone)]
+        #[derive(::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
+        #[archive(check_bytes)]
+        #[archive_attr(derive(Debug))]
         struct #resp_ident { #(#resp_fields),* }
     };
     Ok((

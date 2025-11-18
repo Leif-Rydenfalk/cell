@@ -1,4 +1,4 @@
-//! cell-sdk – Biological-cell RPC framework (Bincode Binary Protocol)
+//! cell-sdk – Biological-cell RPC framework (Rkyv Binary Protocol)
 
 use anyhow::{bail, Context, Result};
 use std::cell::RefCell;
@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 pub use cell_macros::{call_as, service_schema};
+// Re-export rkyv so macros can use ::cell_sdk::rkyv
+pub use rkyv;
 
 thread_local! {
     static CONNECTION_POOL: RefCell<HashMap<String, UnixStream>> = RefCell::new(HashMap::new());
