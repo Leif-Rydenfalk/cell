@@ -117,16 +117,27 @@ fn cmd_run(dir: &Path) -> Result<()> {
     let mut child = cmd.spawn().context("spawn nucleus failed")?;
 
     // 3.  wait until socket appears (or die with stderr)
-    for _ in 0..50 {
+    for i in 0..50 {
         if sock_path.exists() {
-            println!("✓ Started {} (nucleus pid {})", mf.cell.name, child.id());
-            return Ok(());
+            if i > 0 {
+                // require *at least one* retry
+                println!("✓ Started {} (nucleus pid {})", mf.cell.name, child.id());
+                return Ok(());
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let _ = child.kill();
     let stderr = fs::read_to_string(run_dir.join("nucleus.log"))?;
-    bail!("nucleus failed to create socket:\n{}", stderr)
+    let last = stderr
+        .lines()
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    bail!("nucleus failed to create socket:\n{}", last);
 }
 
 // ---------- STOP ----------
