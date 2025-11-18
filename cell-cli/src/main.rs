@@ -92,9 +92,9 @@ fn main() -> Result<()> {
     }
 }
 
-/// Run = 1. build if missing  2. spawn nucleus  3. nucleus execs real binary
+// ---------- RUN ----------
+
 fn cmd_run(dir: &Path) -> Result<()> {
-    // Canonicalize the directory path first
     let dir = dir
         .canonicalize()
         .with_context(|| format!("directory not found: {}", dir.display()))?;
@@ -106,13 +106,22 @@ fn cmd_run(dir: &Path) -> Result<()> {
 
     fs::create_dir_all(&run_dir)?;
 
-    // 1. guarantee executable (build if missing)
+    // This ensures the schemas exist so the macros can read them during compilation.
+    if !mf.deps.is_empty() {
+        println!("📸 Snapshotting dependencies...");
+        if let Err(e) = snapshot_dependencies(&dir, &mf.deps) {
+            eprintln!("   ⚠️  Warning: failed to snapshot dependencies: {}", e);
+            eprintln!("   (Make sure 'worker' and 'aggregator' are running first!)");
+        }
+    }
+
+    // Build if binary missing
     if !bin_path.is_file() {
         println!("🔨  Building …");
         build_in_place(&dir, Path::new(&mf.cell.binary))?;
     }
 
-    // 2. spawn nucleus (same binary, sub-command)
+    // Spawn nucleus
     let current_exe = std::env::current_exe()?;
     let log_file = fs::File::create(run_dir.join("nucleus.log"))?;
     let mut cmd = Command::new(current_exe);
@@ -126,10 +135,11 @@ fn cmd_run(dir: &Path) -> Result<()> {
     let child = cmd.spawn().context("spawn nucleus failed")?;
     fs::write(run_dir.join("pid"), child.id().to_string())?;
 
-    // 3. wait until socket appears (or die with stderr)
+    // Wait for socket
     for _ in 0..50 {
         if sock_path.exists() {
             println!("✓ Started {} (pid {})", mf.cell.name, child.id());
+            // (Removed snapshot logic from here)
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -140,7 +150,85 @@ fn cmd_run(dir: &Path) -> Result<()> {
     bail!("nucleus failed to create socket:\n{}", last);
 }
 
+// ---------- AUTO-SNAPSHOT DEPENDENCIES ----------
+
+fn snapshot_dependencies(cell_dir: &Path, deps: &HashMap<String, String>) -> Result<()> {
+    let schema_dir = cell_dir.join(".cell-schemas");
+    fs::create_dir_all(&schema_dir)?;
+
+    for (service_name, _version) in deps {
+        // Try to fetch schema from running service
+        match fetch_schema_from_running_service(service_name) {
+            Ok(schema_json) => {
+                let hash = blake3::hash(schema_json.as_bytes()).to_hex().to_string();
+
+                let schema_path = schema_dir.join(format!("{}.json", service_name));
+                let hash_path = schema_dir.join(format!("{}.hash", service_name));
+
+                // Only update if changed
+                let needs_update = match fs::read_to_string(&hash_path) {
+                    Ok(existing_hash) => existing_hash.trim() != hash,
+                    Err(_) => true,
+                };
+
+                if needs_update {
+                    fs::write(&schema_path, &schema_json)?;
+                    fs::write(&hash_path, &hash)?;
+                    println!("   ✓ {} ({}...)", service_name, &hash[..8]);
+                } else {
+                    println!("   ✓ {} (unchanged)", service_name);
+                }
+            }
+            Err(e) => {
+                // Service not running - that's okay, snapshot might exist from before
+                let schema_path = schema_dir.join(format!("{}.json", service_name));
+                if schema_path.exists() {
+                    println!(
+                        "   → {} (using cached snapshot, service not running)",
+                        service_name
+                    );
+                } else {
+                    eprintln!("   ⚠️  {} not running and no cached snapshot", service_name);
+                    eprintln!("       Start it with: cell run <path-to-{}>", service_name);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn fetch_schema_from_running_service(service_name: &str) -> Result<String> {
+    let sock_path = format!("/tmp/cell/sockets/{}.sock", service_name);
+
+    let mut stream = UnixStream::connect(&sock_path)
+        .with_context(|| format!("service '{}' not running", service_name))?;
+
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+    // Send __SCHEMA__ request
+    let req = b"__SCHEMA__";
+    stream.write_all(&(req.len() as u32).to_be_bytes())?;
+    stream.write_all(req)?;
+    stream.flush()?;
+
+    // Read response
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    if len > 10 * 1024 * 1024 {
+        bail!("schema too large: {} bytes", len);
+    }
+
+    let mut schema_bytes = vec![0u8; len];
+    stream.read_exact(&mut schema_bytes)?;
+
+    String::from_utf8(schema_bytes).context("invalid UTF-8 in schema")
+}
+
 // ---------- STOP ----------
+
 fn cmd_stop(dir: &Path) -> Result<()> {
     let pid_file = dir.join("run/pid");
     if !pid_file.exists() {
@@ -154,8 +242,9 @@ fn cmd_stop(dir: &Path) -> Result<()> {
 }
 
 // ---------- USE ----------
+
 fn cmd_use(dir: &Path, args: &str) -> Result<()> {
-    let _mf = read_manifest(dir)?; // ensure dir is a cell
+    let _mf = read_manifest(dir)?;
     let sock = dir.join("run/cell.sock");
     let req_json = if args == "-" {
         std::io::read_to_string(std::io::stdin())?
@@ -169,16 +258,15 @@ fn cmd_use(dir: &Path, args: &str) -> Result<()> {
 }
 
 // ---------- BUILD ----------
+
 fn build_in_place(root: &Path, bin_rel: &Path) -> Result<()> {
     if root.join("Cargo.toml").exists() {
         println!("   Building Rust project …");
 
-        // Check if we're in a workspace
         let workspace_root = find_workspace_root(root)?;
         let is_workspace_member = workspace_root != root;
 
         if is_workspace_member {
-            // Build from workspace root with package filter
             let package_name = extract_package_name(root)?;
             println!("   Detected workspace member: {}", package_name);
             println!(
@@ -194,7 +282,6 @@ fn build_in_place(root: &Path, bin_rel: &Path) -> Result<()> {
                 &format!("cargo build --release -p {}", package_name),
             )?;
 
-            // Find the binary in workspace target directory
             let name = bin_rel
                 .file_name()
                 .ok_or_else(|| anyhow!("binary path has no file name"))?;
@@ -208,7 +295,6 @@ fn build_in_place(root: &Path, bin_rel: &Path) -> Result<()> {
             fs::copy(&cargo_out, &wanted)?;
             println!("   Copied {} → {}", cargo_out.display(), wanted.display());
         } else {
-            // Regular standalone crate
             run_command(
                 Command::new("cargo")
                     .args(&["build", "--release"])
@@ -245,16 +331,13 @@ fn build_in_place(root: &Path, bin_rel: &Path) -> Result<()> {
 fn find_workspace_root(start: &Path) -> Result<PathBuf> {
     let mut current = start.canonicalize()?;
 
-    // Walk up the directory tree looking for a workspace root
     loop {
-        // Check parent for workspace
         if let Some(parent) = current.parent() {
             let parent_cargo = parent.join("Cargo.toml");
             if parent_cargo.exists() {
                 let content = fs::read_to_string(&parent_cargo)
                     .context("failed to read parent Cargo.toml")?;
                 if content.contains("[workspace]") {
-                    // Verify we're a member
                     if is_workspace_member(parent, &start.canonicalize()?)? {
                         return Ok(parent.to_path_buf());
                     }
@@ -266,7 +349,6 @@ fn find_workspace_root(start: &Path) -> Result<PathBuf> {
         }
     }
 
-    // Not in a workspace, return the starting directory
     Ok(start.to_path_buf())
 }
 
@@ -274,7 +356,6 @@ fn is_workspace_member(workspace_root: &Path, member_path: &Path) -> Result<bool
     let cargo_toml = workspace_root.join("Cargo.toml");
     let content = fs::read_to_string(&cargo_toml)?;
 
-    // Parse the workspace members
     let cargo: toml::Value = toml::from_str(&content)?;
     if let Some(workspace) = cargo.get("workspace") {
         if let Some(members) = workspace.get("members") {
@@ -285,12 +366,10 @@ fn is_workspace_member(workspace_root: &Path, member_path: &Path) -> Result<bool
                     if let Some(member_str) = member.as_str() {
                         let member_full_path = workspace_root.join(member_str).canonicalize().ok();
 
-                        // Direct match
                         if member_full_path == Some(member_canonical.clone()) {
                             return Ok(true);
                         }
 
-                        // Handle wildcards like "examples/*"
                         if member_str.contains('*') {
                             let pattern = member_str.replace('*', "");
                             if let Ok(member_parent) = workspace_root
@@ -325,6 +404,7 @@ fn extract_package_name(root: &Path) -> Result<String> {
 }
 
 // ---------- UTILS ----------
+
 fn read_manifest(dir: &Path) -> Result<CellManifest> {
     let txt = fs::read_to_string(dir.join("cell.toml"))?;
     toml::from_str(&txt).context("bad cell.toml")

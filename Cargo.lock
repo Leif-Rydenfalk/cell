@@ -104,6 +104,7 @@ name = "cell-cli"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "blake3",
  "clap",
  "dirs",
  "humantime",
@@ -111,19 +112,6 @@ dependencies = [
  "serde",
  "toml",
  "walkdir",
-]
-
-[[package]]
-name = "cell-macros"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f9c651ca57e21bcae0df1703af24b5d9aecdc54a37b341dc2adc6922fa4ff2c"
-dependencies = [
- "blake3",
- "proc-macro2",
- "quote",
- "serde_json",
- "syn",
 ]
 
 [[package]]
@@ -143,7 +131,7 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake3",
- "cell-macros 0.1.0",
+ "cell-macros",
  "humantime",
  "lazy_static",
  "serde",

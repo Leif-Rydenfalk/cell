@@ -17,7 +17,7 @@ humantime = "2.1"
 lazy_static = "1.4"
 blake3 = { version = "1.5", optional = true }
 
-cell-macros = "0.1"
+cell-macros = { version = "0.1.1", path = "../cell-macros" }
 
 [features]
 default = []

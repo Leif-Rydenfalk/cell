@@ -1,11 +1,10 @@
-//! cell-macros  –  Procedural macros for cell-sdk  (0.1.2)
+//! cell-macros – Procedural macros for cell-sdk (SQLx-style snapshots)
 
 extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::quote;
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::fs;
+use std::path::PathBuf;
 use syn::parse::{Parse, ParseStream};
 use syn::{braced, parse_macro_input, Expr, Field, Ident, Token, Type};
 
@@ -42,72 +41,124 @@ pub fn call_as(input: TokenStream) -> TokenStream {
     let CallArgs { service, request } = parse_macro_input!(input as CallArgs);
     let service_lit = service.to_string();
 
-    // Try to fetch schema at compile time
-    // Note: This happens during macro expansion, which is part of the compilation process
-    let schema_result = fetch_schema_compile_time(&service_lit);
-
-    match schema_result {
-        Ok(schema_json) => {
-            // Generate types from schema
-            match parse_and_generate_types(&schema_json) {
-                Ok((req_struct, resp_struct, req_type, resp_type)) => {
-                    let expanded = quote! {{
-                        // Generated types from fetched schema
-                        #req_struct
-                        #resp_struct
-
-                        (|| -> ::anyhow::Result<#resp_type> {
-                            use ::std::io::{Read, Write};
-                            let sock_path = format!("/tmp/cell/sockets/{}.sock", #service_lit);
-                            let mut stream = ::std::os::unix::net::UnixStream::connect(&sock_path)
-                                .map_err(|e| ::anyhow::anyhow!("cannot connect to {}: {}", #service_lit, e))?;
-
-                            // The request expression should create an instance of the generated type
-                            let request: #req_type = #request;
-                            let json = ::serde_json::to_vec(&request)
-                                .map_err(|e| ::anyhow::anyhow!("serialize error: {}", e))?;
-
-                            stream.write_all(&(json.len() as u32).to_be_bytes())
-                                .map_err(|e| ::anyhow::anyhow!("write length error: {}", e))?;
-                            stream.write_all(&json)
-                                .map_err(|e| ::anyhow::anyhow!("write error: {}", e))?;
-                            stream.flush()
-                                .map_err(|e| ::anyhow::anyhow!("flush error: {}", e))?;
-
-                            let mut len_buf = [0u8; 4];
-                            stream.read_exact(&mut len_buf)
-                                .map_err(|e| ::anyhow::anyhow!("read length error: {}", e))?;
-                            let len = u32::from_be_bytes(len_buf) as usize;
-                            let mut resp_buf = vec![0u8; len];
-                            stream.read_exact(&mut resp_buf)
-                                .map_err(|e| ::anyhow::anyhow!("read response error: {}", e))?;
-
-                            ::serde_json::from_slice(&resp_buf)
-                                .map_err(|e| ::anyhow::anyhow!("deserialize error: {}", e))
-                        })()
-                    }};
-                    TokenStream::from(expanded)
-                }
-                Err(e) => {
-                    let err_msg = format!("Failed to parse schema for '{}': {}", service_lit, e);
-                    TokenStream::from(quote! {
-                        compile_error!(#err_msg)
-                    })
-                }
-            }
+    // Read schema snapshot from caller's .cell-schemas directory
+    let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
+        Ok(dir) => dir,
+        Err(_) => {
+            let err_msg = "CARGO_MANIFEST_DIR not set";
+            return TokenStream::from(quote! {
+                compile_error!(#err_msg)
+            });
         }
-        Err(e) => {
-            // Service not running - produce helpful error
+    };
+
+    let schema_dir = PathBuf::from(&manifest_dir).join(".cell-schemas");
+    let schema_path = schema_dir.join(format!("{}.json", service_lit));
+    let hash_path = schema_dir.join(format!("{}.hash", service_lit));
+
+    // Try to read snapshot
+    let schema_json = match fs::read_to_string(&schema_path) {
+        Ok(content) => content,
+        Err(_) => {
             let err_msg = format!(
-                "Cannot fetch schema for service '{}' at compile time: {}\n\
+                "Missing schema snapshot for service '{}'.\n\
+                 \n\
+                 The snapshot should be in: .cell-schemas/{}.json\n\
                  \n\
                  To fix this:\n\
-                 1. Start the '{}' service: cell run <path-to-{}>\n\
-                 2. Then rebuild this crate\n\
+                 1. Start the dependency: cell run <path-to-{}>\n\
+                 2. Build this cell: cell run .\n\
+                    (The CLI will auto-snapshot dependencies)\n\
                  \n\
-                 Make sure all dependency services are running before compiling.",
-                service_lit, e, service_lit, service_lit
+                 Or if the service is already running:\n\
+                 - Ensure cell.toml has: [deps]\n\
+                 - Ensure it lists: {} = \"0.1\"\n\
+                 - Run: cell run .\n\
+                 \n\
+                 The snapshot enables offline/hermetic builds (like SQLx).",
+                service_lit, service_lit, service_lit, service_lit
             );
+            return TokenStream::from(quote! {
+                compile_error!(#err_msg)
+            });
+        }
+    };
+
+    // Verify hash for drift detection
+    let current_hash = compute_hash(&schema_json);
+    match fs::read_to_string(&hash_path) {
+        Ok(saved_hash) => {
+            if saved_hash.trim() != current_hash {
+                let err_msg = format!(
+                    "Schema drift detected for service '{}'!\n\
+                     \n\
+                     Expected hash: {}\n\
+                     Actual hash:   {}\n\
+                     \n\
+                     The cached schema doesn't match the service's current schema.\n\
+                     This means the service definition changed but the snapshot is stale.\n\
+                     \n\
+                     To fix:\n\
+                     1. Start the updated service: cell run <path-to-{}>\n\
+                     2. Rebuild this cell: cell run .\n\
+                     \n\
+                     The CLI will automatically refresh the snapshot.",
+                    service_lit,
+                    saved_hash.trim(),
+                    current_hash,
+                    service_lit
+                );
+                return TokenStream::from(quote! {
+                    compile_error!(#err_msg)
+                });
+            }
+        }
+        Err(_) => {
+            // Hash file missing - create it (first time)
+            let _ = fs::write(&hash_path, &current_hash);
+        }
+    }
+
+    // Generate types from schema
+    match parse_and_generate_types(&schema_json) {
+        Ok((req_struct, resp_struct, req_type, resp_type)) => {
+            let expanded = quote! {{
+                #req_struct
+                #resp_struct
+
+                (|| -> ::anyhow::Result<#resp_type> {
+                    use ::std::io::{Read, Write};
+                    let sock_path = format!("/tmp/cell/sockets/{}.sock", #service_lit);
+                    let mut stream = ::std::os::unix::net::UnixStream::connect(&sock_path)
+                        .map_err(|e| ::anyhow::anyhow!("cannot connect to {}: {}", #service_lit, e))?;
+
+                    let request: #req_type = #request;
+                    let json = ::serde_json::to_vec(&request)
+                        .map_err(|e| ::anyhow::anyhow!("serialize error: {}", e))?;
+
+                    stream.write_all(&(json.len() as u32).to_be_bytes())
+                        .map_err(|e| ::anyhow::anyhow!("write length error: {}", e))?;
+                    stream.write_all(&json)
+                        .map_err(|e| ::anyhow::anyhow!("write error: {}", e))?;
+                    stream.flush()
+                        .map_err(|e| ::anyhow::anyhow!("flush error: {}", e))?;
+
+                    let mut len_buf = [0u8; 4];
+                    stream.read_exact(&mut len_buf)
+                        .map_err(|e| ::anyhow::anyhow!("read length error: {}", e))?;
+                    let len = u32::from_be_bytes(len_buf) as usize;
+                    let mut resp_buf = vec![0u8; len];
+                    stream.read_exact(&mut resp_buf)
+                        .map_err(|e| ::anyhow::anyhow!("read response error: {}", e))?;
+
+                    ::serde_json::from_slice(&resp_buf)
+                        .map_err(|e| ::anyhow::anyhow!("deserialize error: {}", e))
+                })()
+            }};
+            TokenStream::from(expanded)
+        }
+        Err(e) => {
+            let err_msg = format!("Failed to parse schema for '{}': {}", service_lit, e);
             TokenStream::from(quote! {
                 compile_error!(#err_msg)
             })
@@ -115,53 +166,7 @@ pub fn call_as(input: TokenStream) -> TokenStream {
     }
 }
 
-// ---------- Compile-time schema fetching ----------
-
-fn fetch_schema_compile_time(service: &str) -> Result<String, String> {
-    let sock_path = format!("/tmp/cell/sockets/{}.sock", service);
-
-    let mut stream = match UnixStream::connect(&sock_path) {
-        Ok(s) => s,
-        Err(e) => return Err(format!("service not running (connect failed): {}", e)),
-    };
-
-    if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(2))) {
-        return Err(format!("set timeout failed: {}", e));
-    }
-
-    // Send schema request
-    let req = b"__SCHEMA__";
-    if let Err(e) = stream.write_all(&(req.len() as u32).to_be_bytes()) {
-        return Err(format!("write length failed: {}", e));
-    }
-    if let Err(e) = stream.write_all(req) {
-        return Err(format!("write request failed: {}", e));
-    }
-    if let Err(e) = stream.flush() {
-        return Err(format!("flush failed: {}", e));
-    }
-
-    // Read schema response
-    let mut len_buf = [0u8; 4];
-    if let Err(e) = stream.read_exact(&mut len_buf) {
-        return Err(format!("read length failed: {}", e));
-    }
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    if len > 10 * 1024 * 1024 {
-        return Err("schema too large (>10MB)".to_string());
-    }
-
-    let mut schema_bytes = vec![0u8; len];
-    if let Err(e) = stream.read_exact(&mut schema_bytes) {
-        return Err(format!("read schema body failed: {}", e));
-    }
-
-    match String::from_utf8(schema_bytes) {
-        Ok(s) => Ok(s),
-        Err(e) => Err(format!("invalid UTF-8 in schema: {}", e)),
-    }
-}
+// ---------- Type generation ----------
 
 fn parse_and_generate_types(
     schema_json: &str,
@@ -177,7 +182,6 @@ fn parse_and_generate_types(
     let schema: serde_json::Value =
         serde_json::from_str(schema_json).map_err(|e| format!("invalid JSON: {}", e))?;
 
-    // Extract request info
     let req_name_str = schema["request"]["name"]
         .as_str()
         .ok_or("missing request.name")?;
@@ -185,7 +189,6 @@ fn parse_and_generate_types(
         .as_array()
         .ok_or("missing request.fields")?;
 
-    // Extract response info
     let resp_name_str = schema["response"]["name"]
         .as_str()
         .ok_or("missing response.name")?;
@@ -193,11 +196,9 @@ fn parse_and_generate_types(
         .as_array()
         .ok_or("missing response.fields")?;
 
-    // Parse type names
     let req_type_ident = syn::Ident::new(req_name_str, proc_macro2::Span::call_site());
     let resp_type_ident = syn::Ident::new(resp_name_str, proc_macro2::Span::call_site());
 
-    // Build request struct fields
     let mut req_field_defs = Vec::new();
     for field in req_fields {
         let name = field["name"].as_str().ok_or("missing field name")?;
@@ -212,7 +213,6 @@ fn parse_and_generate_types(
         });
     }
 
-    // Build response struct fields
     let mut resp_field_defs = Vec::new();
     for field in resp_fields {
         let name = field["name"].as_str().ok_or("missing field name")?;
@@ -249,7 +249,8 @@ fn parse_and_generate_types(
     Ok((req_struct, resp_struct, req_type, resp_type))
 }
 
-// ---------- parser ----------
+// ---------- Parser ----------
+
 struct ServiceSchema {
     request_name: Ident,
     request_fields: Vec<Field>,
