@@ -1,6 +1,6 @@
 [package]
 name = "cell-sdk"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["Leif Rydenfalk"]
 
@@ -14,7 +14,7 @@ blake3 = { version = "1.5", optional = true }
 # Export rkyv for macros and downstream use
 rkyv = { version = "0.7", features = ["validation"] }
 
-cell-macros = { version = "0.1", path = "../cell-macros" }
+cell-macros = { version = "0.1.3" }
 
 [features]
 default = []
