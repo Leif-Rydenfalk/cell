@@ -1,4 +1,4 @@
-# Cell ‑ 48 Gbps RPC in 100 % safe Rust
+# Cell ‑ 42 Gbps RPC in 100 % safe Rust
 
 Zero-copy, compile-time–checked remote-procedure framework that turns a 4-core desktop into a 40 GbE line-rate server.
 
