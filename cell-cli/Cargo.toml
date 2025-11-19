@@ -1,7 +1,13 @@
 [package]
 name = "cell-cli"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
+authors = ["Leif Rydenfalk"]
+description = "Cargo-installable CLI for Cell ‑ 48 Gbps zero-copy RPC services"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Leif-Rydenfalk/cell"
+keywords = ["rpc", "cli", "orchestrator", "zero-copy", "fintech"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "cell"
