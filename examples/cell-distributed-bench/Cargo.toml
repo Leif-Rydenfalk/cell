@@ -3,7 +3,7 @@ members = ["coordinator", "worker", "aggregator"]
 resolver = "2"
 
 [workspace.dependencies]
-cell-sdk = { path = "../cell/cell-sdk" }
+cell-sdk = { path = "../../cell-sdk" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
