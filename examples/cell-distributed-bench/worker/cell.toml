@@ -3,5 +3,5 @@ name = "worker"
 binary = "target/release/worker"
 schema = true
 
-[deps]
-# Worker has no dependencies
+[network]
+listen = "0.0.0.0:9000"

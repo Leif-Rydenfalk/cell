@@ -3,6 +3,7 @@ mod router;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
+use router::RouteTarget;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -43,6 +44,8 @@ enum Commands {
 struct CellManifest {
     cell: CellMeta,
     #[serde(default)]
+    network: NetworkConfig,
+    #[serde(default)]
     deps: HashMap<String, String>,
 }
 
@@ -50,6 +53,12 @@ struct CellManifest {
 struct CellMeta {
     name: String,
     binary: String,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct NetworkConfig {
+    // e.g., "0.0.0.0:9000"
+    listen: Option<String>,
 }
 
 #[tokio::main]
@@ -82,9 +91,8 @@ async fn cmd_run(dir: &Path) -> Result<()> {
         let _ = snapshot_dependencies(&dir, &mf.deps);
     }
 
-    // 2. BUILD (Robust Mode)
+    // 2. BUILD
     println!("🔨  Compiling {}...", mf.cell.name);
-
     let status = Command::new("cargo")
         .arg("build")
         .arg("--release")
@@ -101,24 +109,33 @@ async fn cmd_run(dir: &Path) -> Result<()> {
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new(&mf.cell.name));
     let build_artifact = find_build_artifact(&dir, bin_name)?;
-
-    // Step C: Stage into run/ directory
     let runtime_binary = run_dir.join(bin_name);
 
     if runtime_binary.exists() {
-        fs::remove_file(&runtime_binary).context("Failed to remove old running binary")?;
+        fs::remove_file(&runtime_binary).context("Failed to remove old binary")?;
     }
-
-    fs::copy(&build_artifact, &runtime_binary).context("Failed to copy new binary to run/ dir")?;
+    fs::copy(&build_artifact, &runtime_binary).context("Failed to copy binary")?;
 
     // 3. Configure Router
-    let mut router = router::Router::new(&run_dir);
+    let mut router = router::Router::new(&run_dir, mf.network.listen.clone());
     let router_sock = run_dir.join("router.sock");
 
+    // Register the Cell's own name pointing to its own socket
+    // This allows remote peers to ask for "worker" and get routed to cell.sock
+    let self_sock = run_dir.join("cell.sock");
+    router.add_route(mf.cell.name.clone(), RouteTarget::LocalUnix(self_sock));
+
+    // Process Routes (Dependencies)
     if let Some(parent) = dir.parent() {
-        for (dep_name, _) in &mf.deps {
-            let sibling_sock = parent.join(dep_name).join("run/cell.sock");
-            router.add_local_route(dep_name.clone(), sibling_sock);
+        for (dep_name, path_or_url) in &mf.deps {
+            if path_or_url.starts_with("tcp://") {
+                let addr = path_or_url.strip_prefix("tcp://").unwrap();
+                router.add_route(dep_name.clone(), RouteTarget::RemoteTcp(addr.to_string()));
+                println!("   → Remote Route: {} -> {}", dep_name, addr);
+            } else {
+                let sibling_sock = parent.join(path_or_url).join("run/cell.sock");
+                router.add_route(dep_name.clone(), RouteTarget::LocalUnix(sibling_sock));
+            }
         }
     }
 
@@ -142,10 +159,13 @@ async fn cmd_run(dir: &Path) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file));
 
-    let mut child = cmd.spawn()?;
+    let mut child = cmd.spawn()?; // Removed 'mut'
     fs::write(run_dir.join("pid"), child.id().to_string())?;
 
     println!("🚀 {} started (PID: {}).", mf.cell.name, child.id());
+    if let Some(l) = mf.network.listen {
+        println!("   🌐 Accepting TCP on {}", l);
+    }
     println!("   Logs: {}/run/service.log", dir.display());
     println!("   Press Ctrl+C to stop.");
 
@@ -159,34 +179,23 @@ async fn cmd_run(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Helper to find where Cargo put the binary
 fn find_build_artifact(root: &Path, bin_name: &std::ffi::OsStr) -> Result<PathBuf> {
-    // Check local target
     let local_tgt = root.join("target/release").join(bin_name);
     if local_tgt.exists() {
         return Ok(local_tgt);
     }
 
-    // Check workspace target (walk up directories)
     let mut up = root.to_path_buf();
-
-    // FIX: Use .pop() to mutate in place, avoiding the borrow checker error
     while up.pop() {
         let ws_tgt = up.join("target/release").join(bin_name);
         if ws_tgt.exists() {
             return Ok(ws_tgt);
         }
-
-        // Stop if we go too high (no Cargo.toml means we left the rust project)
         if !up.join("Cargo.toml").exists() {
             break;
         }
     }
-
-    bail!(
-        "Could not find compiled binary '{:?}' in target/release. Did the build actually succeed?",
-        bin_name
-    )
+    bail!("Could not find compiled binary in target/release.")
 }
 
 fn snapshot_dependencies(cell_dir: &Path, deps: &HashMap<String, String>) -> Result<()> {
@@ -194,8 +203,14 @@ fn snapshot_dependencies(cell_dir: &Path, deps: &HashMap<String, String>) -> Res
     fs::create_dir_all(&schema_dir)?;
     let parent = cell_dir.parent().ok_or_else(|| anyhow!("No parent"))?;
 
-    for (service, _) in deps {
-        let sock = parent.join(service).join("run/cell.sock");
+    for (service, path_or_url) in deps {
+        // SKIP snapshotting for remote TCP services for now in Phase 1.
+        // We assume the schema is already locally available or manual.
+        if path_or_url.starts_with("tcp://") {
+            continue;
+        }
+
+        let sock = parent.join(path_or_url).join("run/cell.sock");
         if sock.exists() {
             if let Ok(mut stream) = UnixStream::connect(&sock) {
                 stream.set_read_timeout(Some(Duration::from_millis(500)))?;

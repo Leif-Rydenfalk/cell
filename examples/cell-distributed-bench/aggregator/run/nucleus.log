@@ -1,2 +1,2 @@
-[2025-11-19T20:12:07.282849918Z] Nucleus start. Bin: /home/asdfghj/Desktop/tools/cell/cell/examples/cell-distributed-bench/aggregator/target/release/aggregator
-[2025-11-19T20:12:07.283587185Z] WARNING: Cgroup creation failed (running without isolation): fs error caused by: Os { code: 13, kind: PermissionDenied, message: "Permission denied" }
+[2025-11-19T20:52:35.844481429Z] Nucleus start. Bin: /home/asdfghj/Desktop/tools/cell/cell/examples/cell-distributed-bench/aggregator/run/aggregator
+[2025-11-19T20:52:35.845224122Z] WARNING: Cgroup creation failed (running without isolation): fs error caused by: Os { code: 13, kind: PermissionDenied, message: "Permission denied" }

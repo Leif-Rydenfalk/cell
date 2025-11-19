@@ -154,8 +154,16 @@ fn run_benchmark(req: BenchmarkRequest) -> Result<Vec<u8>> {
 
     let mut total_ops = 0;
     for h in handles {
-        if let Ok(Ok(res)) = h.join() {
-            total_ops += res.iterations_completed;
+        match h.join() {
+            Ok(Ok(res)) => {
+                total_ops += res.iterations_completed;
+            }
+            Ok(Err(e)) => {
+                eprintln!("❌ Thread Logic Failed: {:?}", e);
+            }
+            Err(e) => {
+                eprintln!("❌ Thread Panicked: {:?}", e);
+            }
         }
     }
 

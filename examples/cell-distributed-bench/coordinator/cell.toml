@@ -3,8 +3,7 @@ name = "coordinator"
 binary = "target/release/coordinator"
 schema = true
 
-# The Router uses this to map names to paths locally
-# If you were using a remote worker, you'd change this to an IP in the future.
 [deps]
-worker = "../worker"
+# Point to the TCP address instead of "../worker"
+worker = "tcp://127.0.0.1:9000"
 aggregator = "../aggregator"
