@@ -1,5 +1,3 @@
-//! cell-macros – Procedural macros for cell-sdk
-
 extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
@@ -19,7 +17,6 @@ pub fn service_schema(input: TokenStream) -> TokenStream {
     let schema_json = generate_schema_json(&schema);
     let schema_hash = blake3::hash(schema_json.as_bytes()).to_hex().to_string();
 
-    // FIX: Added ::serde::Serialize and ::serde::Deserialize
     let expanded = quote! {
         #[derive(::serde::Serialize, ::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
         #[archive(check_bytes)]
@@ -44,6 +41,7 @@ pub fn call_as(input: TokenStream) -> TokenStream {
     let CallArgs { service, request } = parse_macro_input!(input as CallArgs);
     let service_lit = service.to_string();
 
+    // We still look up schema at compile time to ensure type safety
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let schema_path = PathBuf::from(&manifest_dir)
         .join(".cell-schemas")
@@ -66,19 +64,13 @@ pub fn call_as(input: TokenStream) -> TokenStream {
 
                 (|| -> ::anyhow::Result<#resp_type> {
                     use ::cell_sdk::rkyv::Deserialize;
-
-                    let env_key = format!("CELL_DEP_{}_SOCK", #service_lit.to_uppercase());
-                    let sock_path = match ::std::env::var(&env_key) {
-                        Ok(p) => p,
-                        Err(_) => format!("../{}/run/cell.sock", #service_lit)
-                    };
-
+                    // New Logic: Just call invoke_rpc with the name. SDK handles routing.
                     let request: #req_type = #request;
 
                     let payload = ::cell_sdk::rkyv::to_bytes::<_, 1024>(&request)
                         .map_err(|e| ::anyhow::anyhow!("Rkyv serialize error: {}", e))?;
 
-                    let response_bytes = ::cell_sdk::invoke_rpc(#service_lit, &sock_path, &payload)?;
+                    let response_bytes = ::cell_sdk::invoke_rpc(#service_lit, &payload)?;
 
                     let archived = ::cell_sdk::rkyv::check_archived_root::<#resp_type>(&response_bytes)
                         .map_err(|e| ::anyhow::anyhow!("Rkyv validation error: {}", e))?;
@@ -91,12 +83,11 @@ pub fn call_as(input: TokenStream) -> TokenStream {
             }};
             TokenStream::from(expanded)
         }
-        Err(e) => {
-            let err = format!("Schema parsing failed: {}", e);
-            TokenStream::from(quote! { compile_error!(#err) })
-        }
+        Err(e) => TokenStream::from(quote! { compile_error!(#e) }),
     }
 }
+
+// --- Helpers (Same as before) ---
 
 fn parse_and_generate_types(
     schema_json: &str,
@@ -109,41 +100,36 @@ fn parse_and_generate_types(
     ),
     String,
 > {
-    let schema: serde_json::Value =
-        serde_json::from_str(schema_json).map_err(|e| format!("Invalid JSON: {}", e))?;
+    let schema: serde_json::Value = serde_json::from_str(schema_json).map_err(|e| e.to_string())?;
     let req_name = schema["request"]["name"]
         .as_str()
-        .ok_or("Missing request name")?;
+        .ok_or("Missing req name")?;
     let resp_name = schema["response"]["name"]
         .as_str()
-        .ok_or("Missing response name")?;
-
+        .ok_or("Missing resp name")?;
     let req_ident = syn::Ident::new(req_name, proc_macro2::Span::call_site());
     let resp_ident = syn::Ident::new(resp_name, proc_macro2::Span::call_site());
-
     let req_fields = generate_fields(
         schema["request"]["fields"]
             .as_array()
-            .ok_or("Missing request fields")?,
+            .ok_or("Missing req fields")?,
     )?;
     let resp_fields = generate_fields(
         schema["response"]["fields"]
             .as_array()
-            .ok_or("Missing response fields")?,
+            .ok_or("Missing resp fields")?,
     )?;
 
     let req_struct = quote! {
         #[allow(non_camel_case_types, dead_code)]
         #[derive(::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
         #[archive(check_bytes)]
-        #[archive_attr(derive(Debug))]
         struct #req_ident { #(#req_fields),* }
     };
     let resp_struct = quote! {
         #[allow(non_camel_case_types, dead_code)]
         #[derive(::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
         #[archive(check_bytes)]
-        #[archive_attr(derive(Debug))]
         struct #resp_ident { #(#resp_fields),* }
     };
     Ok((
@@ -157,11 +143,10 @@ fn parse_and_generate_types(
 fn generate_fields(fields: &[serde_json::Value]) -> Result<Vec<proc_macro2::TokenStream>, String> {
     let mut out = Vec::new();
     for f in fields {
-        let name = f["name"].as_str().ok_or("Field missing name")?;
-        let ty_str = f["type"].as_str().ok_or("Field missing type")?;
+        let name = f["name"].as_str().unwrap();
+        let ty_str = f["type"].as_str().unwrap();
         let ident = syn::Ident::new(name, proc_macro2::Span::call_site());
-        let ty_ident: syn::Type = syn::parse_str(ty_str)
-            .map_err(|e| format!("Failed to parse type '{}': {}", ty_str, e))?;
+        let ty_ident: syn::Type = syn::parse_str(ty_str).map_err(|e| e.to_string())?;
         out.push(quote! { pub #ident: #ty_ident });
     }
     Ok(out)
@@ -200,7 +185,6 @@ impl Parse for ServiceSchema {
         })
     }
 }
-
 fn parse_fields(content: ParseStream) -> syn::Result<Vec<Field>> {
     let mut fields = Vec::new();
     while !content.is_empty() {
@@ -221,7 +205,6 @@ fn parse_fields(content: ParseStream) -> syn::Result<Vec<Field>> {
     }
     Ok(fields)
 }
-
 struct CallArgs {
     service: Ident,
     request: Expr,
@@ -234,17 +217,13 @@ impl Parse for CallArgs {
         Ok(CallArgs { service, request })
     }
 }
-
 fn generate_schema_json(schema: &ServiceSchema) -> String {
-    let jsonify =
-        |fields: &[Field]| {
-            fields.iter().map(|f| {
-        let mut ts = proc_macro2::TokenStream::new();
-        f.ty.to_tokens(&mut ts);
-        let ty_str = ts.to_string();
-        serde_json::json!({ "name": f.ident.as_ref().unwrap().to_string(), "type": ty_str })
+    let jsonify = |fields: &[Field]| {
+        fields.iter().map(|f| {
+        let mut ts = proc_macro2::TokenStream::new(); f.ty.to_tokens(&mut ts);
+        serde_json::json!({ "name": f.ident.as_ref().unwrap().to_string(), "type": ts.to_string() })
     }).collect::<Vec<_>>()
-        };
+    };
     serde_json::json!({
         "request": { "name": schema.request_name.to_string(), "fields": jsonify(&schema.request_fields) },
         "response": { "name": schema.response_name.to_string(), "fields": jsonify(&schema.response_fields) }

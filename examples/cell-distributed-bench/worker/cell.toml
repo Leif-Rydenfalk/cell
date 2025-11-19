@@ -4,3 +4,4 @@ binary = "target/release/worker"
 schema = true
 
 [deps]
+# Worker has no dependencies

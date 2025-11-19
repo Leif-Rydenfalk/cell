@@ -1,9 +1,36 @@
 [workspace]
 members = ["cell-sdk", "cell-macros", "cell-cli"]
-exclude = ["examples/*"]
 resolver = "2"
 
+[workspace.package]
+version = "0.2.0"
+authors = ["Leif Rydenfalk"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Leif-Rydenfalk/cell"
+homepage = "https://github.com/Leif-Rydenfalk/cell"
+documentation = "https://docs.rs/cell-sdk"
+readme = "README.md"
+keywords = ["rpc", "distributed", "zero-copy", "mesh", "p2p"]
+categories = ["network-programming", "command-line-utilities", "asynchronous"]
+
 [workspace.dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
+# Internal
+cell-macros = { version = "0.2.0", path = "./cell-macros" }
+cell-sdk = { version = "0.2.0", path = "./cell-sdk" }
+
+# External
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+tokio = { version = "1.36", features = ["full"] }
+bytes = "1.5"
+libc = "0.2"
+humantime = "2.1"
+clap = { version = "4.5", features = ["derive"] }
+toml = "0.8"
+rkyv = { version = "0.7", features = ["validation"] }
+syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+blake3 = "1.5"
