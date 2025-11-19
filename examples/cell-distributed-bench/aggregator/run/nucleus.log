@@ -1,0 +1,5 @@
+[2025-11-19T15:30:42.945479595Z] Nucleus starting. Real binary: /home/asdfghj/Desktop/tools/cell/cell/examples/cell-distributed-bench/aggregator/target/release/aggregator
+[2025-11-19T15:30:42.945522575Z] Bound socket at: /home/asdfghj/Desktop/tools/cell/cell/examples/cell-distributed-bench/aggregator/run/cell.sock
+[2025-11-19T15:30:42.945537931Z] Dup'd original fd 3 -> 4
+[2025-11-19T15:30:42.945549552Z] Cleared CLOEXEC on fd 4
+[2025-11-19T15:30:42.945568760Z] Execing real binary now...
