@@ -42,7 +42,6 @@ pub fn run_nucleus(socket_path: &Path, real_binary: &Path, router_path: &Path) -
     let listen_fd = listener.as_raw_fd();
     let cloned_fd = unsafe { libc::dup(listen_fd) };
 
-    // Clear CLOEXEC so the child inherits the socket
     let flags = unsafe { libc::fcntl(cloned_fd, libc::F_GETFD) };
     if flags >= 0 {
         unsafe { libc::fcntl(cloned_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
@@ -53,20 +52,34 @@ pub fn run_nucleus(socket_path: &Path, real_binary: &Path, router_path: &Path) -
         .append(true)
         .open(run_dir.join("service.log"))?;
 
-    // --- CGROUPS ISOLATION (Linux Only) ---
+    // --- CGROUPS ISOLATION (Soft Fail) ---
     #[cfg(target_os = "linux")]
     let cgroup = {
         let hier = hierarchies::auto();
         let gname = format!("cell_{}", std::process::id());
 
-        CgroupBuilder::new(&gname)
+        // Try to build cgroup. If it fails (Permission Denied), log and return None.
+        match CgroupBuilder::new(&gname)
             .memory()
             .memory_hard_limit(1024 * 1024 * 1024) // 1GB Limit
             .done()
             .cpu()
-            .shares(512) // Low priority
+            .shares(512)
             .done()
-            .build(hier)?
+            .build(hier)
+        {
+            Ok(cg) => Some(cg),
+            Err(e) => {
+                let _ = log(
+                    run_dir,
+                    &format!(
+                        "WARNING: Cgroup creation failed (running without isolation): {}",
+                        e
+                    ),
+                );
+                None
+            }
+        }
     };
 
     let mut cmd = Command::new(real_binary);
@@ -81,9 +94,10 @@ pub fn run_nucleus(socket_path: &Path, real_binary: &Path, router_path: &Path) -
             .pre_exec(move || {
                 #[cfg(target_os = "linux")]
                 {
-                    let pid = CgroupPid::from(libc::getpid() as u64);
-                    if let Err(e) = cgroup.add_task(pid) {
-                        eprintln!("Failed to isolate process: {}", e);
+                    // Only try to add task if cgroup exists
+                    if let Some(ref cg) = cgroup {
+                        let pid = CgroupPid::from(libc::getpid() as u64);
+                        let _ = cg.add_task(pid);
                     }
                 }
                 Ok(())

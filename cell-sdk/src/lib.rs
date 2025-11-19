@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use rkyv::AlignedVec;
 use std::io::{Read, Write};
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -180,27 +181,47 @@ fn handle_client_loop(
     handler: &dyn Fn(&[u8]) -> Result<Vec<u8>>,
 ) -> anyhow::Result<()> {
     loop {
+        // 1. Read Length Header
         let mut len_buf = [0u8; 4];
         if let Err(_) = stream.read_exact(&mut len_buf) {
             return Err(anyhow::anyhow!("Client disconnected"));
         }
         let len = u32::from_be_bytes(len_buf) as usize;
-        // Safety limit: 256MB
         if len > 256 * 1024 * 1024 {
             bail!("Message too large");
         }
 
-        let mut msg_buf = vec![0u8; len];
-        stream.read_exact(&mut msg_buf)?;
+        // 2. Allocate ALIGNED Buffer
+        // Rkyv requires strict alignment. AlignedVec ensures the data is placed in memory correctly.
+        let mut msg_buf = AlignedVec::with_capacity(len);
 
-        if &msg_buf == b"__SCHEMA__" {
+        // FIX: Use a loop to push zeros. This avoids the 'Extend' trait issue
+        // and avoids allocating a second Vec<u8> just to copy it.
+        // The compiler optimizes this loop into a memset.
+        for _ in 0..len {
+            msg_buf.push(0u8);
+        }
+
+        // 3. Read directly into the aligned buffer
+        stream.read_exact(msg_buf.as_mut_slice())?;
+
+        // 4. Handle Schema Request
+        if msg_buf.as_slice() == b"__SCHEMA__" {
             stream.write_all(&(schema.len() as u32).to_be_bytes())?;
             stream.write_all(schema)?;
             continue;
         }
 
-        let resp = handler(&msg_buf)?;
-        stream.write_all(&(resp.len() as u32).to_be_bytes())?;
-        stream.write_all(&resp)?;
+        // 5. Invoke Handler
+        match handler(msg_buf.as_slice()) {
+            Ok(resp) => {
+                stream.write_all(&(resp.len() as u32).to_be_bytes())?;
+                stream.write_all(&resp)?;
+            }
+            Err(e) => {
+                eprintln!("❌ RPC Handler Failed: {:?}", e);
+                return Err(e);
+            }
+        }
     }
 }

@@ -4,7 +4,6 @@ use cell_sdk::*;
 use std::thread;
 use std::time::Instant;
 
-// Define the schema for the Coordinator itself (so we can trigger it via CLI)
 service_schema! {
     service: coordinator,
     request: BenchmarkRequest {
@@ -20,8 +19,6 @@ service_schema! {
     }
 }
 
-// We need to redefine the schemas of the services we talk to (Worker/Aggregator)
-// In a real app, you might put these structs in a shared crate, but here we copy definition.
 #[derive(
     cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize, cell_sdk::rkyv::Deserialize, Debug, Clone,
 )]
@@ -45,6 +42,16 @@ pub struct WorkerResult {
     pub throughput: f64,
 }
 
+#[derive(cell_sdk::rkyv::Archive, cell_sdk::rkyv::Deserialize, Debug)]
+#[archive(check_bytes)]
+pub struct WorkerBenchmarkResponse {
+    pub iterations_completed: u32,
+    pub duration_ms: u64,
+    pub throughput: f64,
+}
+
+// We also need Aggregate structs if we want to use the aggregator,
+// but for this direct test we can calculate locally or use these stubs.
 #[derive(
     cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize, cell_sdk::rkyv::Deserialize, Debug, Clone,
 )]
@@ -52,15 +59,6 @@ pub struct WorkerResult {
 pub struct AggregateRequest {
     pub worker_results: Vec<WorkerResult>,
     pub test_type: String,
-}
-
-// Result types needed for deserialization
-#[derive(cell_sdk::rkyv::Archive, cell_sdk::rkyv::Deserialize, Debug)]
-#[archive(check_bytes)]
-pub struct WorkerBenchmarkResponse {
-    pub iterations_completed: u32,
-    pub duration_ms: u64,
-    pub throughput: f64,
 }
 
 #[derive(cell_sdk::rkyv::Archive, cell_sdk::rkyv::Deserialize, Debug)]
@@ -73,30 +71,38 @@ pub struct AggregateResponse {
 
 fn main() -> Result<()> {
     run_service_with_schema("coordinator", __CELL_SCHEMA__, |request_bytes| {
-        // 1. Parse Request
+        // 1. TRY JSON (For CLI usage)
+        match serde_json::from_slice::<BenchmarkRequest>(request_bytes) {
+            Ok(req) => return run_benchmark(req),
+            Err(e) => {
+                if request_bytes.first() == Some(&b'{') {
+                    let json_str = String::from_utf8_lossy(request_bytes);
+                    println!("❌ JSON Parse Error: {}", e);
+                    println!("   Input: {}", json_str);
+                    return Err(anyhow::anyhow!("JSON Error: {}", e));
+                }
+            }
+        }
+
+        // 2. TRY RKYV
         let archived = cell_sdk::rkyv::check_archived_root::<BenchmarkRequest>(request_bytes)
             .map_err(|e| anyhow::anyhow!("Invalid data: {}", e))?;
-        // We deserialize fully here because we need to pass ownership to threads
-        let req: BenchmarkRequest = archived.deserialize(&mut cell_sdk::rkyv::Infallible)?;
 
+        let req: BenchmarkRequest = archived.deserialize(&mut cell_sdk::rkyv::Infallible)?;
         run_benchmark(req)
     })
 }
 
 fn run_benchmark(req: BenchmarkRequest) -> Result<Vec<u8>> {
-    println!(
-        "🎯 STARTING BENCHMARK: {} threads, {} iter/thread",
-        req.worker_count,
-        req.iterations / req.worker_count
-    );
-
+    println!("🎯 STARTING BENCHMARK: {} workers", req.worker_count);
     let start = Instant::now();
-    let blob_data = vec![1u8; req.payload_size];
-    let it_per_thread = req.iterations / req.worker_count;
 
+    let blob_data = vec![1u8; req.payload_size];
     let mut handles = vec![];
 
-    // 2. SPAWN THREADS
+    // Distribute work
+    let it_per_thread = req.iterations / req.worker_count;
+
     for id in 0..req.worker_count {
         let t_it = it_per_thread;
         let t_type = req.test_type.clone();
@@ -104,75 +110,84 @@ fn run_benchmark(req: BenchmarkRequest) -> Result<Vec<u8>> {
         let payload_size = req.payload_size;
 
         handles.push(thread::spawn(move || -> Result<WorkerResult> {
-            // --- CONNECT VIA ROUTER ---
-            // We ask for "worker". The CLI Router finds where it is (local or remote).
-            let mut client = CellClient::connect("worker")
-                .expect("Failed to connect to worker service via Router");
+            let mut client = CellClient::connect("worker").expect("Failed to connect to worker");
 
-            let worker_req = WorkerBenchmarkRequest {
-                worker_id: id,
-                iterations: t_it,
-                payload_size,
-                test_type: t_type,
-                data_blob: t_blob,
-            };
+            let mut total_ops = 0;
 
-            // Serialize request
-            let payload = cell_sdk::rkyv::to_bytes::<_, 1024>(&worker_req)?;
+            if t_type == "ping" {
+                // PING MODE: Loop here (Network Bound)
+                let worker_req = WorkerBenchmarkRequest {
+                    worker_id: id,
+                    iterations: 1,
+                    payload_size,
+                    test_type: t_type.clone(),
+                    data_blob: t_blob,
+                };
+                let payload = cell_sdk::rkyv::to_bytes::<_, 1024>(&worker_req)?;
 
-            // Call Worker
-            let resp_bytes = client.call(&payload)?;
-
-            // Parse Response
-            let archived_resp =
-                cell_sdk::rkyv::check_archived_root::<WorkerBenchmarkResponse>(&resp_bytes)?;
-            let resp: WorkerBenchmarkResponse =
-                archived_resp.deserialize(&mut cell_sdk::rkyv::Infallible)?;
+                for _ in 0..t_it {
+                    let _ = client.call(&payload)?;
+                    total_ops += 1;
+                }
+            } else {
+                // COMPUTE MODE: Send once (Compute Bound)
+                let worker_req = WorkerBenchmarkRequest {
+                    worker_id: id,
+                    iterations: t_it,
+                    payload_size,
+                    test_type: t_type.clone(),
+                    data_blob: t_blob,
+                };
+                let payload = cell_sdk::rkyv::to_bytes::<_, 1024>(&worker_req)?;
+                let _ = client.call(&payload)?;
+                total_ops = t_it;
+            }
 
             Ok(WorkerResult {
                 worker_id: id,
-                iterations_completed: resp.iterations_completed,
-                duration_ms: resp.duration_ms,
-                throughput: resp.throughput,
+                iterations_completed: total_ops,
+                duration_ms: 0,
+                throughput: 0.0,
             })
         }));
     }
 
-    // 3. COLLECT RESULTS
-    let mut results = Vec::new();
+    let mut total_ops = 0;
     for h in handles {
-        match h.join() {
-            Ok(Ok(res)) => results.push(res),
-            Ok(Err(e)) => println!("Thread failed: {}", e),
-            Err(_) => println!("Thread panicked"),
+        if let Ok(Ok(res)) = h.join() {
+            total_ops += res.iterations_completed;
         }
     }
 
-    // 4. SEND TO AGGREGATOR
-    println!("📊 Sending {} results to aggregator...", results.len());
-
-    let agg_req = AggregateRequest {
-        worker_results: results,
-        test_type: req.test_type.clone(),
-    };
-    let agg_payload = cell_sdk::rkyv::to_bytes::<_, 4096>(&agg_req)?;
-
-    // Connect to Aggregator via Router
-    let agg_resp_bytes = cell_sdk::invoke_rpc("aggregator", &agg_payload)?;
-
-    let archived_agg = cell_sdk::rkyv::check_archived_root::<AggregateResponse>(&agg_resp_bytes)?;
-    let agg_resp: AggregateResponse = archived_agg.deserialize(&mut cell_sdk::rkyv::Infallible)?;
-
-    println!("{}", agg_resp.summary);
-
-    // 5. REPLY TO CLI
     let duration = start.elapsed();
+    let seconds = duration.as_secs_f64();
+
+    let total_ops_f = total_ops as f64;
+    let ops_per_sec = total_ops_f / seconds;
+
+    // Calculate Bandwidth (Payload * Ops)
+    let total_bytes = total_ops_f * req.payload_size as f64;
+    let mb_per_sec = total_bytes / seconds / 1024.0 / 1024.0;
+    let gb_per_sec = mb_per_sec / 1024.0;
+
+    let summary = format!(
+        "Benchmark '{}' Complete.\n   Type: {}\n   Ops: {}\n   Time: {:.4}s\n   Throughput: {:.2} ops/sec\n   Bandwidth: {:.2} MB/s ({:.4} GB/s)",
+        req.test_type,
+        if req.test_type == "ping" { "Network Bound (IPC)" } else { "Compute Bound (Worker)" },
+        total_ops,
+        seconds,
+        ops_per_sec,
+        mb_per_sec,
+        gb_per_sec
+    );
+
+    println!("{}", summary);
+
     let response = BenchmarkResponse {
         total_duration_ms: duration.as_millis() as u64,
-        throughput: agg_resp.total_throughput,
-        summary: agg_resp.summary,
+        throughput: ops_per_sec,
+        summary,
     };
 
-    let bytes = cell_sdk::rkyv::to_bytes::<_, 1024>(&response)?;
-    Ok(bytes.into_vec())
+    Ok(serde_json::to_vec(&response)?)
 }

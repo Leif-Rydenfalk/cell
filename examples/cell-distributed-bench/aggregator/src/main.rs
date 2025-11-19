@@ -14,7 +14,6 @@ service_schema! {
     }
 }
 
-// We must define the inner struct used in the Vector
 #[derive(
     serde::Serialize,
     serde::Deserialize,
@@ -35,6 +34,7 @@ pub struct WorkerResult {
 
 fn main() -> Result<()> {
     run_service_with_schema("aggregator", __CELL_SCHEMA__, |request_bytes| {
+        // FIX: Added .map_err
         let req = cell_sdk::rkyv::check_archived_root::<AggregateRequest>(request_bytes)
             .map_err(|e| anyhow::anyhow!("Invalid data: {}", e))?;
 
@@ -69,7 +69,8 @@ fn main() -> Result<()> {
             summary,
         };
 
-        let bytes = cell_sdk::rkyv::to_bytes::<_, 1024>(&response)?;
+        let bytes = cell_sdk::rkyv::to_bytes::<_, 1024>(&response)
+            .map_err(|e| anyhow::anyhow!("Serialize err: {}", e))?;
         Ok(bytes.into_vec())
     })
 }

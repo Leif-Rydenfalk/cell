@@ -1,1 +1,0 @@
-{"request":{"fields":[{"name":"worker_results","type":"Vec < WorkerResult >"},{"name":"test_type","type":"String"}],"name":"AggregateRequest"},"response":{"fields":[{"name":"total_throughput","type":"f64"},{"name":"avg_latency_ms","type":"f64"},{"name":"summary","type":"String"}],"name":"AggregateResponse"}}
