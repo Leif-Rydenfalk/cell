@@ -1,0 +1,14 @@
+[package]
+name = "worker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cell-sdk = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+rand = { workspace = true }
+# Using the workspace dependency via cell-sdk export is clean, 
+# but generally safer to declare strict dependency for binary
+rkyv = { version = "0.7", features = ["validation"] }

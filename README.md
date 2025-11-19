@@ -1,9 +1,3 @@
-cargo install --path cell-cli 
-
-cell clone gh:owner/repo@v1 mycalc        # creates ./mycalc
-cell start mycalc                         # starts ./mycalc
-cell use   mycalc add '{"a":1,"b":2}'
-
 # Cell ― *“Functions, but they’re just Rust.”*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)  

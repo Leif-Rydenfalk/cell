@@ -1,0 +1,8 @@
+[cell]
+name = "coordinator"
+binary = "target/release/coordinator"
+schema = true
+
+[deps]
+worker = "0.1.0"     # these are the *service* names, not crate names
+aggregator = "0.1.0"

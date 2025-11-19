@@ -1,0 +1,6 @@
+[cell]
+name = "worker"
+binary = "target/release/worker"
+schema = true
+
+[deps]

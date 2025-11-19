@@ -1,0 +1,8 @@
+[cell]
+name = "aggregator"
+binary = "target/release/aggregator"
+schema = true
+
+[life_cycle]
+idle_timeout = 300
+auto_cleanup = false
