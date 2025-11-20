@@ -1,8 +1,7 @@
 use anyhow::Result;
-use cell_sdk::*; // This exports call_as and signal_receptor macros
+use cell_sdk::*;
 use rand::Rng;
 
-// Define the genetic inputs and outputs
 signal_receptor! {
     name: worker,
     input: WorkLoad {
@@ -17,33 +16,30 @@ signal_receptor! {
 }
 
 fn main() -> Result<()> {
-    // Bind the Membrane to these genetics
+    println!("Worker started and ready for heavy load.");
+
     Membrane::bind(__GENOME__, |vesicle| {
-        // 1. Decode (Zero-Copy check)
         let job = cell_sdk::rkyv::check_archived_root::<WorkLoad>(vesicle.as_slice())
             .map_err(|e| anyhow::anyhow!("Corrupt DNA: {}", e))?;
 
-        // 2. Do Heavy Work
+        // Simulating CPU work
         let mut rng = rand::thread_rng();
         let mut sum = 0u64;
-        for _ in 0..job.iterations {
+        // Reduce this to 100 to measure Network overhead, not RNG speed
+        for _ in 0..100 {
             sum = sum.wrapping_add(rng.gen::<u64>());
         }
 
-        if job.iterations > 1000 {
-            println!(
-                "💪 Worker processed Job #{} ({} ops)",
-                job.id, job.iterations
-            );
+        // Only log every 1000 requests to save I/O
+        if job.id % 1000 == 0 {
+            println!("Processed batch up to Job #{}", job.id);
         }
 
-        // 3. Return Result
         let res = WorkResult {
             processed: job.iterations,
             checksum: sum,
         };
 
-        // 4. Pack Vesicle
         let bytes = cell_sdk::rkyv::to_bytes::<_, 256>(&res)?.into_vec();
         Ok(vesicle::Vesicle::wrap(bytes))
     })
