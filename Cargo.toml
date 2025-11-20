@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["membrane", "cytosol", "ribosome"]
+members = ["cell-cli", "cell-sdk", "cell-macros"]
 exclude = ["examples"]
 
 [workspace.package]
@@ -13,10 +13,8 @@ description = "A biological distributed supercomputing substrate."
 
 [workspace.dependencies]
 # --- Internal Crates ---
-# We define path here so the workspace members can find each other,
-# but we verify versions match.
-cytosol = { version = "0.2.0", path = "./cytosol" }
-ribosome = { version = "0.2.0", path = "./ribosome" }
+cell-sdk = { version = "0.2.0", path = "./cell-sdk" }
+cell-macros = { version = "0.2.0", path = "./cell-macros" }
 
 # --- Core Infrastructure ---
 anyhow = "1.0"
@@ -25,12 +23,14 @@ serde_json = "1.0"
 tokio = { version = "1.36", features = ["full"] }
 libc = "0.2"
 dirs = "5.0"
+bytes = "1.5"
 
 # --- Network & Security ---
 snow = "0.9"
 snowstorm = "0.4"
 base64 = "0.22"
 rkyv = { version = "0.7", features = ["validation"] }
+blake3 = "1.5"
 
 # --- CLI & Utilities ---
 clap = { version = "4.5", features = ["derive"] }
@@ -40,14 +40,13 @@ rand = "0.8"
 
 # --- Linux Specific ---
 cgroups-rs = "0.3.3"
+nix = { version = "0.27", features = ["sched", "mount", "fs"] }
 
 # --- Macros ---
 syn = { version = "2.0", features = ["full", "extra-traits"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 
-# --- Optimization Profiles ---
-# Maximum performance for release builds
 [profile.release]
 lto = true
 codegen-units = 1

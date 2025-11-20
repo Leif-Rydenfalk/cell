@@ -1,4 +1,0 @@
-[cell]
-name = "aggregator"
-binary = "target/release/aggregator"
-schema = true
