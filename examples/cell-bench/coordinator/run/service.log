@@ -11,3 +11,92 @@
 ✅ Job 8 complete. Checksum: 1d936fd34feb7562
 ✅ Job 9 complete. Checksum: 81ff08ed195606b7
 🏁 Benchmark complete in 43.846824ms
+Coordinator starting benchmark.
+TARGET: 5000 requests
+PAYLOAD: 4096 bytes
+.. 0 / 5000
+.. 1000 / 5000
+.. 2000 / 5000
+.. 3000 / 5000
+.. 4000 / 5000
+
+============== RESULTS ==============
+Time Taken:   3.02s
+Requests:     5000
+Payload:      4KB
+-------------------------------------
+Throughput:   1655.00 Req/sec
+Bandwidth:    6.78 MB/s (Payload only)
+-------------------------------------
+Avg Latency:  603.80µs
+Min Latency:  556.11µs
+Max Latency:  2.42ms
+=====================================
+🧠 Coordinator starting benchmark.
+TARGET: 5000 requests
+PAYLOAD: 4096 bytes
+.. 1000 / 5000
+.. 2000 / 5000
+.. 3000 / 5000
+.. 4000 / 5000
+
+============== RESULTS ==============
+Config:       5000 iters, 4096 bytes
+Time Taken:   3.08s
+-------------------------------------
+Throughput:   1623.25 Req/sec
+Bandwidth:    6.65 MB/s
+-------------------------------------
+Avg Latency:  615.64µs
+Min Latency:  558.20µs
+Max Latency:  5.66ms
+=====================================
+
+🧪 AUTOMATED CELL BENCHMARK SUITE 🧪
+======================================
+🔥 Warming up engine... Done.
+
+Running: Max Throughput (Ping) (1 bytes x 5000 requests)
+.........
+Running: Standard (4KB) (4096 bytes x 5000 requests)
+.........
+Running: Medium (64KB) (65536 bytes x 2000 requests)
+Error: Connection reset by peer (os error 104)
+
+🧪 AUTOMATED CELL BENCHMARK SUITE 🧪
+======================================
+🔥 Warming up engine... Done.
+
+Running: Max Throughput (Ping) (1 bytes x 5000 requests)
+.........
+Running: Standard (4KB) (4096 bytes x 5000 requests)
+.........
+Running: Medium (64KB) (65536 bytes x 2000 requests)
+Error: Connection reset by peer (os error 104)
+
+🧪 AUTOMATED CELL BENCHMARK SUITE 🧪
+======================================
+🔥 Warming up engine... Done.
+
+Running: Max Throughput (Ping) (1 bytes x 5000 requests)
+.........
+Running: Standard (4KB) (4096 bytes x 5000 requests)
+.........
+Running: Medium (64KB) (65536 bytes x 2000 requests)
+.........
+Running: Heavy (1MB) (1048576 bytes x 500 requests)
+.........
+
+🏆 BENCHMARK SUMMARY 🏆
+Scenario                  | RPS          | Bandwidth    | Latency     
+--------------------------|--------------|--------------|-------------
+Max Throughput (Ping)     | 1708 req/s   | 0.00 MB/s    | 585.41µs
+Standard (4KB)            | 1683 req/s   | 6.89 MB/s    | 594.17µs
+Medium (64KB)             | 1149 req/s   | 75.31 MB/s   | 870.16µs
+Heavy (1MB)               | 164 req/s    | 172.22 MB/s  | 6.09ms
+
+🚀 PEAK PERFORMANCE:
+   Max Throughput: 1708 Requests/sec
+   Max Bandwidth:  172.22 MB/s
+======================================
+

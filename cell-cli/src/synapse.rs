@@ -100,19 +100,29 @@ pub async fn bridge_secure_to_plain<P>(mut secure: SecureStream, mut plain: P) -
 where
     P: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut p_buf = vec![0u8; 65535];
-    let mut s_buf_out = vec![0u8; 65535 + 16];
+    // Max Noise message is 65535. Overhead is 16 bytes (for ChaChaPoly+Poly1305).
+    // So max plaintext is 65535 - 16 = 65519.
+    const MAX_PLAINTEXT: usize = 65519;
+    const MAX_CIPHERTEXT: usize = 65535;
+
+    let mut p_buf = vec![0u8; MAX_PLAINTEXT];
+    let mut s_buf_out = vec![0u8; MAX_CIPHERTEXT];
+
+    // Buffer for incoming ciphertext from network
+    // We must be able to read the full frame + 2 byte length
+    let mut s_buf_in = vec![0u8; MAX_CIPHERTEXT];
 
     loop {
         tokio::select! {
             // 1. Receive Encrypted Frame -> Decrypt -> Write to Plain
-            res = read_frame(&mut secure.inner) => {
-                let encrypted_frame = match res {
-                    Ok(f) => f,
+            res = read_frame_into(&mut secure.inner, &mut s_buf_in) => {
+                let n = match res {
+                    Ok(n) => n,
                     Err(_) => break, // Connection closed
                 };
 
-                let len = secure.state.read_message(&encrypted_frame, &mut p_buf)
+                // Decrypt in place or into p_buf
+                let len = secure.state.read_message(&s_buf_in[..n], &mut p_buf)
                     .map_err(|_| anyhow!("Decryption failed"))?;
 
                 plain.write_all(&p_buf[..len]).await?;
@@ -126,6 +136,7 @@ where
                     Err(_) => break,
                 };
 
+                // This will now always succeed because p_buf size <= MAX_PLAINTEXT
                 let len = secure.state.write_message(&p_buf[..n], &mut s_buf_out)
                     .map_err(|_| anyhow!("Encryption failed"))?;
 
@@ -134,4 +145,19 @@ where
         }
     }
     Ok(())
+}
+
+// --- Updated Helper to avoid allocs ---
+
+pub async fn read_frame_into(stream: &mut TcpStream, buf: &mut [u8]) -> Result<usize> {
+    let mut len_buf = [0u8; 2];
+    stream.read_exact(&mut len_buf).await?;
+    let len = u16::from_le_bytes(len_buf) as usize;
+
+    if len > buf.len() {
+        return Err(anyhow::anyhow!("Frame too large"));
+    }
+
+    stream.read_exact(&mut buf[..len]).await?;
+    Ok(len)
 }

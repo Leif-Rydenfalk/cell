@@ -2,52 +2,120 @@ use anyhow::Result;
 use cell_sdk::*;
 use std::time::{Duration, Instant};
 
+// --- DATA STRUCTURES ---
+#[derive(
+    serde::Serialize, serde::Deserialize, cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize,
+)]
+#[archive(crate = "cell_sdk::rkyv")]
+#[archive(check_bytes)]
+struct WorkLoad {
+    id: u32,
+    iterations: u32,
+    payload: Vec<u8>,
+}
+
+#[derive(
+    serde::Serialize,
+    serde::Deserialize,
+    cell_sdk::rkyv::Archive,
+    cell_sdk::rkyv::Deserialize,
+    Debug,
+)]
+#[archive(crate = "cell_sdk::rkyv")]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug))]
+struct WorkResult {
+    processed: u32,
+    checksum: u64,
+}
+
+struct TestResult {
+    name: String,
+    payload_size: usize,
+    rps: f64,
+    mbps: f64,
+    avg_latency: Duration,
+}
+
 fn main() -> Result<()> {
-    #[derive(
-        serde::Serialize, serde::Deserialize, cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize,
-    )]
-    #[archive(crate = "cell_sdk::rkyv")]
-    #[archive(check_bytes)]
-    struct WorkLoad {
-        id: u32,
-        iterations: u32,
-        payload: Vec<u8>,
+    println!("\n🧪 AUTOMATED CELL BENCHMARK SUITE 🧪");
+    println!("======================================");
+
+    // --- WARMUP ---
+    // Wakes up the worker, ensures routes are hot.
+    print!("Warming up...");
+    run_scenario("Warmup", 1024, 100, false)?;
+    println!(" Done.\n");
+
+    let mut results = Vec::new();
+
+    // --- SCENARIO 1: LATENCY & OVERHEAD ---
+    // 1 Byte payload. Measures pure protocol overhead, handshake speed, and CPU efficiency.
+    results.push(run_scenario("Max Throughput (Ping)", 1, 5_000, true)?);
+
+    // --- SCENARIO 2: REAL WORLD ---
+    // 4 KB payload. Typical size for JSON APIs or DB queries.
+    results.push(run_scenario("Standard (4KB)", 4096, 5_000, true)?);
+
+    // --- SCENARIO 3: MEDIUM DATA ---
+    // 64 KB payload. Stresses buffer copying and fragmentation.
+    results.push(run_scenario("Medium (64KB)", 65536, 2_000, true)?);
+
+    // --- SCENARIO 4: BANDWIDTH ---
+    // 1 MB payload. Stresses memory bandwidth and Encryption throughput.
+    // 500 reqs * 1MB = 500MB transferred.
+    results.push(run_scenario("Heavy (1MB)", 1_048_576, 500, true)?);
+
+    // --- FINAL REPORT ---
+    println!("\nBENCHMARK SUMMARY");
+    println!(
+        "{:<25} | {:<12} | {:<12} | {:<12}",
+        "Scenario", "RPS", "Bandwidth", "Latency"
+    );
+    println!("{:-<25}-|-{:-<12}-|-{:-<12}-|-{:-<12}", "", "", "", "");
+
+    let mut max_rps = 0.0;
+    let mut max_bw = 0.0;
+
+    for r in &results {
+        if r.rps > max_rps {
+            max_rps = r.rps;
+        }
+        if r.mbps > max_bw {
+            max_bw = r.mbps;
+        }
+
+        println!(
+            "{:<25} | {:<12} | {:<12} | {:.2?}",
+            r.name,
+            format!("{:.0} req/s", r.rps),
+            format!("{:.2} MB/s", r.mbps),
+            r.avg_latency
+        );
     }
 
-    #[derive(
-        serde::Serialize,
-        serde::Deserialize,
-        cell_sdk::rkyv::Archive,
-        cell_sdk::rkyv::Deserialize,
-        Debug,
-    )]
-    #[archive(crate = "cell_sdk::rkyv")]
-    #[archive(check_bytes)]
-    #[archive_attr(derive(Debug))]
-    struct WorkResult {
-        processed: u32,
-        checksum: u64,
+    println!("\nPEAK PERFORMANCE:");
+    println!("   Max Throughput: {:.0} Requests/sec", max_rps);
+    println!("   Max Bandwidth:  {:.2} MB/s", max_bw);
+    println!("======================================\n");
+
+    Ok(())
+}
+
+fn run_scenario(name: &str, size: usize, iter: u32, print: bool) -> Result<TestResult> {
+    if print {
+        println!("Running: {} ({} bytes x {} requests)", name, size, iter);
     }
 
-    // --- CONFIGURATION ---
-    let iterations = 5_000;
-    let payload_size = 4096; // 4KB Payload
-                             // ---------------------
-
-    println!("Coordinator starting benchmark.");
-    println!("TARGET: {} requests", iterations);
-    println!("PAYLOAD: {} bytes", payload_size);
-
-    // Pre-allocate payload
-    let payload_data = vec![7u8; payload_size];
-    let mut latencies = Vec::with_capacity(iterations);
+    let payload_data = vec![7u8; size];
+    let mut latencies = Vec::with_capacity(iter as usize);
 
     let total_start = Instant::now();
 
-    for i in 0..iterations {
+    for i in 0..iter {
         let job = WorkLoad {
-            id: i as u32,
-            iterations: 100,
+            id: i,
+            iterations: 10, // Minimal CPU work on worker side
             payload: payload_data.clone(),
         };
 
@@ -58,40 +126,29 @@ fn main() -> Result<()> {
 
         latencies.push(req_start.elapsed());
 
-        if i % 1000 == 0 {
-            println!(".. {} / {}", i, iterations);
+        // Progress bar
+        if print && i % (iter / 10) == 0 && i > 0 {
+            use std::io::Write;
+            print!(".");
+            std::io::stdout().flush().ok();
         }
     }
+    if print {
+        println!("");
+    }
 
-    let total_duration = total_start.elapsed();
+    let duration = total_start.elapsed();
 
-    // --- STATISTICS ---
-    let total_ops = iterations as f64;
-    let total_seconds = total_duration.as_secs_f64();
+    let rps = (iter as f64) / duration.as_secs_f64();
+    let total_mb = (iter as f64 * size as f64) / 1_000_000.0;
+    let mbps = total_mb / duration.as_secs_f64();
+    let avg_lat = duration / iter;
 
-    let rps = total_ops / total_seconds;
-
-    // Calculate Bandwidth (Outbound + Inbound approx)
-    // 4KB Out + tiny response. We'll count just payload for throughput.
-    let total_mb = (total_ops * payload_size as f64) / 1_000_000.0;
-    let mbps = total_mb / total_seconds;
-
-    let avg_latency = latencies.iter().sum::<Duration>() / iterations as u32;
-    let max_latency = latencies.iter().max().unwrap();
-    let min_latency = latencies.iter().min().unwrap();
-
-    println!("\n============== RESULTS ==============");
-    println!("Time Taken:   {:.2?}", total_duration);
-    println!("Requests:     {}", iterations);
-    println!("Payload:      4KB");
-    println!("-------------------------------------");
-    println!("Throughput:   {:.2} Req/sec", rps);
-    println!("Bandwidth:    {:.2} MB/s (Payload only)", mbps);
-    println!("-------------------------------------");
-    println!("Avg Latency:  {:.2?}", avg_latency);
-    println!("Min Latency:  {:.2?}", min_latency);
-    println!("Max Latency:  {:.2?}", max_latency);
-    println!("=====================================");
-
-    Ok(())
+    Ok(TestResult {
+        name: name.to_string(),
+        payload_size: size,
+        rps,
+        mbps,
+        avg_latency: avg_lat,
+    })
 }
