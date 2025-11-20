@@ -12,6 +12,10 @@ no genome.toml or
 
 
 
+2026 I turn 18.
+By 19 I want 1 000 autonomous nodes running open-source inference workloads; by 21 a self-improving global neural network, 10b synapses + 1m neurons per node; by 23 a coordination protocol that outperforms human institutions at 1 % of the energy.
+
+
 
 yes but i wont use wasm. i need gpu support and we need to let cell creators do whatever they want, use resources however they wish - as long as the software is opensource. They ship the source code - ai looks through it for vulnerabilities and malicious lines and if its clean the source code is downloaded into the cell structure, compiled using whatever method the author wanted and then executed. they will donate compute because thats how you get low latency and how open source stays open source and free for all contributors. open source does not have to pay companies any more. This means that the author does not have to rewrite their whole infra to support wasm - they use whatever they want so switching your infra to cell is just a couple of lines. Untrusted and unverified cells are run in a vm or container ofc.
 
