@@ -123,3 +123,19 @@ Running: Bandwidth (8 Threads, 64KB)
    Throughput: 7042 Req/sec
    Bandwidth:  461.53 MB/s
 =======================================
+
+[Coordinator] Starting Benchmark Suite
+=======================================
+[System] Waiting for peer discovery...
+................................
+thread 'main' (562551) panicked at coordinator/src/main.rs:60:21:
+[Error] Discovery timeout. Multicast might be disabled on network.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+[Coordinator] Starting Benchmark Suite
+=======================================
+[System] Waiting for peer discovery...
+................................
+thread 'main' (564073) panicked at coordinator/src/main.rs:60:21:
+[Error] Discovery timeout. Multicast might be disabled on network.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

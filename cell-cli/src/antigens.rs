@@ -10,20 +10,12 @@ pub struct Antigens {
 }
 
 impl Antigens {
-    pub fn load_or_create() -> Result<Self> {
-        // Use standard linux paths or local hidden dir
-        let home = dirs::home_dir().context("Failed to determine home directory")?;
-        let cell_home = home.join(".cell");
-        if !cell_home.exists() {
-            fs::create_dir_all(&cell_home)?;
-        }
-
-        let key_path = cell_home.join("node_identity");
-
-        if key_path.exists() {
-            Self::load(&key_path)
+    /// Loads identity from the specific file path. Generates if missing.
+    pub fn load_or_create(identity_path: PathBuf) -> Result<Self> {
+        if identity_path.exists() {
+            Self::load(&identity_path)
         } else {
-            Self::generate(&key_path)
+            Self::generate(&identity_path)
         }
     }
 
@@ -49,25 +41,25 @@ impl Antigens {
     }
 
     fn generate(path: &PathBuf) -> Result<Self> {
-        // Protocol: Noise_XX_25519_ChaChaPoly_BLAKE2s
-        // XX Pattern: Mutual authentication. Both sides exchange static keys.
         let builder = Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse()?);
         let keypair = builder.generate_keypair()?;
 
         let pub_b64 = B64.encode(&keypair.public);
         let priv_b64 = B64.encode(&keypair.private);
 
-        // Atomic write could be added here for safety, standard write for now
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
         fs::write(path, format!("{}:{}", pub_b64, priv_b64))?;
 
-        // Strict permissions: 600 (Read/Write by owner only)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
 
-        eprintln!("[INFO] Identity initialized. Node ID: {}", pub_b64);
+        // sys_log("INFO", &format!("New Identity Generated: {}", pub_b64));
         Ok(Self {
             keypair,
             public_key_str: pub_b64,

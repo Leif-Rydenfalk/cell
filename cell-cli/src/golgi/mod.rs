@@ -1,3 +1,5 @@
+pub mod pheromones;
+
 use crate::antigens::Antigens;
 use crate::synapse;
 use anyhow::{Context, Result};
@@ -8,6 +10,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio::sync::RwLock;
 
 #[derive(Clone, Debug)]
 pub enum Target {
@@ -16,9 +19,10 @@ pub enum Target {
 }
 
 pub struct Golgi {
+    name: String,
     socket_path: PathBuf,
     axon_bind: Option<String>,
-    routes: Arc<HashMap<String, Target>>,
+    routes: Arc<RwLock<HashMap<String, Target>>>,
     identity: Arc<Antigens>,
 }
 
@@ -29,11 +33,15 @@ fn sys_log(level: &str, msg: &str) {
 
 impl Golgi {
     pub fn new(
+        name: String,
         run_dir: &std::path::Path,
         axon_bind: Option<String>,
         routes_map: HashMap<String, Target>,
     ) -> Result<Self> {
-        let identity = Antigens::load_or_create().context("Failed to load node identity.")?;
+        // FIX: Use local identity file in the run directory
+        let identity_path = run_dir.join("identity");
+        let identity =
+            Antigens::load_or_create(identity_path).context("Failed to load node identity.")?;
 
         sys_log(
             "INFO",
@@ -41,9 +49,10 @@ impl Golgi {
         );
 
         Ok(Self {
+            name,
             socket_path: run_dir.join("golgi.sock"),
             axon_bind,
-            routes: Arc::new(routes_map),
+            routes: Arc::new(RwLock::new(routes_map)),
             identity: Arc::new(identity),
         })
     }
@@ -60,9 +69,56 @@ impl Golgi {
             sys_log("INFO", &format!("Axon Interface online: {}", addr));
             Some(l)
         } else {
-            sys_log("WARN", "Node is isolated (No TCP).");
+            sys_log(
+                "WARN",
+                "Node is isolated (No TCP Listener). Client mode only.",
+            );
             None
         };
+
+        // --- ENDOCRINE SYSTEM (Discovery) ---
+        // Start it ALWAYS. If we have no bind address, we send port 0 (Silent Listener).
+        let port = if let Some(bind_str) = &self.axon_bind {
+            bind_str
+                .split(':')
+                .nth(1)
+                .unwrap_or("0")
+                .parse::<u16>()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        sys_log("INFO", "Endocrine System (Discovery) active.");
+        let mut rx = pheromones::EndocrineSystem::start(
+            self.name.clone(),
+            port,
+            self.identity.public_key_str.clone(),
+        )
+        .await?;
+
+        let routes_handle = self.routes.clone();
+        tokio::spawn(async move {
+            while let Some(p) = rx.recv().await {
+                let mut r = routes_handle.write().await;
+                let target_str = p.tcp_addr.to_string();
+
+                let update = match r.get(&p.cell_name) {
+                    Some(Target::Axon(existing)) => existing != &target_str,
+                    None => true,
+                    _ => false,
+                };
+
+                if update {
+                    sys_log(
+                        "INFO",
+                        &format!("Discovered Cell: {} at {}", p.cell_name, target_str),
+                    );
+                    r.insert(p.cell_name, Target::Axon(target_str));
+                }
+            }
+        });
+        // ------------------------------------
 
         let routes = self.routes;
         let identity = self.identity;
@@ -99,7 +155,7 @@ impl Golgi {
 
 async fn handle_local_signal(
     mut stream: UnixStream,
-    routes: Arc<HashMap<String, Target>>,
+    routes: Arc<RwLock<HashMap<String, Target>>>,
     identity: Arc<Antigens>,
 ) -> Result<()> {
     let mut op = [0u8; 1];
@@ -111,7 +167,12 @@ async fn handle_local_signal(
         // CONNECT
         let target_name = read_len_str(&mut stream).await?;
 
-        match routes.get(&target_name) {
+        let target_opt = {
+            let r = routes.read().await;
+            r.get(&target_name).cloned()
+        };
+
+        match target_opt {
             Some(Target::GapJunction(path)) => {
                 match UnixStream::connect(path).await {
                     Ok(target) => {
@@ -130,10 +191,9 @@ async fn handle_local_signal(
                 let (mut secure_stream, _) =
                     synapse::connect_secure(tcp_stream, &identity.keypair, true).await?;
 
-                // Handshake complete. Now send Request inside tunnel.
                 {
                     let mut buf = vec![0u8; 1024];
-                    let mut payload = vec![0x01]; // OpCode
+                    let mut payload = vec![0x01];
                     payload.extend(&(target_name.len() as u32).to_be_bytes());
                     payload.extend(target_name.as_bytes());
 
@@ -144,7 +204,6 @@ async fn handle_local_signal(
                     synapse::write_frame(&mut secure_stream.inner, &buf[..len]).await?;
                 }
 
-                // Wait for ACK
                 let frame = synapse::read_frame(&mut secure_stream.inner).await?;
                 let mut buf = vec![0u8; 1024];
                 let len = secure_stream.state.read_message(&frame, &mut buf)?;
@@ -167,7 +226,7 @@ async fn handle_local_signal(
 
 async fn handle_remote_signal(
     stream: TcpStream,
-    routes: Arc<HashMap<String, Target>>,
+    routes: Arc<RwLock<HashMap<String, Target>>>,
     identity: Arc<Antigens>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
@@ -175,14 +234,13 @@ async fn handle_remote_signal(
         synapse::connect_secure(stream, &identity.keypair, false).await?;
     let remote_id = B64.encode(remote_pub);
 
-    // Read OpCode
     let frame = synapse::read_frame(&mut secure_stream.inner).await?;
     let mut buf = vec![0u8; 1024];
     let len = secure_stream.state.read_message(&frame, &mut buf)?;
 
     if len < 5 {
         return Ok(());
-    } // Too short
+    }
 
     if buf[0] == 0x01 {
         let name_len = u32::from_be_bytes(buf[1..5].try_into()?) as usize;
@@ -191,10 +249,14 @@ async fn handle_remote_signal(
         }
         let target_name = String::from_utf8(buf[5..5 + name_len].to_vec())?;
 
-        if let Some(Target::GapJunction(path)) = routes.get(&target_name) {
+        let target_opt = {
+            let r = routes.read().await;
+            r.get(&target_name).cloned()
+        };
+
+        if let Some(Target::GapJunction(path)) = target_opt {
             match UnixStream::connect(path).await {
                 Ok(target) => {
-                    // ACK
                     let len = secure_stream
                         .state
                         .write_message(&[0x00], &mut buf)
@@ -203,7 +265,6 @@ async fn handle_remote_signal(
                     synapse::bridge_secure_to_plain(secure_stream, target).await?;
                 }
                 Err(_) => {
-                    // NACK
                     let len = secure_stream
                         .state
                         .write_message(&[0xFF], &mut buf)

@@ -17,7 +17,13 @@ async fn test_secure_handshake() -> Result<()> {
 
     // Note: This relies on Antigens loading from ~/.cell.
     // In a clean environment, this will create a key.
-    let golgi = Golgi::new(&run_dir, Some(server_addr.to_string()), routes)?;
+    let golgi = Golgi::new(
+        "router".to_string(),
+        &run_dir,
+        Some(server_addr.to_string()),
+        routes,
+    )?;
+
     tokio::spawn(async move {
         golgi.run().await.unwrap();
     });
@@ -26,7 +32,9 @@ async fn test_secure_handshake() -> Result<()> {
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
     // 2. Client Side: Connect
-    let client_identity = Antigens::load_or_create()?;
+    let client_id_path = run_dir.join("client_id");
+    let client_identity = cell_cli::antigens::Antigens::load_or_create(client_id_path)?;
+
     let stream = TcpStream::connect(server_addr).await?;
 
     // 3. Perform Handshake

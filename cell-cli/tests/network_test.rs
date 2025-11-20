@@ -92,7 +92,13 @@ async fn test_full_handshake_and_routing() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // 2. Start Golgi
-    let golgi = Golgi::new(&run_dir, Some(axon_addr.clone()), routes)?;
+    let golgi = Golgi::new(
+        "router".to_string(),
+        &run_dir,
+        Some(axon_addr.clone()),
+        routes,
+    )?;
+
     tokio::spawn(async move {
         golgi.run().await.unwrap();
     });
@@ -101,7 +107,9 @@ async fn test_full_handshake_and_routing() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // 3. Client Logic (Same as before)
-    let client_identity = antigens::Antigens::load_or_create()?;
+    let client_id_path = run_dir.join("client_id");
+    let client_identity = antigens::Antigens::load_or_create(client_id_path)?;
+
     let tcp_stream = TcpStream::connect(&axon_addr).await?;
 
     let (mut secure_stream, _) =
@@ -164,14 +172,21 @@ async fn test_route_not_found() -> Result<()> {
 
     let port = 9092;
     let axon_addr = format!("127.0.0.1:{}", port);
-    let golgi = Golgi::new(&run_dir, Some(axon_addr.clone()), HashMap::new())?;
+    let golgi = Golgi::new(
+        "router".to_string(),
+        &run_dir,
+        Some(axon_addr.clone()),
+        HashMap::new(),
+    )?;
 
     tokio::spawn(async move {
         golgi.run().await.unwrap();
     });
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let client_identity = antigens::Antigens::load_or_create()?;
+    let client_id_path = run_dir.join("client_id");
+    let client_identity = antigens::Antigens::load_or_create(client_id_path)?;
+
     let tcp_stream = TcpStream::connect(&axon_addr).await?;
     let (mut secure_stream, _) =
         synapse::connect_secure(tcp_stream, &client_identity.keypair, true).await?;

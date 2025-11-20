@@ -147,19 +147,20 @@ async fn mitosis(dir: &Path) -> Result<()> {
     }
     let bin_path = bin_path.ok_or_else(|| anyhow!("Could not locate binary"))?;
 
-    // 3. Routing
     let run_dir = dir.join("run");
     std::fs::create_dir_all(&run_dir)?;
 
     let mut routes = HashMap::new();
+
+    // --- CRITICAL: SELF-ROUTE ---
+    // The node MUST know how to reach its own internal binary.
+    // DO NOT REMOVE THIS.
     routes.insert(
         traits.name.clone(),
         Target::GapJunction(run_dir.join("cell.sock")),
     );
 
-    for (name, addr) in dna.axons {
-        routes.insert(name, Target::Axon(addr.replace("axon://", "")));
-    }
+    // --- LOCAL JUNCTIONS ---
     for (name, path) in dna.junctions {
         routes.insert(
             name,
@@ -167,7 +168,19 @@ async fn mitosis(dir: &Path) -> Result<()> {
         );
     }
 
-    let golgi = Golgi::new(&run_dir, traits.listen.clone(), routes)?;
+    // --- REMOTE AXONS (STATIC ROUTES) ---
+    // To test Auto-Discovery, we COMMENT OUT this loop.
+    // This forces the node to rely on Pheromones to find remote peers.
+
+    /*
+    for (name, addr) in dna.axons {
+        routes.insert(name, Target::Axon(addr.replace("axon://", "")));
+    }
+    */
+
+    // Initialize Golgi
+    let golgi = Golgi::new(traits.name.clone(), &run_dir, traits.listen.clone(), routes)?;
+
     let golgi_sock = run_dir.join("golgi.sock");
 
     // 4. Run Golgi (Network)
@@ -195,7 +208,10 @@ async fn mitosis(dir: &Path) -> Result<()> {
 async fn snapshot_genomes(root: &Path, axons: &HashMap<String, String>) -> Result<()> {
     let schema_dir = root.join(".cell-genomes");
     std::fs::create_dir_all(&schema_dir)?;
-    let identity = antigens::Antigens::load_or_create()?;
+
+    // Use a temp file for the builder's identity to avoid polluting the real identity
+    let temp_id_path = root.join("run/temp_builder_identity");
+    let identity = antigens::Antigens::load_or_create(temp_id_path)?;
 
     for (name, addr) in axons {
         let clean_addr = addr.replace("axon://", "");
