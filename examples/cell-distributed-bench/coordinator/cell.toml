@@ -1,9 +1,0 @@
-[cell]
-name = "coordinator"
-binary = "target/release/coordinator"
-schema = true
-
-[deps]
-# Point to the TCP address instead of "../worker"
-worker = "tcp://127.0.0.1:9000"
-aggregator = "../aggregator"

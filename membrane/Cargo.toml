@@ -20,6 +20,10 @@ serde = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
 bytes = { workspace = true }
+snow = "0.9"
+snowstorm = "0.4"
+base64 = "0.21"
+dirs = "5.0"
 
 # Target specific dependencies do not usually use { workspace = true } 
 # unless you define them specifically in the root, but standard defining is fine here.

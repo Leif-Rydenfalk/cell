@@ -1,7 +1,0 @@
-[cell]
-name = "worker"
-binary = "target/release/worker"
-schema = true
-
-[network]
-listen = "0.0.0.0:9000"

@@ -1,12 +1,27 @@
-proper error handling can be incorporated and better end to end communication and failure mechanisms and progressive failure messages and the performance issues you mentioned are easy fixes. i hate wasm because i want to be able to multithread and simd each component individually. 
+This is a very early mvp for my auto scaling organically growing everything is a cell framework. the goal is to have this be an alternative for me to use instead of kubernetes or dockercompose. The idea is this: Everything is just a cell. 
 
-Think of the alternatives here: scripting with Rhai. if the scripts are instead written in pure modular and horizontally scalable rust imagine the possibilities.
+It must be easy to integrate into existing infra and backends which are already built.
+It must be easy to deploy to the cell network.
 
-what if we make a submodule in the game which creates new gameplay to find new creative ways to kill the player during runtime? can you do that with unity or wasm? we want baremetal control with the safety of rust and hot swappability of python.
+instead of the build.rs in every consumer it should be done automatically by the sdk and every cell should have a cell.toml for composition and configuration. A cell should be able to not just call a locally defined schema like "bench_echo" but a repository, private or public with a root cell.toml and setup a instance of it locally in a docker container and use that when utilizing the service. any other good ideas?
 
-we need to keep track of version history for cells and schemas
 
-This is a very early mvp for my auto scaling organically growing everything is a cell framework. the goal is to have this be an alternative for me to use instead of kubernetes or dockercompose. The idea is this: Everything is just a cell. instead of the build.rs in every consumer it should be done automatically by the sdk and every cell should have a cell.toml for composition and configuration. A cell should be able to not just call a locally defined schema like "bench_echo" but a repository, private or public with a root cell.toml and setup a instance of it locally in a docker container and use that when utilizing the service. any other good ideas?
+cell-cli - cell is the command line tool.
+cell.toml is the config.
+no genome.toml or
+
+
+
+
+yes but i wont use wasm. i need gpu support and we need to let cell creators do whatever they want, use resources however they wish - as long as the software is opensource. They ship the source code - ai looks through it for vulnerabilities and malicious lines and if its clean the source code is downloaded into the cell structure, compiled using whatever method the author wanted and then executed. they will donate compute because thats how you get low latency and how open source stays open source and free for all contributors. open source does not have to pay companies any more. This means that the author does not have to rewrite their whole infra to support wasm - they use whatever they want so switching your infra to cell is just a couple of lines. Untrusted and unverified cells are run in a vm or container ofc.
+
+
+All authors before publishing cells to the network has to first: 1, the source code must be open source completely and reviewable by everyone. 2, they must not be anonymous.
+The cell network requires authors to take legal responsibility for the troubles their cells cause.
+
+MicroVMs
+
+
 
 
 A cell should manage itself and its own dependencies. No global supervisor and everything related to one cell, the api cache, schema cache etc should be written to the directory of the cell. This means that we can have distrubuted systems. no wasm. no cellfile. we only have the cell cli and the cell rust sdk, macros etc.  
@@ -201,8 +216,9 @@ would it kill aws if enoguh users give their resources for free globally since s
 
 
 
+what are some better names for all of these modules - following the cell methafor? long distance communication through chemicals, direct communication therough connections, cell wall, powerhouse, immune defences...
 
-so we share memory between cells? how will the api look? will it be as convinient as it is currently? we want it to be as decoupled as possible while still being coupled. say in the future my friend wants to help me build on it so they create their own services over seas and our services use eachother. a global network of baremetal services.
+
 
 
 i hate the idea of the build.rs file in each module. the users of cell should not have to declare a build.rs file for each of the module they create when it can be done automatically.  
@@ -275,6 +291,440 @@ this defeats the whole purpose with this project. the purpose is to get compile 
 - **Zero-copy runtime** - switch to Cap'n Proto/bincode after validation
 - **Version compatibility** - allow compatible changes
 - **Cached schemas** - offline compilation mode
+
+
+
+
+
+so we share memory between cells? how will the api look? will it be as convinient as it is currently? we want it to be as decoupled as possible while still being coupled. say in the future my friend wants to help me build on it so they create their own services over seas and our services use eachother. a global network of baremetal services.
+
+
+
+
+
+Moving to a strict biological metaphor will not only make the project unique but will also make the architecture intuitive: biology has already solved distributed computing, resource isolation, and hostile networking over billions of years.
+
+Here is the proposal for renaming your architecture to the **Cellular Model**.
+
+### 1. The Components (Modules)
+
+| Current Name | **New Biological Name** | **The Metaphor** |
+| :--- | :--- | :--- |
+| `cell-cli` | **`Membrane`** | The outer shell. It defines the boundary of the node, controls what enters (ports) and exits, and protects the inside from the outside world. |
+| `router` | **`Golgi`** | The shipping department. It takes raw data (Proteins), packages them into packets (Vesicles), and routes them to the correct destination, whether inside or outside the cell. |
+| `nucleus` | **`Nucleus`** | (Keep this). It holds the "DNA" (your binary) and controls execution. It decides when to replicate or self-destruct (Apoptosis). |
+| `cell-sdk` | **`Cytosol`** | The internal environment. This is the library your code "floats" in. It provides the medium for reactions (functions) to happen. |
+| `cell.toml` | **`Genome.toml`** | The blueprint. It defines the traits of the cell (Needs GPU? Needs 8GB RAM?) and its lineage (Dependencies). |
+
+### 2. The Networking (Communication)
+
+Biology distinguishes between "touching neighbors" and "distant signals."
+
+| Current Concept | **New Biological Name** | **The Metaphor** |
+| :--- | :--- | :--- |
+| **Unix Sockets** | **`Gap Junctions`** | In biology, these are physical channels between touching cells that allow ions to flow instantly. This represents your Zero-Copy, low-latency local IPC. |
+| **TCP / Internet** | **`Axons`** | Long, thin cables used by neurons to transmit signals over vast distances (relative to the cell size). |
+| **RPC Calls** | **`Signals`** | You don't "call a function"; you emit a **Signal**. |
+| **Payloads (Data)** | **`Vesicles`** | The container (buffer) that holds the chemical payload. |
+
+### 3. The Resources & Security
+
+| Current Concept | **New Biological Name** | **The Metaphor** |
+| :--- | :--- | :--- |
+| **Cgroups / Limits** | **`Cytoskeleton`** | The rigid structure that prevents the cell from growing too large and consuming all resources. It gives the cell its shape. |
+| **GPU / CPU** | **`Mitochondria`** | The powerhouse. When a cell needs compute, it requests Mitochondria. "This job requires high mitochondrial density." |
+| **Authentication** | **`Antigens`** | Identity markers. Every cell has a surface marker (Public Key). If the marker doesn't match the tissue type (Cluster ID), the request is rejected. |
+| **Firewall / Auth** | **`Immune System`** | If a packet arrives with the wrong Antigen (Signature), the **Leukocytes** (Router Security) destroy it immediately. |
+
+---
+
+### What the Code looks like now
+
+Imagine reading your `main.rs` with this new language. It becomes a description of a living organism.
+
+**The Manifest (`Genome.toml`)**
+```toml
+[genome]
+name = "worker_bee"
+traits = ["heavy_mitochondria"] # Requires GPU
+
+[synapses]
+# Long distance connections (Axons)
+coordinator = "axon://192.168.1.5:9000"
+
+[junctions]
+# Local direct connections
+logger = "../logger"
+```
+
+**The Code (`src/main.rs`)**
+```rust
+use cell::cytosol::*; // Was cell_sdk
+
+// Define the chemical signals this cell responds to
+signal_receptor! {
+    name: process_data,
+    input: ProteinData,
+    output: EnergyResult
+}
+
+fn main() -> Result<()> {
+    // The cell begins its life cycle
+    Membrane::bind(__GENOME__, |vesicle| {
+        
+        // Verify the signal matches our receptors
+        let protein = vesicle.decode::<ProteinData>()?;
+        
+        // Do work (burn mitochondria)
+        let result = do_heavy_math(protein);
+        
+        // Excrete the result back through the Golgi
+        Ok(result.into_vesicle())
+    })
+}
+```
+
+### Summary of Changes to Implement
+1.  Rename `cell-cli` crate to **`membrane`**.
+2.  Rename `cell-sdk` crate to **`cytosol`**.
+3.  Rename `router.rs` to **`golgi.rs`**.
+4.  Change `route_target` enum variants to `GapJunction` (Unix) and `Axon` (TCP).
+5.  Change `run_nucleus` to `mitosis` (cell division/startup) or just keep `nucleus`.
+
+This creates a powerful mental model. A "Cluster" isn't a list of servers anymore; it is a **Tissue**. The Internet is the **Nervous System**.
+
+
+
+
+
+---
+
+
+
+### Phase 1: The "Nervous System" (Networking)
+
+Currently, your router only speaks **Unix Sockets**. We need it to speak **TCP (or QUIC)** so two laptops on the same Wi-Fi can talk.
+
+**The Task:**  
+Implement the RouteTarget::RemoteTcp logic in router.rs properly.
+
+1. **The Handshake:** When Router A connects to Router B via TCP, they must identify themselves.
+    
+2. **Serialization:** We need to frame the Rkyv bytes over TCP (Length-Prefixed framing, which we are already doing).
+    
+
+**The "Cell" Feature:**  
+You will be able to put worker = "192.168.1.50:9000" in cell.toml, and the Coordinator will seamlessly offload the math to your second computer.
+
+### Phase 2: The "Immune System" (Identity & Encryption)
+
+You cannot send raw bytes over the internet.
+
+1. **Identity:** Every Cell Daemon must generate an **Ed25519 Keypair** on first launch.
+    
+    - Your "Address" isn't an IP. It is your Public Key: cell://8f3a...9d1.
+        
+2. **Encryption:** The Router must wrap all TCP traffic in **Noise Protocol** (like WireGuard) or **mTLS**.
+    
+    - This ensures that if I send code to your node, only you can read it, and I know it's actually you executing it.
+        
+
+**The "Cell" Feature:**  
+No more Connection Refused. If you aren't authorized (signed by a trusted key), the Router drops the packet.
+
+### Phase 3: The "Senses" (Discovery)
+
+Hardcoding IPs (192.168...) is the old internet. "Cell" should feel organic.
+
+**The Task:**  
+Implement **mDNS (Multicast DNS)** and **Gossip Protocol**.
+
+1. **LAN:** When you start cell daemon, it broadcasts "I am a Cell! I have 8 CPUs and a GPU!" to the local network.
+    
+2. **Global:** If you are on the public internet, nodes gossip about their neighbors ("I know a guy who knows a guy").
+    
+
+**The "Cell" Feature:**  
+You remove [deps] from cell.toml.  
+You write: let worker = CellClient::find_nearest("gpu-worker");  
+The SDK finds the neighbor's gaming PC automatically.
+
+### Phase 4: The "Reproduction" (Code Mobility)
+
+This is the Holy Grail.  
+Currently, you have to manually copy the worker binary to the other computer.
+
+**The Task:**  
+Implement a **Control Plane** in the Router.
+
+1. **The Request:** "I need to run worker but I am overloaded."
+    
+2. **The Transfer:** The Router serializes the worker binary and streams it to the neighbor.
+    
+3. **The Spawn:** The neighbor's Daemon receives the binary, sandboxes it (Cgroups), and starts it.
+    
+4. **The Cleanup:** When the connection closes, the neighbor deletes the binary.
+    
+
+---
+
+
+
+
+This is a very ambitious, very *cool* project.  
+It’s not just “let’s slap gRPC behind a Unix socket” – it’s a full-blown, opinionated, *biologically-inspired* distributed runtime. A few high-level thoughts, then some concrete notes you can act on if you want.
+
+--------------------------------------------------
+1. The Good (what already feels “right”)
+--------------------------------------------------
+- **Zero-copy everywhere** – rkyv + AlignedVec + `bridge_streams` doing a kernel `splice`-style copy. You’re serious about latency.  
+- **Noise_XX** – mutual authentication, perfect-forward secrecy, no X.509 ceremony.  
+- **Cgroup integration** – the nucleus actually puts the worker in its own memory/CPU cage; most PaaS forget this.  
+- **Socket-activation first** – the FD is inherited, so the listening socket is *never* closed between restarts; gives you zero-downtime upgrades “for free” later.  
+- **Schema-sync via `__GENOME__`** – compile-time fetch of neighbour schemas, stored under `.cell-genomes`; reminds me of protobuf descriptor sets but without the cruft.  
+- **Proc-macro DSL** – `signal_receptor!` and `call_as!` give you a typed RPC stub in two lines; the macro expands to the exact rkyv incantation, so the user can’t mess it up.  
+- **Names** – Golgi, Vesicle, Antigens, Ribosome… the metaphor is consistent *and* helps newcomers remember which layer does what. (Golgi = routing, Vesicle = packet, Antigens = identity, etc.)
+
+--------------------------------------------------
+2. The “Maybe Later” List (non-blocking, but keep an eye)
+--------------------------------------------------
+a. **Discovery & Routing Table Updates**  
+   Routes are static once `mitosis` starts. A simple gossip-on-a-timer (or a real distributed-k/v) would let you add/remove cells without a full restart.
+
+b. **Back-pressure / Flow-control**  
+   `bridge_streams` is fire-and-forget. If the local service is stalled, the kernel socket buffers will eventually fill and *block* the remote sender, but there’s no user-visible back-pressure token. A small credit-based protocol inside the Noise tunnel would let you do “pull” instead of “push”.
+
+c. **mTLS-style ACLs**  
+   You already have the remote static key in `handle_remote_signal`. Adding an `allow_list.txt` with base64-encoded public keys and checking it before writing the `0x00 ACK` would give you service-level auth without new crypto.
+
+d. **Hot-reload of the worker binary**  
+   Because the listener FD is inherited, you can re-exec the nucleus with a new binary and *re-attach* the same socket. You’re 80 % of the way to blue-green deployments.
+
+e. **Metrics / Observability**  
+   A ` Vesicle` header with a 128-bit trace-ID (randomly generated at the ingress Golgi) would let you stitch together a distributed trace across cells. You already have the perfect injection point in `handle_local_signal` / `handle_remote_signal`.
+
+f. **Windows support**  
+   Today you use `UnixListener` and `cgroups-rs`. A named-pipe equivalent + Job Objects would let you run the same code on Windows, but that’s a *big* chunk of work; probably not worth it unless you have paying customers on that platform.
+
+--------------------------------------------------
+3. Tiny Code Nits (if you want PR-sized fixes)
+--------------------------------------------------
+- `read_length_prefixed_string` hard-caps at 64 KiB. That’s fine for service names, but the same helper is used for the actual payload later. Consider making the limit configurable or introducing a separate “control plane / data plane” limit.  
+- `bridge_streams` silently drops errors (`let _ = try_join!`). If the splice fails you might want to log the `Result` at `DEBUG` level – helps when you’re chasing a corrupted stream.  
+- `Antigens::generate` uses `eprintln!` directly; for consistency it could go through the same `sys_log` macro the others use.  
+- `snapshot_genomes` blocks `mitosis` until *all* remotes answer. A timeout + join-set would let you continue even if one neighbour is down.  
+- `cell-sdk = { path = "../../cell-sdk" }` in the example workspace is brittle; publish a version to a local registry (or use `git = …`) once you tag a release.
+
+--------------------------------------------------
+4. Possible Killer Feature (if you’re looking for one)
+--------------------------------------------------
+**“Cellular Functions”** – compile a *single* Rust function to WASM, wrap it in a 5-line genome.toml, and `mitosis` spawns it inside a pre-compiled WASM runtime (Wasmtime). You’d get:
+
+- millisecond cold-start (no LLVM)  
+- memory limits via Wasmtime’s store limits instead of cgroups  
+- the same Noise + Vesicle protocol, just replacing the “worker” binary with a WASM module.  
+
+That would turn the project into a *lambda-grade* FaaS but with the same zero-copy, mutually-authenticated, Unix-socket-speed local calls. If you ever want a flashy demo, that’s it.
+
+--------------------------------------------------
+Bottom line
+--------------------------------------------------
+You’ve built a **minimal, correct, fast** foundation that already hangs together end-to-end. The abstractions are cohesive, the security is modern, and the performance obsession is real. Iterate on operability (discovery, hot-reload, metrics) and you’ll have something that bigger teams would happily run in prod.
+
+
+
+
+
+
+---
+
+This is a serious, high-quality start. You have effectively built a **Systemd-style Socket Activation** system with **Zero-Copy serialization**.
+
+Your architectural intuition is correct: **The "Nucleus" (the Daemon) is the key.**
+
+Right now, you have a working **Local Mesh**. To turn this into the **Global Organic Internet** you described, you need to refactor how the Nucleus handles connections.
+
+Here is the critique of your MVP and the specific steps to scale this from "Processes on a Desktop" to "Nodes on the Internet."
+
+---
+
+### 1. The Architecture Review
+
+**What you did right:**
+1.  **Socket Activation (`nucleus.rs`):** You bind the socket in the parent (CLI) and pass the file descriptor (FD) to the child. This is exactly how high-performance systems (like Nginx or Systemd) avoid race conditions.
+2.  **`rkyv` Integration:** You aren't just parsing JSON; you are casting raw bytes to memory structures. This is the only way to get "Bare Metal" performance in a high-level language.
+3.  **Macro Abstraction:** `service_schema!` hides the complexity. The user just writes a struct.
+
+**The Bottleneck (The "Local" Trap):**
+Look at this line in `cell-cli/src/main.rs`:
+```rust
+// Cell-centric logic: Peers are siblings in the parent directory.
+let parent = dir.parent()...
+let dep_sock = parent.join(dep_name).join("run/cell.sock");
+```
+**This is the chain holding you back.**
+Currently, your cells *must* exist on the same disk in a specific folder structure. A "Worker" in Stockholm cannot exist if the "Coordinator" in Umeå looks for it at `../worker/run/cell.sock`.
+
+---
+
+### 2. The Pivot: Nucleus as a Proxy (The "Service Mesh")
+
+To make this global, **the SDK must never know file paths.**
+
+**Current Flow:**
+SDK → reads env var → connects to `../worker/cell.sock` → Worker Process.
+
+**Required "Cell" Flow:**
+SDK → connects to `run/nucleus.sock` (Its own supervisor) → asks for "worker" → **Nucleus Magic** → Worker Process.
+
+**Why?**
+If the SDK asks the Nucleus for "worker", the Nucleus decides:
+1.  Is "worker" running locally? -> Bridge to local Unix Socket.
+2.  Is "worker" on a neighbor's PC? -> Tunnel data over TCP/QUIC to the neighbor's Nucleus.
+
+The user code **does not change**. It always writes to a local socket. The Nucleus handles the internet.
+
+---
+
+### 3. Implementation Steps
+
+Here is how to modify your existing code to support this.
+
+#### Step A: Modifying `cell-cli/src/nucleus.rs` to enforce Resource Limits (cgroups)
+
+Since you want to let users execute arbitrary code (no Wasm) but maintain safety, you must apply **cgroups** before you `exec` the binary. This limits CPU/RAM so a malicious cell can't crash the host.
+
+Add `cgroups-rs` to `cell-cli/Cargo.toml`.
+
+```rust
+// In cell-cli/src/nucleus.rs
+
+use cgroups_rs::{CgroupBuilder, CgroupPid, Hierarchies};
+
+// Inside run_nucleus, before Command::new()...
+pub fn run_nucleus(...) {
+    // ... existing socket setup ...
+
+    // 1. Create a Linux Control Group (cgroup) for this cell
+    let hier = Hierarchies::auto();
+    let cg = CgroupBuilder::new("cell_worker_1")
+        .cpu()
+            .shares(100) // Low priority
+        .done()
+        .memory()
+            .limit(1024 * 1024 * 512) // Hard limit: 512MB RAM
+        .done()
+        .build(hier);
+
+    // 2. Execute the binary
+    let mut cmd = Command::new(real_binary);
+    
+    // ... env setup ...
+
+    // 3. Instead of just exec(), we move the child process into the cgroup
+    // Note: In Rust std::process, we do this slightly differently via pre_exec
+    unsafe {
+        cmd.pre_exec(move || {
+            // Get current PID (which is the child's PID now)
+            let pid = CgroupPid::from(libc::getpid() as u64);
+            // Add this process to the cgroup restrictions
+            let _ = cg.add_task(pid); 
+            Ok(())
+        });
+    }
+
+    cmd.exec();
+}
+```
+
+#### Step B: Abstracing the Network Layer (TCP Bridge)
+
+You need a way to tunnel your `rkyv` bytes over TCP. Since you are using Unix Sockets (Streams), this is easy.
+
+Create a new command in `cell-cli`: `cell gateway`.
+
+```rust
+// Pseudo-code for cell-cli/src/gateway.rs
+
+use tokio::net::{TcpListener, UnixStream};
+use tokio::io::copy_bidirectional;
+
+async fn bridge_socket_to_tcp(local_socket: PathBuf, remote_ip: String) {
+    // 1. The cell connects to its local socket thinking it's a peer
+    let mut local = UnixStream::connect(local_socket).await.unwrap();
+    
+    // 2. The Nucleus connects to the remote computer
+    let mut remote = TcpStream::connect(remote_ip).await.unwrap();
+
+    // 3. We glue them together. Zero-copy splicing if possible.
+    // Now RKYV bytes flow over the internet.
+    copy_bidirectional(&mut local, &mut remote).await.unwrap();
+}
+```
+
+#### Step C: Dynamic Discovery (Removing `cell.toml` dependencies)
+
+Remove `[deps]` from `cell.toml`.
+Instead, when a cell needs a dependency, it asks for it at runtime.
+
+**Change `cell-sdk/src/lib.rs`:**
+
+```rust
+// New SDK flow
+pub fn connect(service_name: &str) -> Result<CellClient> {
+    // 1. Don't look for "../worker".
+    // 2. Look for a special "Router Socket" provided by the Nucleus.
+    let router_sock = std::env::var("CELL_ROUTER_SOCK")?;
+    
+    let mut stream = UnixStream::connect(router_sock)?;
+    
+    // 3. Handshake: Tell the Nucleus who we want to talk to.
+    // Protocol: [CONNECT_OP_CODE] [SERVICE_NAME_LEN] [SERVICE_NAME]
+    stream.write_all(&[0x01])?; 
+    stream.write_all(&(service_name.len() as u32).to_be_bytes())?;
+    stream.write_all(service_name.as_bytes())?;
+    
+    // 4. If Nucleus says OK, this stream is now a direct pipe to that service
+    // (whether it's local or in Stockholm).
+    Ok(CellClient { stream, ... })
+}
+```
+
+### 4. The "Organic Growth" Logic
+
+You mentioned "self-replicating and self-deleting."
+
+You need to expose a **Control Plane API** to the Cell. The Cell SDK needs a function like:
+
+```rust
+// cell-sdk/src/control.rs
+
+pub fn replicate_me(region: &str) -> Result<()> {
+    // Sends a signal to Nucleus: "I am under load. 
+    // Find a peer in 'region', send my binary there, and start it."
+    let nucleus = connect_nucleus_control_plane()?;
+    nucleus.send_command(Command::Replicate { 
+        binary_path: env::current_exe()?,
+        target_region: region 
+    })
+}
+
+pub fn suicide() {
+    // "I am idle. Kill me."
+    std::process::exit(0);
+}
+```
+
+### Summary of Next Steps
+
+1.  **Immediate:** Add `cgroups` to `nucleus.rs`. This makes your "bare metal" safe(r).
+2.  **Refactor:** Change `cell-sdk` to stop calculating paths (`../`) and instead connect to a central `router.sock` managed by the CLI.
+3.  **Network:** Implement a simple TCP listener in the CLI that accepts incoming connections and pipes them to the local Unix socket.
+
+You are building a **Distributed Operating System**. Currently, you have built the **Kernel** (Nucleus/SDK). Now you need the **Network Driver**. Keep going, the `rkyv` foundation is excellent.
+
+---
+
 
 
 2. Store two schemas per service

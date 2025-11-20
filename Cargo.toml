@@ -1,6 +1,7 @@
 [workspace]
-members = ["cell-sdk", "cell-macros", "cell-cli"]
 resolver = "2"
+members = ["membrane", "cytosol", "ribosome"]
+exclude = ["examples"]
 
 [workspace.package]
 version = "0.2.0"
@@ -8,29 +9,46 @@ authors = ["Leif Rydenfalk"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Leif-Rydenfalk/cell"
-homepage = "https://github.com/Leif-Rydenfalk/cell"
-documentation = "https://docs.rs/cell-sdk"
-readme = "README.md"
-keywords = ["rpc", "distributed", "zero-copy", "mesh", "p2p"]
-categories = ["network-programming", "command-line-utilities", "asynchronous"]
+description = "A biological distributed supercomputing substrate."
 
 [workspace.dependencies]
-# Internal
-cell-macros = { version = "0.2.0", path = "./cell-macros" }
-cell-sdk = { version = "0.2.0", path = "./cell-sdk" }
+# --- Internal Crates ---
+# We define path here so the workspace members can find each other,
+# but we verify versions match.
+cytosol = { version = "0.2.0", path = "./cytosol" }
+ribosome = { version = "0.2.0", path = "./ribosome" }
 
-# External
+# --- Core Infrastructure ---
+anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-anyhow = "1.0"
 tokio = { version = "1.36", features = ["full"] }
-bytes = "1.5"
 libc = "0.2"
-humantime = "2.1"
+dirs = "5.0"
+
+# --- Network & Security ---
+snow = "0.9"
+snowstorm = "0.4"
+base64 = "0.22"
+rkyv = { version = "0.7", features = ["validation"] }
+
+# --- CLI & Utilities ---
 clap = { version = "4.5", features = ["derive"] }
 toml = "0.8"
-rkyv = { version = "0.7", features = ["validation"] }
-syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
+humantime = "2.1"
+rand = "0.8"
+
+# --- Linux Specific ---
+cgroups-rs = "0.3.3"
+
+# --- Macros ---
+syn = { version = "2.0", features = ["full", "extra-traits"] }
 quote = "1.0"
 proc-macro2 = "1.0"
-blake3 = "1.5"
+
+# --- Optimization Profiles ---
+# Maximum performance for release builds
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

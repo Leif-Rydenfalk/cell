@@ -57,6 +57,14 @@ examples/
   cell-distributed-bench/   – 3-service topology that hits 48 Gbps on 16-core box
 ```
 
+## The Complete Metaphor Mapping
+Genome.toml (The Plan) →
+ribosome (The Compiler/Macro) reads the plan →
+Synthesizes Proteins (Rust Structs) →
+Which float in the cytosol (SDK) →
+And are transported by the golgi (Router) →
+Across the membrane (CLI/Node) to other cells.
+
 ## Build & test
 ```bash
 cargo build --release
