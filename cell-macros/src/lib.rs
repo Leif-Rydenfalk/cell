@@ -164,7 +164,8 @@ fn parse_and_generate_call(
     let output_ident = syn::Ident::new(output_type_str, proc_macro2::Span::call_site());
 
     Ok(quote! {
-        {
+        // Wrap in an immediately invoked closure to ensure '?' works correctly anywhere
+        (move || -> ::anyhow::Result<#output_ident> {
             let payload = ::cell_sdk::rkyv::to_bytes::<_, 1024>(&#expr)
                 .map_err(|e| ::anyhow::anyhow!("Packing error: {}", e))?
                 .into_vec();
@@ -173,7 +174,6 @@ fn parse_and_generate_call(
             let mut synapse = ::cell_sdk::Synapse::grow(#cell_name)?;
             let v_in = synapse.fire(v_out)?;
 
-            // IMPORTANT: Use check_archived_root from the SDK re-export
             let archived = ::cell_sdk::rkyv::check_archived_root::<#output_ident>(v_in.as_slice())
                 .map_err(|e| ::anyhow::anyhow!("Validation error: {}", e))?;
 
@@ -181,7 +181,7 @@ fn parse_and_generate_call(
             let resp: #output_ident = archived.deserialize(&mut ::cell_sdk::rkyv::Infallible)
                 .map_err(|e| ::anyhow::anyhow!("Deserialization error: {}", e))?;
 
-            Ok::<#output_ident, ::anyhow::Error>(resp)
-        }
+            Ok(resp)
+        })()
     })
 }

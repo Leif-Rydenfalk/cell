@@ -100,3 +100,26 @@ Heavy (1MB)               | 164 req/s    | 172.22 MB/s  | 6.09ms
    Max Bandwidth:  172.22 MB/s
 ======================================
 
+
+CELL BENCHMARK
+=======================================
+Warming up connection pool... Done.
+
+Running: Latency Test (1 Thread)
+.....
+   Duration:   533.25ms
+   Throughput: 18753 Req/sec
+   Bandwidth:  0.02 MB/s
+=======================================
+Running: Max RPS (8 Threads)
+.....
+   Duration:   35.05s
+   Throughput: 45643 Req/sec
+   Bandwidth:  0.05 MB/s
+=======================================
+Running: Bandwidth (8 Threads, 64KB)
+.....
+   Duration:   11.36s
+   Throughput: 7042 Req/sec
+   Bandwidth:  461.53 MB/s
+=======================================

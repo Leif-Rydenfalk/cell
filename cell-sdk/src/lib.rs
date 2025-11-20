@@ -2,7 +2,10 @@ pub mod vesicle;
 
 use anyhow::{bail, Context, Result};
 pub use cell_macros::{call_as, signal_receptor};
-use rkyv::AlignedVec;
+pub use rkyv;
+
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -10,10 +13,11 @@ use std::path::Path;
 use std::sync::Arc;
 use vesicle::Vesicle;
 
-// Re-export rkyv for macros
-pub use rkyv;
+/// Thread-local pool to reuse connections (Keep-Alive)
+thread_local! {
+    static CONNECTION_POOL: RefCell<HashMap<String, UnixStream>> = RefCell::new(HashMap::new());
+}
 
-/// The Membrane is the boundary of your logic.
 pub struct Membrane;
 
 impl Membrane {
@@ -25,7 +29,6 @@ impl Membrane {
             let fd: i32 = fd_str.parse().context("Invalid CELL_SOCKET_FD")?;
             unsafe { UnixListener::from_raw_fd(fd) }
         } else {
-            // Dev mode fallback
             let path = Path::new("run/cell.sock");
             if let Some(p) = path.parent() {
                 std::fs::create_dir_all(p)?;
@@ -39,6 +42,7 @@ impl Membrane {
         let genome_trait = signal_def.as_bytes().to_vec();
         let handler = Arc::new(handler);
 
+        // Spawn a thread for each incoming connection (Blocking I/O model)
         for stream in listener.incoming() {
             match stream {
                 Ok(mut s) => {
@@ -55,28 +59,37 @@ impl Membrane {
     }
 }
 
-/// A Synapse is a connection to another Cell.
 pub struct Synapse {
     stream: UnixStream,
+    target: String,
 }
 
 impl Synapse {
-    /// Grow a synapse towards a target cell name.
-    /// Connects to local Golgi, performs handshake, establishes bridge.
     pub fn grow(target_cell: &str) -> Result<Self> {
-        let golgi_path = std::env::var("CELL_GOLGI_SOCK")
-            .context("CELL_GOLGI_SOCK not set. Are you running inside 'membrane mitosis'?")?;
+        // 1. Check Pool
+        let cached_stream = CONNECTION_POOL.with(|pool| pool.borrow_mut().remove(target_cell));
+
+        if let Some(stream) = cached_stream {
+            return Ok(Self {
+                stream,
+                target: target_cell.to_string(),
+            });
+        }
+
+        // 2. Connect New
+        let golgi_path =
+            std::env::var("CELL_GOLGI_SOCK").unwrap_or_else(|_| "run/golgi.sock".to_string());
 
         let mut stream = UnixStream::connect(&golgi_path)
             .with_context(|| format!("Failed to connect to Golgi at {}", golgi_path))?;
 
-        // Protocol: [Op: 0x01] [Len: u32] [Name]
+        // Handshake: [Op: 0x01] [Len: u32] [Name]
         stream.write_all(&[0x01])?;
         let name_bytes = target_cell.as_bytes();
         stream.write_all(&(name_bytes.len() as u32).to_be_bytes())?;
         stream.write_all(name_bytes)?;
 
-        // Wait for Ack from Golgi
+        // Wait for Ack
         let mut ack = [0u8; 1];
         stream.read_exact(&mut ack)?;
         if ack[0] != 0x00 {
@@ -87,19 +100,38 @@ impl Synapse {
             );
         }
 
-        Ok(Self { stream })
+        Ok(Self {
+            stream,
+            target: target_cell.to_string(),
+        })
     }
 
-    /// Fire a signal (send a Vesicle) and await response.
-    pub fn fire(&mut self, vesicle: Vesicle) -> Result<Vesicle> {
-        // Send Length + Data
-        self.stream
-            .write_all(&(vesicle.len() as u32).to_be_bytes())?;
-        self.stream.write_all(vesicle.as_slice())?;
-        self.stream.flush()?;
+    pub fn fire(mut self, vesicle: Vesicle) -> Result<Vesicle> {
+        // Send
+        if let Err(e) = self.write_vesicle(&vesicle) {
+            // If write fails, discard stream (don't pool it)
+            return Err(e);
+        }
 
-        // Receive Response
-        read_vesicle(&mut self.stream)
+        // Receive
+        let response = match read_vesicle(&mut self.stream) {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        };
+
+        // Recycle Stream to Pool
+        CONNECTION_POOL.with(|pool| {
+            pool.borrow_mut().insert(self.target.clone(), self.stream);
+        });
+
+        Ok(response)
+    }
+
+    fn write_vesicle(&mut self, v: &Vesicle) -> Result<()> {
+        self.stream.write_all(&(v.len() as u32).to_be_bytes())?;
+        self.stream.write_all(v.as_slice())?;
+        self.stream.flush()?;
+        Ok(())
     }
 }
 
@@ -109,25 +141,27 @@ fn handle_transport(
     handler: &dyn Fn(Vesicle) -> Result<Vesicle>,
 ) -> Result<()> {
     loop {
-        // Check if stream is closed
         let incoming = match read_vesicle(stream) {
             Ok(v) => v,
-            Err(_) => break,
+            Err(_) => break, // Connection closed
         };
 
-        // Genome Discovery Request
         if incoming.as_slice() == b"__GENOME__" {
             let v_out = Vesicle::wrap(genome.to_vec());
-            send_vesicle(stream, v_out)?;
+            if send_vesicle(stream, v_out).is_err() {
+                break;
+            }
             continue;
         }
 
-        // User Logic
         match handler(incoming) {
-            Ok(response) => send_vesicle(stream, response)?,
+            Ok(response) => {
+                if send_vesicle(stream, response).is_err() {
+                    break;
+                }
+            }
             Err(e) => {
-                eprintln!("Cytosol Error: {:?}", e);
-                // We should probably send an error frame here in a real protocol
+                eprintln!("Handler Error: {:?}", e);
                 break;
             }
         }
@@ -140,11 +174,7 @@ fn read_vesicle(stream: &mut UnixStream) -> Result<Vesicle> {
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
 
-    // Sanity limit
-    if len > 512 * 1024 * 1024 {
-        bail!("Vesicle too large (>512MB)");
-    }
-
+    // reuse buffer logic could go here for next optimization
     let mut v = Vesicle::with_capacity(len);
     stream.read_exact(v.as_mut_slice())?;
     Ok(v)
