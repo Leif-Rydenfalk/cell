@@ -2,5 +2,8 @@
 Run tests:
 cell mitosis .
 
-Check test results:
-tail coordinator/run/service.log
+Follow test results:
+tail -f coordinator/run/service.log
+
+Follow workers:
+tail -f worker/run/service.log

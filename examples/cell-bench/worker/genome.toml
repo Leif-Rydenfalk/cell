@@ -2,3 +2,4 @@
 name = "worker"
 binary = "worker"       # Matches package name
 listen = "0.0.0.0:9000"
+replicas = 4

@@ -11,7 +11,8 @@ const PORT: u16 = 9099;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Pheromone {
-    pub cell_name: String,
+    pub cell_name: String,     // Unique ID e.g. "worker-1" (or "worker" if single)
+    pub service_group: String, // Group ID e.g. "worker"
     pub tcp_addr: SocketAddr,
     pub public_key: String,
 }
@@ -23,18 +24,17 @@ impl EndocrineSystem {
     /// Returns a channel where discovered peers will be sent.
     pub async fn start(
         my_name: String,
+        service_group: String,
         my_tcp_port: u16,
         my_pub_key: String,
     ) -> Result<mpsc::Receiver<Pheromone>> {
         let (tx, rx) = mpsc::channel(32);
 
         // 1. Setup Send Socket (Broadcast capable)
-        // We use this to shout "I am here!"
         let send_socket = UdpSocket::bind("0.0.0.0:0")?;
         send_socket.set_broadcast(true)?;
 
         // 2. Setup Receive Socket (Multicast)
-        // We use this to hear others.
         let recv_socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
         // Allow multiple cells on the same machine to listen to 9099
@@ -65,11 +65,12 @@ impl EndocrineSystem {
         let my_ip = get_local_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
         let my_info = Pheromone {
             cell_name: my_name,
+            service_group,
             tcp_addr: SocketAddr::new(my_ip, my_tcp_port),
             public_key: my_pub_key,
         };
 
-        // 4. Spawn Pulse (Sender) - ONLY IF WE HAVE A PORT
+        // 4. Spawn Pulse (Sender) - ONLY IF WE HAVE A PORT (The Router)
         if my_tcp_port > 0 {
             let sender_info = my_info.clone();
             tokio::spawn(async move {
@@ -93,7 +94,7 @@ impl EndocrineSystem {
             loop {
                 if let Ok((len, _addr)) = recv_socket.recv_from(&mut buf).await {
                     if let Ok(p) = serde_json::from_slice::<Pheromone>(&buf[..len]) {
-                        // Don't discover self
+                        // Don't discover self (based on PubKey)
                         if p.public_key != receiver_info.public_key {
                             let _ = tx.send(p).await;
                         }

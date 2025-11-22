@@ -22,17 +22,21 @@ fn main() -> Result<()> {
         let job = cell_sdk::rkyv::check_archived_root::<WorkLoad>(vesicle.as_slice())
             .map_err(|e| anyhow::anyhow!("Corrupt DNA: {}", e))?;
 
-        // Simulating CPU work
+        // --- SIMULATE HEAVY WORK ---
         let mut rng = rand::thread_rng();
         let mut sum = 0u64;
-        // Reduce this to 100 to measure Network overhead, not RNG speed
-        for _ in 0..100 {
-            sum = sum.wrapping_add(rng.gen::<u64>());
-        }
 
-        // Only log every 1000 requests to save I/O
-        if job.id % 1000 == 0 {
-            println!("Processed batch up to Job #{}", job.id);
+        // Uncomment to simulate real CPU load
+        // If this is too low, the bottleneck is the Golgi Router, not the workers.
+        // for _ in 0..500_000 {
+        //     sum = sum.wrapping_add(rng.gen::<u64>());
+        // }
+        // ---------------------------
+
+        // Log to prove which worker is handling it (Vacuole will tag this)
+        // Only log occasionally to avoid disk spam affecting benchmarks
+        if job.id % 500 == 0 {
+            println!("Processed Job #{}", job.id);
         }
 
         let res = WorkResult {

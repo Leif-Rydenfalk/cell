@@ -4,12 +4,13 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime};
+use std::sync::Arc; // Added for Golgi Arc optimization
+use std::time::SystemTime;
 use tokio::net::TcpStream;
 
 // Import from internal lib
 use cell_cli::golgi::{Golgi, Target};
-use cell_cli::{antigens, nucleus, synapse};
+use cell_cli::{antigens, nucleus, synapse, vacuole};
 
 #[derive(Parser)]
 #[command(name = "membrane")]
@@ -24,7 +25,7 @@ enum Action {
     Mitosis { dir: PathBuf },
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct Genome {
     genome: Option<CellTraits>,
     #[serde(default)]
@@ -34,16 +35,18 @@ struct Genome {
     workspace: Option<WorkspaceTraits>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct WorkspaceTraits {
     members: Vec<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct CellTraits {
     name: String,
     #[serde(default)]
     listen: Option<String>,
+    #[serde(default)]
+    replicas: Option<u32>,
 }
 
 fn sys_log(level: &str, msg: &str) {
@@ -76,20 +79,15 @@ async fn mitosis(dir: &Path) -> Result<()> {
         sys_log("INFO", "System detected. Commencing Multi-Cell Mitosis...");
         let self_exe = std::env::current_exe()?;
 
-        // We use a vector to hold the children.
-        // When this vector is dropped (at the end of function), the children are killed.
         let mut children = Vec::new();
 
         for member in ws.members {
             let member_path = dir.join(&member);
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
-            // Stagger start
-            tokio::time::sleep(Duration::from_millis(250)).await;
-
-            // Use tokio::process::Command for async control + kill_on_drop
             let mut cmd = tokio::process::Command::new(&self_exe);
             cmd.arg("mitosis").arg(member_path);
-            cmd.kill_on_drop(true); // <--- THIS IS THE FIX
+            cmd.kill_on_drop(true);
             cmd.stdout(Stdio::inherit());
             cmd.stderr(Stdio::inherit());
 
@@ -99,13 +97,10 @@ async fn mitosis(dir: &Path) -> Result<()> {
 
         sys_log("INFO", "System Running. Press Ctrl+C to shutdown.");
         tokio::signal::ctrl_c().await?;
-
-        sys_log("WARN", "Shutdown Signal Received. Terminating all cells...");
-        // 'children' goes out of scope here, sending SIGKILL to all members.
         return Ok(());
     }
 
-    // --- CELL MODE (SINGLE NODE) ---
+    // --- CELL MODE ---
     let traits = dna.genome.context("Invalid genome")?;
 
     // 1. Snapshot Remote Dependencies
@@ -148,17 +143,72 @@ async fn mitosis(dir: &Path) -> Result<()> {
     let bin_path = bin_path.ok_or_else(|| anyhow!("Could not locate binary"))?;
 
     let run_dir = dir.join("run");
+    if run_dir.exists() {
+        std::fs::remove_dir_all(&run_dir)?;
+    }
     std::fs::create_dir_all(&run_dir)?;
 
     let mut routes = HashMap::new();
 
-    // --- CRITICAL: SELF-ROUTE ---
-    // The node MUST know how to reach its own internal binary.
-    // DO NOT REMOVE THIS.
-    routes.insert(
-        traits.name.clone(),
-        Target::GapJunction(run_dir.join("cell.sock")),
-    );
+    // --- COLONY / REPLICA LOGIC ---
+    let replicas = traits.replicas.unwrap_or(1);
+    let mut child_guards = Vec::new();
+    let golgi_sock_path = run_dir.join("golgi.sock");
+
+    if replicas > 1 {
+        sys_log("INFO", &format!("Spawning Colony: {} workers.", replicas));
+
+        let socket_dir = run_dir.join("sockets");
+        std::fs::create_dir_all(&socket_dir)?;
+
+        // Setup Vacuole (Shared Logging)
+        let log_path = run_dir.join("service.log");
+        let vacuole = vacuole::Vacuole::new(log_path).await?;
+
+        let mut worker_sockets = Vec::new();
+
+        for i in 0..replicas {
+            // Use subdirectory for isolation of socket (prevents name collisions)
+            let worker_dir = run_dir.join("workers").join(i.to_string());
+            std::fs::create_dir_all(&worker_dir)?;
+            let sock_path = worker_dir.join("cell.sock");
+
+            worker_sockets.push(sock_path.clone());
+
+            // LogStrategy::Piped -> streams back to parent -> Vacuole
+            let mut guard = nucleus::activate(
+                &sock_path,
+                nucleus::LogStrategy::Piped,
+                &bin_path,
+                &golgi_sock_path,
+            )?;
+
+            // Attach pipes to Vacuole
+            let (out, err) = guard.take_pipes();
+            vacuole.attach(format!("w-{}", i), out, err);
+
+            child_guards.push(guard);
+        }
+
+        routes.insert(
+            traits.name.clone(),
+            Target::LocalColony(Arc::new(worker_sockets)), // Wrap in Arc for Golgi
+        );
+    } else {
+        // Single Cell Mode (Direct File Logging)
+        let cell_sock = run_dir.join("cell.sock");
+        let log_path = run_dir.join("service.log");
+
+        let guard = nucleus::activate(
+            &cell_sock,
+            nucleus::LogStrategy::File(log_path),
+            &bin_path,
+            &golgi_sock_path,
+        )?;
+        child_guards.push(guard);
+
+        routes.insert(traits.name.clone(), Target::GapJunction(cell_sock));
+    }
 
     // --- LOCAL JUNCTIONS ---
     for (name, path) in dna.junctions {
@@ -169,47 +219,42 @@ async fn mitosis(dir: &Path) -> Result<()> {
     }
 
     // --- REMOTE AXONS (STATIC ROUTES) ---
-    // To test Auto-Discovery, we COMMENT OUT this loop.
-    // This forces the node to rely on Pheromones to find remote peers.
-
-    /*
     for (name, addr) in dna.axons {
-        routes.insert(name, Target::Axon(addr.replace("axon://", "")));
+        let clean = addr.replace("axon://", "");
+        routes.insert(
+            name,
+            Target::AxonCluster(vec![cell_cli::golgi::AxonTerminal {
+                id: "static".into(),
+                addr: clean,
+                rtt: std::time::Duration::from_secs(1),
+                last_seen: std::time::Instant::now(),
+            }]),
+        );
     }
-    */
 
     // Initialize Golgi
     let golgi = Golgi::new(traits.name.clone(), &run_dir, traits.listen.clone(), routes)?;
 
-    let golgi_sock = run_dir.join("golgi.sock");
-
-    // 4. Run Golgi (Network)
-    let golgi_handle = tokio::spawn(async move {
-        if let Err(e) = golgi.run().await {
-            sys_log("CRITICAL", &format!("Golgi failure: {}", e));
-        }
-    });
-
-    // 5. Run Nucleus (Binary)
-    // _guard ensures that when this variable dies, the process dies.
-    let _guard = nucleus::activate(&run_dir.join("cell.sock"), &bin_path, &golgi_sock)?;
-
-    sys_log("INFO", &format!("Cell '{}' is operational.", traits.name));
+    sys_log(
+        "INFO",
+        &format!("Cell '{}' (or Colony) is operational.", traits.name),
+    );
 
     tokio::select! {
-        _ = golgi_handle => {},
+        res = golgi.run() => {
+            if let Err(e) = res {
+                sys_log("CRITICAL", &format!("Golgi failure: {}", e));
+            }
+        },
         _ = tokio::signal::ctrl_c() => sys_log("INFO", "Apoptosis triggered..."),
     }
 
-    // _guard drops here -> ChildGuard::drop -> kill() -> wait()
     Ok(())
 }
 
 async fn snapshot_genomes(root: &Path, axons: &HashMap<String, String>) -> Result<()> {
     let schema_dir = root.join(".cell-genomes");
     std::fs::create_dir_all(&schema_dir)?;
-
-    // Use a temp file for the builder's identity to avoid polluting the real identity
     let temp_id_path = root.join("run/temp_builder_identity");
     let identity = antigens::Antigens::load_or_create(temp_id_path)?;
 
@@ -223,123 +268,48 @@ async fn snapshot_genomes(root: &Path, axons: &HashMap<String, String>) -> Resul
         let start = std::time::Instant::now();
         let mut connected = false;
 
-        // Retry Loop
-        while start.elapsed() < Duration::from_secs(30) {
-            match TcpStream::connect(&clean_addr).await {
-                Ok(stream) => {
-                    // 1. Handshake
-                    match synapse::connect_secure(stream, &identity.keypair, true).await {
-                        Ok((mut secure_stream, _)) => {
-                            // 2. Send Connect Request
-                            let mut buf = vec![0u8; 4096];
-                            let mut payload = vec![0x01];
-                            payload.extend(&(name.len() as u32).to_be_bytes());
-                            payload.extend(name.as_bytes());
+        while start.elapsed() < std::time::Duration::from_secs(10) {
+            if let Ok(stream) = TcpStream::connect(&clean_addr).await {
+                if let Ok((mut secure, _)) =
+                    synapse::connect_secure(stream, &identity.keypair, true).await
+                {
+                    let mut buf = vec![0u8; 4096];
+                    // Connect Frame
+                    let mut payload = vec![0x01];
+                    payload.extend(&(name.len() as u32).to_be_bytes());
+                    payload.extend(name.as_bytes());
+                    let len = secure.state.write_message(&payload, &mut buf).unwrap();
+                    synapse::write_frame(&mut secure.inner, &buf[..len]).await?;
 
-                            // Encrypt
-                            let len = secure_stream
-                                .state
-                                .write_message(&payload, &mut buf)
-                                .unwrap();
+                    // Read ACK
+                    let frame = synapse::read_frame(&mut secure.inner).await?;
+                    let len = secure.state.read_message(&frame, &mut buf)?;
+                    if len > 0 && buf[0] == 0x00 {
+                        // Fetch Genome
+                        let req = b"__GENOME__";
+                        let mut v = (req.len() as u32).to_be_bytes().to_vec();
+                        v.extend_from_slice(req);
+                        let len = secure.state.write_message(&v, &mut buf).unwrap();
+                        synapse::write_frame(&mut secure.inner, &buf[..len]).await?;
 
-                            // Send
-                            if let Err(e) =
-                                synapse::write_frame(&mut secure_stream.inner, &buf[..len]).await
-                            {
-                                sys_log("DEBUG", &format!("Failed to send request frame: {}", e));
-                                continue;
-                            }
-
-                            // 3. Wait for ACK
-                            match synapse::read_frame(&mut secure_stream.inner).await {
-                                Ok(frame) => {
-                                    match secure_stream.state.read_message(&frame, &mut buf) {
-                                        Ok(len) => {
-                                            if len > 0 && buf[0] == 0x00 {
-                                                // 4. Request Schema
-                                                let req = b"__GENOME__";
-                                                let mut vesicle =
-                                                    (req.len() as u32).to_be_bytes().to_vec();
-                                                vesicle.extend_from_slice(req);
-
-                                                let len = secure_stream
-                                                    .state
-                                                    .write_message(&vesicle, &mut buf)
-                                                    .unwrap();
-                                                synapse::write_frame(
-                                                    &mut secure_stream.inner,
-                                                    &buf[..len],
-                                                )
-                                                .await
-                                                .unwrap();
-
-                                                // 5. Read Response
-                                                let frame =
-                                                    synapse::read_frame(&mut secure_stream.inner)
-                                                        .await
-                                                        .unwrap();
-                                                let len = secure_stream
-                                                    .state
-                                                    .read_message(&frame, &mut buf)
-                                                    .unwrap();
-
-                                                if len >= 4 {
-                                                    let json_len = u32::from_be_bytes(
-                                                        buf[0..4].try_into().unwrap(),
-                                                    )
-                                                        as usize;
-                                                    if len >= 4 + json_len {
-                                                        let schema_json = &buf[4..4 + json_len];
-                                                        std::fs::write(
-                                                            schema_dir
-                                                                .join(format!("{}.json", name)),
-                                                            schema_json,
-                                                        )?;
-                                                        sys_log(
-                                                            "INFO",
-                                                            &format!(
-                                                                "SUCCESS: Saved schema for {}",
-                                                                name
-                                                            ),
-                                                        );
-                                                        connected = true;
-                                                        break;
-                                                    }
-                                                }
-                                            } else {
-                                                // Got NACK (0xFF) or garbage
-                                                sys_log("WARN", &format!("Remote refused connection to service '{}' (NACK)", name));
-                                            }
-                                        }
-                                        Err(e) => sys_log(
-                                            "DEBUG",
-                                            &format!("Decryption failed during ACK: {}", e),
-                                        ),
-                                    }
-                                }
-                                Err(e) => {
-                                    sys_log("DEBUG", &format!("Failed to read ACK frame: {}", e))
-                                }
+                        let frame = synapse::read_frame(&mut secure.inner).await?;
+                        let len = secure.state.read_message(&frame, &mut buf)?;
+                        if len >= 4 {
+                            let jlen = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize;
+                            if len >= 4 + jlen {
+                                let json = &buf[4..4 + jlen];
+                                std::fs::write(schema_dir.join(format!("{}.json", name)), json)?;
+                                connected = true;
+                                break;
                             }
                         }
-                        Err(e) => sys_log("DEBUG", &format!("Handshake failed: {}", e)),
-                    }
-                }
-                Err(e) => {
-                    // Only log connection refused once every few seconds to avoid spam
-                    if start.elapsed().as_secs() % 5 == 0 {
-                        sys_log("DEBUG", &format!("Connection failed: {}", e));
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-
         if !connected {
-            sys_log(
-                "ERROR",
-                &format!("TIMEOUT: Could not fetch schema from {}.", name),
-            );
+            sys_log("WARN", &format!("Could not fetch schema for {}", name));
         }
     }
     Ok(())

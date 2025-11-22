@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
-use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixListener;
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::Stdio; // Enum definitions
 use std::time::SystemTime;
+use tokio::process::{Child, Command}; // Async Command
 
 #[cfg(target_os = "linux")]
 use cgroups_rs::{cgroup_builder::CgroupBuilder, hierarchies, CgroupPid};
@@ -18,29 +18,41 @@ fn sys_log(level: &str, msg: &str) {
 /// A wrapper that kills the child process when it goes out of scope.
 pub struct ChildGuard(Child);
 
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill(); // Send SIGKILL
-        let _ = self.0.wait(); // Reap zombie
-                               // sys_log("INFO", "Nucleus child process terminated.");
+impl ChildGuard {
+    /// Extracts pipes from the async child. No conversion needed.
+    pub fn take_pipes(
+        &mut self,
+    ) -> (
+        Option<tokio::process::ChildStdout>,
+        Option<tokio::process::ChildStderr>,
+    ) {
+        (self.0.stdout.take(), self.0.stderr.take())
     }
 }
 
-pub fn activate(cell_sock: &Path, binary: &Path, golgi_sock: &Path) -> Result<ChildGuard> {
-    let run_dir = cell_sock.parent().unwrap();
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.start_kill(); // Async kill signal
+                                     // We can't await inside Drop, but start_kill() is non-blocking on Tokio.
+                                     // The OS will reap the zombie eventually or we rely on Tokio runtime reaping.
+    }
+}
 
-    // 1. Setup Logging
-    let log_path = run_dir.join("service.log");
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .context("Failed to open service log file")?;
+pub enum LogStrategy {
+    File(PathBuf),
+    Piped,
+}
 
-    // Clone the file handle so we can use it for both stdout and stderr
-    let log_file_stdout = log_file.try_clone().context("Failed to clone log handle")?;
-
-    // 2. Socket Activation
+pub fn activate(
+    cell_sock: &Path,
+    log_strategy: LogStrategy,
+    binary: &Path,
+    golgi_sock: &Path,
+) -> Result<ChildGuard> {
+    // 1. Socket Activation (Sync IO is fine here, done once during startup)
+    if let Some(p) = cell_sock.parent() {
+        std::fs::create_dir_all(p)?;
+    }
     if cell_sock.exists() {
         std::fs::remove_file(cell_sock).context("Failed to cleanup old socket")?;
     }
@@ -48,7 +60,7 @@ pub fn activate(cell_sock: &Path, binary: &Path, golgi_sock: &Path) -> Result<Ch
     listener.set_nonblocking(false)?;
     let fd = listener.as_raw_fd();
 
-    // Fix: Remove FD_CLOEXEC flag
+    // Remove FD_CLOEXEC
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFD);
         if flags >= 0 {
@@ -56,24 +68,44 @@ pub fn activate(cell_sock: &Path, binary: &Path, golgi_sock: &Path) -> Result<Ch
         }
     }
 
-    // 3. Cgroups
+    // 2. Cgroups
     #[cfg(target_os = "linux")]
     let cgroup = setup_cgroup();
 
-    sys_log("INFO", &format!("Spawning binary: {}", binary.display()));
-
-    // 4. Prepare Command
+    // 3. Prepare Async Command
     let mut cmd = Command::new(binary);
     cmd.env("CELL_SOCKET_FD", fd.to_string())
         .env("CELL_GOLGI_SOCK", golgi_sock)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log_file_stdout)) // <--- FIX: Capture stdout
-        .stderr(Stdio::from(log_file)); // <--- Capture stderr
+        .stdin(Stdio::null());
 
-    // 5. Apply Isolation
+    match log_strategy {
+        LogStrategy::File(path) => {
+            if let Some(p) = path.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            let log_file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .context("Failed to open service log file")?;
+
+            let log_file_err = log_file.try_clone().unwrap();
+
+            cmd.stdout(Stdio::from(log_file));
+            cmd.stderr(Stdio::from(log_file_err));
+
+            sys_log("INFO", &format!("Nucleus active. Log: {}", path.display()));
+        }
+        LogStrategy::Piped => {
+            // Tokio's piped() is non-blocking and async-ready
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+        }
+    }
+
+    // 4. Apply Isolation
     #[cfg(target_os = "linux")]
     unsafe {
-        use std::os::unix::process::CommandExt;
         if let Some(cg) = &cgroup {
             let cg_clone = cg.clone();
             cmd.pre_exec(move || {
@@ -86,18 +118,10 @@ pub fn activate(cell_sock: &Path, binary: &Path, golgi_sock: &Path) -> Result<Ch
         }
     }
 
-    // 6. Spawn
+    // 5. Spawn
     let child = cmd.spawn().context("Failed to exec nucleus binary")?;
 
-    sys_log(
-        "INFO",
-        &format!(
-            "Nucleus active. PID: {}. Log: {}",
-            child.id(),
-            log_path.display()
-        ),
-    );
-
+    // Forget listener to keep FD open in child
     std::mem::forget(listener);
 
     Ok(ChildGuard(child))
@@ -114,6 +138,6 @@ fn setup_cgroup() -> Option<cgroups_rs::Cgroup> {
         .build(hier)
     {
         Ok(cg) => Some(cg),
-        Err(_) => None, // Fallback silently on dev machines
+        Err(_) => None,
     }
 }
