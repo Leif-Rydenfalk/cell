@@ -2,14 +2,15 @@ use anyhow::Result;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::thread;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout};
+use tokio::sync::mpsc; // Use Tokio's MPSC for async backpressure
 use tokio::task;
 
 const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 const BACKUP_COUNT: usize = 5;
+const CHANNEL_CAPACITY: usize = 4096; // Restore Backpressure
 
 pub struct Vacuole {
     sender: mpsc::Sender<String>,
@@ -22,12 +23,14 @@ impl Vacuole {
             tokio::fs::create_dir_all(p).await?;
         }
 
-        let (tx, rx) = mpsc::channel::<String>();
+        // Bounded Channel.
+        // If this fills up, async senders will 'await', slowing down the app
+        // instead of eating all your RAM.
+        let (tx, mut rx) = mpsc::channel::<String>(CHANNEL_CAPACITY);
         let path_clone = log_path.clone();
 
         let handle = thread::spawn(move || {
-            // 1. Initial Open
-            let mut file = match OpenOptions::new()
+            let file = match OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path_clone)
@@ -39,26 +42,23 @@ impl Vacuole {
                 }
             };
 
-            // Track size manually to avoid syscalls on every line
             let mut current_size = file.metadata().map(|m| m.len()).unwrap_or(0);
             let mut writer = BufWriter::new(file);
 
-            while let Ok(line) = rx.recv() {
+            // USE BLOCKING RECEIVE
+            // This allows the OS thread to consume messages from the Tokio channel
+            while let Some(line) = rx.blocking_recv() {
                 let bytes = line.as_bytes();
-                let len = bytes.len() as u64 + 1; // +1 for newline
+                let len = bytes.len() as u64 + 1;
 
-                // 2. Check Rotation
                 if current_size + len > MAX_LOG_SIZE {
-                    // Flush and Drop current writer to close the file handle
                     let _ = writer.flush();
                     drop(writer);
 
-                    // Perform Rotation (log -> log.1, etc)
                     if let Err(e) = Self::rotate(&path_clone) {
                         eprintln!("[VACUOLE] Rotation failed: {}", e);
                     }
 
-                    // Re-Open
                     match OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -75,15 +75,15 @@ impl Vacuole {
                     }
                 }
 
-                // 3. Write
-                if writer.write_all(bytes).is_err() {
-                    break;
-                }
-                if writer.write_all(b"\n").is_err() {
-                    break;
-                }
-                if writer.flush().is_err() {
-                    break;
+                let _ = writer.write_all(bytes);
+                let _ = writer.write_all(b"\n");
+
+                // RESTORED: Smart Flushing
+                // We verify if there are more messages waiting.
+                // If the channel is empty, we flush immediately (low latency).
+                // If the channel has data, we keep writing (high throughput).
+                if rx.is_empty() {
+                    let _ = writer.flush();
                 }
 
                 current_size += len;
@@ -96,24 +96,15 @@ impl Vacuole {
         })
     }
 
-    /// Synchronous rotation logic (safe to run in the OS thread)
     fn rotate(path: &Path) -> std::io::Result<()> {
-        // log.4 -> log.5
-        // ...
-        // log -> log.1
         for i in (0..BACKUP_COUNT).rev() {
             let src = if i == 0 {
                 path.to_path_buf()
             } else {
                 path.with_extension(format!("log.{}", i))
             };
-
             let dst = path.with_extension(format!("log.{}", i + 1));
-
             if src.exists() {
-                // On Windows, you can't rename over an existing file usually,
-                // but on Linux (POSIX), atomic rename replaces the target.
-                // To be safe cross-platform, remove dst first.
                 if dst.exists() {
                     let _ = fs::remove_file(&dst);
                 }
@@ -130,7 +121,8 @@ impl Vacuole {
             task::spawn(async move {
                 let mut reader = BufReader::new(out).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx.send(format!("[{}] {}", id, line));
+                    // Async backpressure applies here
+                    let _ = tx.send(format!("[{}] {}", id, line)).await;
                 }
             });
         }
@@ -141,7 +133,7 @@ impl Vacuole {
             task::spawn(async move {
                 let mut reader = BufReader::new(err).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx.send(format!("[{}] [ERR] {}", id, line));
+                    let _ = tx.send(format!("[{}] [ERR] {}", id, line)).await;
                 }
             });
         }
@@ -151,6 +143,7 @@ impl Vacuole {
         let timestamp = humantime::format_rfc3339_seconds(std::time::SystemTime::now());
         let _ = self
             .sender
-            .send(format!("[{}] [{}] [SUPERVISOR] {}", timestamp, id, msg));
+            .send(format!("[{}] [{}] [SUPERVISOR] {}", timestamp, id, msg))
+            .await;
     }
 }
