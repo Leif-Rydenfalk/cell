@@ -36,6 +36,8 @@ struct Genome {
     axons: HashMap<String, String>,
     #[serde(default)]
     junctions: HashMap<String, String>,
+    #[serde(default)]
+    sources: HashMap<String, String>,
     workspace: Option<WorkspaceTraits>,
 }
 
@@ -580,4 +582,34 @@ async fn snapshot_genomes(root: &Path, axons: &HashMap<String, String>) -> Resul
         }
     }
     Ok(())
+}
+
+fn fetch_source(workspace_root: &Path, name: &str, url: &str) -> Result<PathBuf> {
+    let modules_dir = workspace_root.join(".cell-modules");
+    let target_dir = modules_dir.join(name);
+
+    // If it already exists, we assume it's good (or we should use git pull?)
+    if target_dir.exists() {
+        return Ok(target_dir);
+    }
+
+    sys_log(
+        "INFO",
+        &format!("Fetching missing cell '{}' from {}", name, url),
+    );
+
+    std::fs::create_dir_all(&modules_dir)?;
+
+    let status = Command::new("git")
+        .args(&["clone", url, target_dir.to_str().unwrap()])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to execute git")?;
+
+    if !status.success() {
+        anyhow::bail!("Failed to clone source for {}", name);
+    }
+
+    Ok(target_dir)
 }

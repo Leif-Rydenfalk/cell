@@ -1,9 +1,84 @@
+
+
+A cell is a similar to a Docker container but it scales recursively and allows anyone to use it as a compute unit.
+You create a cell. You give it a max memory, a max cpu, max gpu, max storage.
+You can donate the cell or you can use it yourself.
+The cell is everything you need to communicate with other cells on the cell network.
+
+
+You develop the network locally and everything just works. You build each cell independently so their hotswappable and you get compile time safety and run it locally using cell mitosis . in the root of the root cell.
+Then to publish it you go cell publish . and the cell network you just created replicates itself on the global cell network.
+
+its recursive. the trees can span hundreds of nodes - like cargo but for running services - still with compile time safety.
+
+cell publish .   exactly like cell mitosis . but it allows cloning your cell to donor systems.
+
+The cell network must be completely hosted by the cell network.
+
+
+
+
+If the cli have to be on to donate this means more trust and less exploitation.
+
+
+Once one version of the binary is on a node in the cell network - a machine - the cell makes sure other cells know of this so no inexplicit duplicates exists. it load balances automatically.
+
+
+Golgi = the process inside a cell. 
+
+Enzymes = gpu workers
+
+
+Golgi apparatus
+
+
+
 This is a very early mvp for my auto scaling organically growing everything is a cell framework. the goal is to have this be an alternative for me to use instead of kubernetes or dockercompose. The idea is this: Everything is just a cell. 
 
 It must be easy to integrate into existing infra and backends which are already built.
 It must be easy to deploy to the cell network.
 
 instead of the build.rs in every consumer it should be done automatically by the sdk and every cell should have a cell.toml for composition and configuration. A cell should be able to not just call a locally defined schema like "bench_echo" but a repository, private or public with a root cell.toml and setup a instance of it locally in a docker container and use that when utilizing the service. any other good ideas?
+
+
+
+Genesis seed can shut down!
+Platform cells are now running on donors
+
+cell status registry
+ registry running on:
+   - donor-abc (USA)
+   - donor-def (Europe)
+   - donor-ghi (Asia)
+
+Seeds are just fallback
+
+
+
+
+# On your machine
+cell donate --cpu 2 --memory 4GB --storage 10GB
+
+This:
+1. Connects to seeds
+2. Queries: "Where is scheduler?"
+3. Connects to scheduler: "I have capacity"
+4. Scheduler assigns: "Run cell: worker"
+5. Downloads binary from storage cell
+6. Starts cell locally
+7. Your cell joins the network!
+
+cd my-app/
+cell publish .
+
+This:
+1. Compiles your cells
+2. Uploads binaries to storage cell
+3. Registers metadata in registry cell
+4. Scheduler assigns cells to donors
+5. Your app is now running globally!
+
+
 
 
 
@@ -1862,3 +1937,123 @@ TOTAL: 70.7 EFLOP/s  continuous
 7.  One-sentence takeaway
 
 > **“Half the planet asleep → 70 EFLOP/s continuous super-computer for the price of a latte per person per month.”**
+
+
+
+Yes — and we keep the **recursive, Cargo-like, compile-time-safe** property **all the way down to the running topology**.
+
+--------------------------------------------------------
+1.  Recursive = “trees of trees”
+--------------------------------------------------------
+A **cell** can appear inside the **resources** block of another cell.  
+That spawns a **child sub-lattice** whose whole tree is built **before** the parent binary is linked, exactly like Cargo builds deps before the final crate.
+
+Example tree (100+ nodes realistic):
+
+```
+root-cell
+├─ api-gateway
+│  ├─ auth-cell
+│  │  └─ jwt-verify-cell
+├─ user-svc
+│  ├─ cache-cell
+│  ├─ db-cell
+│  │  └─ wal-cell
+└─ billing-svc
+   ├─ pricing-engine
+   └─ ledger-cell
+      └─ snapshot-cell
+```
+
+`root-cell/genome.toml`
+```toml
+[genome]
+name = "root"
+
+[cells]                          # NEW: nested cells
+api-gateway = { path = "gateway", replicas = 3 }
+user-svc    = { path = "user",    replicas = 5 }
+billing-svc = { path = "billing", replicas = 2 }
+```
+
+`gateway/genome.toml`
+```toml
+[genome]
+name = "gateway"
+
+[cells]
+auth-cell = { path = "auth", replicas = 2 }
+```
+
+--------------------------------------------------------
+2.  Build walks the tree **depth-first**
+--------------------------------------------------------
+ identical to `cargo build --workspace`:
+
+```
+mitosis(root-cell)
+  ├─ mitosis(gateway)        // builds its own deps first
+  │   ├─ mitosis(auth)
+  │   │   └─ mitosis(jwt-verify)
+  │   └─ link gateway binary
+  ├─ mitosis(user-svc)
+  │   ├─ mitosis(cache)
+  │   ├─ mitosis(db)
+  │   │   └─ mitosis(wal)
+  │   └─ link user-svc
+  └─ link root-cell
+```
+
+Every node is **immutable** and **content-addressed** (`blake3` of final ELF); the same artifact is reused if two parents depend on the same version.
+
+--------------------------------------------------------
+3.  Compile-time safety across the **whole tree**
+----------------------------------------------------
+- **Schema mismatch** between `jwt-verify` and `auth` → **compile failure** at `mitosis(auth)` step; parent builds never start.  
+- **Circular schema dependency** → detected during **schema snapshot** phase, **before** any Rust compilation.  
+- **Resource overflow** (parent declares 2 GiB but children sum to 3 GiB) → **static error** at `mitosis(root-cell)`.
+
+--------------------------------------------------------
+4.  Runtime still zero-conf
+----------------------------------------------------
+After the recursive build succeeds:
+
+```
+cell mitosis .     # boots the **entire** tree locally
+```
+Each cell-runtime wrapper:
+
+- announces itself via **pheromone**  
+- inherits **cgroup limits** from parent (kernel **delegate** feature)  
+- can **spawn its own children** recursively (same wrapper binary)  
+
+Result: a **fractal** of resource-accounted, mutually-TLS’d services that **find each other automatically**—no central orchestrator, no kubelet, no docker-compose.
+
+--------------------------------------------------------
+5.  Publish the **whole forest** in one shot
+----------------------------------------------------
+```
+cell publish .                    // packs **every** built artifact
+# → uri:  my-app.cell.public
+```
+
+Remote seed unpacks **the identical tree**, adapts IP addresses, and spawns the same fractal topology.  
+Because artifacts are content-addressed, **common subtrees** are downloaded only once (BitTorrent-style).
+
+--------------------------------------------------------
+6.  Cargo analogy summary
+----------------------------------------------------
+| Cargo | Cell |
+|---|---|
+| `Cargo.toml` workspace | `genome.toml` + `[cells]` table |
+| `cargo build` | `cell build` (recursive, parallel) |
+| type-check across crates | schema-check across cells |
+| `cargo run` | `cell mitosis .` (build **+** spawn whole tree) |
+| `cargo publish` | `cell publish .` (upload **tree** to network) |
+| crates.io index | any seed node (fractal copy) |
+
+--------------------------------------------------------
+7.  TL;DR
+--------------------------------------------------------
+Write **nested `genome.toml` files** exactly like nested `Cargo.toml` workspaces.  
+`cell mitosis .` gives you **Cargo-level safety** and **Docker-level isolation** for **hundreds of recursively-linked services**—then `cell publish .` clones the **entire running forest** to any node on Earth.

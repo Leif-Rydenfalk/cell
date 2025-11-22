@@ -70,8 +70,6 @@ async fn main() -> Result<()> {
                 }
             }
 
-            sleep(Duration::from_millis(100)).await;
-
             // Optimization: Only check time/print logs every 1000 requests
             // This prevents the "checking what time it is" logic from slowing down the benchmark.
             if req_count % 1000 == 0 {
@@ -93,6 +91,8 @@ async fn main() -> Result<()> {
                     last_report = Instant::now();
                 }
             }
+
+            sleep(Duration::from_millis(100)).await;
         }
     });
 
