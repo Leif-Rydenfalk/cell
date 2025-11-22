@@ -41,6 +41,15 @@ It must be easy to deploy to the cell network.
 instead of the build.rs in every consumer it should be done automatically by the sdk and every cell should have a cell.toml for composition and configuration. A cell should be able to not just call a locally defined schema like "bench_echo" but a repository, private or public with a root cell.toml and setup a instance of it locally in a docker container and use that when utilizing the service. any other good ideas?
 
 
+cell mitosis . --global
+
+
+
+
+Each cell have a list of 10 of the best cells in the world spread out on all different continents.
+If it finds a better one it switches and notifies neighbors.
+
+
 
 Genesis seed can shut down!
 Platform cells are now running on donors
@@ -53,6 +62,15 @@ cell status registry
 
 Seeds are just fallback
 
+
+
+I would rather that all cells where registry cells. The exact same code everywhere - hosted by everyone - creates the cell network by itself.  Registry state is stored locally everywhere.
+
+
+
+each cell.toml / genome.toml has a resources field with min and max:
+as donor: acts as the max resources this cell is allowed to utilize from the host system.
+as publisher: acts as the resources this cell needs to run.
 
 
 
