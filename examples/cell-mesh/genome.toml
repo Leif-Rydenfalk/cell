@@ -1,0 +1,5 @@
+[genome]
+name = "chatterbox"
+binary = "chatterbox"
+replicas = 50           # The Mesh Size
+listen = "0.0.0.0:9001"

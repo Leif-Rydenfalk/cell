@@ -1,4 +1,5 @@
 target/
 run/
 .cell
+.cell-genomes
 trash
