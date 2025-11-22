@@ -49,6 +49,7 @@ impl Drop for ChildGuard {
     }
 }
 
+#[derive(Clone)]
 pub enum LogStrategy {
     File(PathBuf),
     Piped,
