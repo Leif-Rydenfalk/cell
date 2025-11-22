@@ -2,20 +2,21 @@ use anyhow::{anyhow, Context, Result};
 use cell_cli::genesis::run_genesis;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc; // Added for Golgi Arc optimization
-use std::time::SystemTime;
-use tokio::net::TcpStream;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::net::{TcpStream, UdpSocket}; // Added UdpSocket
+use tokio::sync::Mutex;
 
 // Import from internal lib
-use cell_cli::golgi::{Golgi, Target};
+use cell_cli::golgi::{pheromones, Golgi, Target}; // Import pheromones
 use cell_cli::{antigens, nucleus, synapse, sys_log, vacuole};
 
 #[derive(Parser)]
 #[command(name = "membrane")]
-#[command(about = "Cellular Infrastructure Node Manager", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     action: Action,
@@ -50,6 +51,9 @@ struct CellTraits {
     replicas: Option<u32>,
 }
 
+type CellRegistry = HashMap<String, PathBuf>;
+type RunningSet = Arc<Mutex<HashSet<String>>>;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -60,200 +64,329 @@ async fn main() -> Result<()> {
 
 async fn mitosis(dir: &Path) -> Result<()> {
     let dir = dir.canonicalize().context("Invalid directory")?;
-
-    // GENESIS PHASE (Auto-generate schemas from source)
-    // This solves the "Protein synthesis failed" chicken-and-egg error.
-    sys_log("INFO", "Running Genesis phase (Schema extraction)...");
-    if let Err(e) = run_genesis(&dir) {
-        sys_log("WARN", &format!("Genesis incomplete: {}", e));
-        // We don't abort, because maybe the user provided them manually.
-    }
-
     let genome_path = dir.join("genome.toml");
 
+    sys_log("INFO", "Scanning workspace for cellular life...");
+    let mut registry = CellRegistry::new();
+    inventory_cells(&dir, &mut registry)?;
     sys_log(
         "INFO",
-        &format!("Reading genome from {}", genome_path.display()),
+        &format!("Discovered {} local cells.", registry.len()),
     );
 
     let txt = std::fs::read_to_string(&genome_path).context("Missing genome.toml")?;
-    let dna: Genome = toml::from_str(&txt).context("Corrupt DNA (Invalid TOML)")?;
+    let dna: Genome = toml::from_str(&txt)?;
+    let running = Arc::new(Mutex::new(HashSet::new()));
 
-    // --- WORKSPACE MODE (ORCHESTRATOR) ---
     if let Some(ws) = dna.workspace {
-        sys_log("INFO", "System detected. Commencing Multi-Cell Mitosis...");
-        let self_exe = std::env::current_exe()?;
+        sys_log("INFO", "Workspace detected. Resolving dependency graph...");
+        for member_dir in ws.members {
+            let path = dir.join(member_dir);
+            let m_txt = std::fs::read_to_string(path.join("genome.toml"))?;
+            let m_dna: Genome = toml::from_str(&m_txt)?;
+            if let Some(traits) = m_dna.genome {
+                ensure_active(&traits.name, &registry, running.clone(), false).await?;
+            }
+        }
+        sys_log(
+            "INFO",
+            "Cluster fully operational. Press Ctrl+C to shutdown.",
+        );
+        tokio::signal::ctrl_c().await?;
+    } else if let Some(traits) = dna.genome {
+        ensure_active(&traits.name, &registry, running.clone(), true).await?;
+    }
 
-        let mut children = Vec::new();
+    Ok(())
+}
 
-        for member in ws.members {
-            let member_path = dir.join(&member);
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+async fn ensure_active(
+    cell_name: &str,
+    registry: &CellRegistry,
+    running: RunningSet,
+    is_root: bool,
+) -> Result<()> {
+    {
+        let mut set = running.lock().await;
+        if set.contains(cell_name) {
+            return Ok(());
+        }
+        set.insert(cell_name.to_string());
+    }
 
-            let mut cmd = tokio::process::Command::new(&self_exe);
-            cmd.arg("mitosis").arg(member_path);
-            cmd.kill_on_drop(true);
-            cmd.stdout(Stdio::inherit());
-            cmd.stderr(Stdio::inherit());
+    let cell_path = registry.get(cell_name).ok_or_else(|| {
+        anyhow!(
+            "Cell '{}' not found in local workspace. Cannot auto-boot.",
+            cell_name
+        )
+    })?;
 
-            let child = cmd.spawn().context("Failed to spawn member")?;
-            children.push(child);
+    let txt = std::fs::read_to_string(cell_path.join("genome.toml"))?;
+    let dna: Genome = toml::from_str(&txt)?;
+
+    sys_log("INFO", &format!("[{}] Checking dependencies...", cell_name));
+
+    for (axon_name, axon_addr) in &dna.axons {
+        // 1. Resolve Address (DNS, IP, or Pheromone Discovery)
+        let target_addr = resolve_address(axon_name, axon_addr).await;
+
+        match target_addr {
+            Ok(addr) => {
+                // 2. Verify Connectivity
+                if verify_tcp(&addr).await.is_ok() {
+                    sys_log(
+                        "INFO",
+                        &format!(
+                            "[{}] Dependency '{}' found at {}",
+                            cell_name, axon_name, addr
+                        ),
+                    );
+                    continue; // Found it!
+                }
+            }
+            Err(_) => { /* Resolution failed, try booting local */ }
         }
 
-        sys_log("INFO", "System Running. Press Ctrl+C to shutdown.");
-        tokio::signal::ctrl_c().await?;
-        return Ok(());
+        // 3. If Resolution or Connection failed, try booting from source
+        if registry.contains_key(axon_name) {
+            sys_log(
+                "WARN",
+                &format!(
+                    "[{}] Dependency '{}' not reachable. Booting local instance...",
+                    cell_name, axon_name
+                ),
+            );
+            Box::pin(ensure_active(axon_name, registry, running.clone(), false)).await?;
+
+            // Wait for it to come up
+            let mut attempts = 0;
+            loop {
+                // Re-resolve locally
+                if let Ok(addr) = resolve_address(axon_name, axon_addr).await {
+                    if verify_tcp(&addr).await.is_ok() {
+                        break;
+                    }
+                }
+                attempts += 1;
+                if attempts > 10 {
+                    anyhow::bail!("Dependency '{}' failed to boot.", axon_name);
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        } else {
+            anyhow::bail!("CRITICAL: Dependency '{}' is missing from network AND local workspace. Cannot compile.", axon_name);
+        }
     }
 
-    // --- CELL MODE ---
-    let traits = dna.genome.context("Invalid genome")?;
-
-    // 1. Snapshot Remote Dependencies
-    if !dna.axons.is_empty() {
-        snapshot_genomes(&dir, &dna.axons).await?;
-    }
-
-    // 2. Build & Locate Binary
     sys_log(
         "INFO",
-        &format!("Synthesizing proteins for {}...", traits.name),
+        &format!("[{}] Dependencies verified. Running Genesis...", cell_name),
+    );
+    run_genesis(cell_path)?;
+
+    // This will now use Pheromone discovery if needed
+    snapshot_genomes(cell_path, &dna.axons).await?;
+
+    sys_log("INFO", &format!("[{}] Compiling...", cell_name));
+    let bin_path = compile_cell(cell_path, cell_name)?;
+
+    if is_root {
+        sys_log("INFO", &format!("[{}] Starting (Foreground)...", cell_name));
+        run_cell_runtime(cell_path, &dna, bin_path).await?;
+    } else {
+        sys_log("INFO", &format!("[{}] Spawning (Background)...", cell_name));
+        spawn_cell_background(cell_path, &bin_path)?;
+    }
+
+    Ok(())
+}
+
+// --- NETWORK RESOLVER ---
+
+async fn resolve_address(name: &str, raw_addr: &str) -> Result<String> {
+    let clean = raw_addr.replace("axon://", "");
+
+    // 1. Try parsing as direct IP/DNS
+    if clean.contains(':') {
+        if tokio::net::lookup_host(&clean).await.is_ok() {
+            return Ok(clean);
+        }
+    }
+
+    // 2. Pheromone Discovery (UDP Multicast)
+    sys_log(
+        "INFO",
+        &format!("Searching network for '{}' (Pheromones)...", name),
     );
 
+    // Create a standard UDP socket for listening (reuse port logic similar to pheromones.rs)
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = socket.as_raw_fd();
+        unsafe {
+            let opt = 1;
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEPORT,
+                &opt as *const _ as *const libc::c_void,
+                4,
+            );
+        }
+    }
+    socket.bind(&"0.0.0.0:9099".parse::<SocketAddr>()?.into())?;
+    socket.join_multicast_v4(&"239.255.0.1".parse()?, &std::net::Ipv4Addr::UNSPECIFIED)?;
+    socket.set_nonblocking(true)?;
+
+    let udp = UdpSocket::from_std(socket.into())?;
+    let mut buf = [0u8; 2048];
+    let start = Instant::now();
+
+    // Listen for 3 seconds
+    while start.elapsed() < Duration::from_secs(3) {
+        if let Ok(len) = udp.try_recv(&mut buf) {
+            if let Ok(p) = serde_json::from_slice::<pheromones::Pheromone>(&buf[..len]) {
+                if p.cell_name == name || p.service_group == name {
+                    return Ok(p.tcp_addr.to_string());
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    anyhow::bail!("Resolution failed for {}", name)
+}
+
+async fn verify_tcp(addr: &str) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(addr)).await??;
+    Ok(())
+}
+
+// --- RUNTIME HELPERS ---
+
+fn compile_cell(dir: &Path, name: &str) -> Result<PathBuf> {
     let output = Command::new("cargo")
         .args(&["build", "--release", "--message-format=json"])
-        .current_dir(&dir)
+        .current_dir(dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .output()?;
 
     if !output.status.success() {
-        anyhow::bail!("Protein synthesis failed.");
+        anyhow::bail!("Compilation failed for {}", name);
     }
 
     let reader = std::io::BufReader::new(output.stdout.as_slice());
-    let mut bin_path: Option<PathBuf> = None;
-
     use std::io::BufRead;
     for line in reader.lines() {
         if let Ok(l) = line {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&l) {
-                if val["reason"] == "compiler-artifact" && val["target"]["name"] == traits.name {
+                if val["reason"] == "compiler-artifact" && val["target"]["name"] == name {
                     if let Some(executable) = val["executable"].as_str() {
-                        bin_path = Some(PathBuf::from(executable));
+                        return Ok(PathBuf::from(executable));
                     }
                 }
             }
         }
     }
-    let bin_path = bin_path.ok_or_else(|| anyhow!("Could not locate binary"))?;
+    anyhow::bail!("Binary not found for {}", name);
+}
 
+fn spawn_cell_background(dir: &Path, _bin: &Path) -> Result<()> {
+    let self_exe = std::env::current_exe()?;
+    let log_file = std::fs::File::create(dir.join("run/daemon.log"))?;
+
+    Command::new(self_exe)
+        .arg("mitosis")
+        .arg(dir)
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
+        .spawn()
+        .context("Failed to spawn background cell")?;
+    Ok(())
+}
+
+async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result<()> {
     let run_dir = dir.join("run");
     if run_dir.exists() {
         std::fs::remove_dir_all(&run_dir)?;
     }
     std::fs::create_dir_all(&run_dir)?;
 
+    let traits = dna.genome.as_ref().unwrap();
     let mut routes = HashMap::new();
-
-    // --- COLONY / REPLICA LOGIC ---
-    let replicas = traits.replicas.unwrap_or(1);
-    let mut child_guards = Vec::new();
     let golgi_sock_path = run_dir.join("golgi.sock");
 
-    if replicas > 1 {
-        sys_log("INFO", &format!("Spawning Colony: {} workers.", replicas));
+    let cell_sock = run_dir.join("cell.sock");
+    let log_path = run_dir.join("service.log");
 
-        let socket_dir = run_dir.join("sockets");
-        std::fs::create_dir_all(&socket_dir)?;
+    let guard = nucleus::activate(
+        &cell_sock,
+        nucleus::LogStrategy::File(log_path),
+        &bin_path,
+        &golgi_sock_path,
+    )?;
 
-        // Setup Vacuole (Shared Logging)
-        let log_path = run_dir.join("service.log");
-        let vacuole = vacuole::Vacuole::new(log_path).await?;
-
-        let mut worker_sockets = Vec::new();
-
-        for i in 0..replicas {
-            // Use subdirectory for isolation of socket (prevents name collisions)
-            let worker_dir = run_dir.join("workers").join(i.to_string());
-            std::fs::create_dir_all(&worker_dir)?;
-            let sock_path = worker_dir.join("cell.sock");
-
-            worker_sockets.push(sock_path.clone());
-
-            // LogStrategy::Piped -> streams back to parent -> Vacuole
-            let mut guard = nucleus::activate(
-                &sock_path,
-                nucleus::LogStrategy::Piped,
-                &bin_path,
-                &golgi_sock_path,
-            )?;
-
-            // Attach pipes to Vacuole
-            let (out, err) = guard.take_pipes();
-            vacuole.attach(format!("w-{}", i), out, err);
-
-            child_guards.push(guard);
-        }
-
+    routes.insert(traits.name.clone(), Target::GapJunction(cell_sock));
+    for (name, path) in &dna.junctions {
         routes.insert(
-            traits.name.clone(),
-            Target::LocalColony(Arc::new(worker_sockets)), // Wrap in Arc for Golgi
-        );
-    } else {
-        // Single Cell Mode (Direct File Logging)
-        let cell_sock = run_dir.join("cell.sock");
-        let log_path = run_dir.join("service.log");
-
-        let guard = nucleus::activate(
-            &cell_sock,
-            nucleus::LogStrategy::File(log_path),
-            &bin_path,
-            &golgi_sock_path,
-        )?;
-        child_guards.push(guard);
-
-        routes.insert(traits.name.clone(), Target::GapJunction(cell_sock));
-    }
-
-    // --- LOCAL JUNCTIONS ---
-    for (name, path) in dna.junctions {
-        routes.insert(
-            name,
+            name.clone(),
             Target::GapJunction(dir.join(path).join("run/cell.sock")),
         );
     }
 
-    // --- REMOTE AXONS (STATIC ROUTES) ---
-    for (name, addr) in dna.axons {
+    // IMPORTANT: Pass the RAW axon addresses to Golgi.
+    // Golgi has its own continuous discovery loop.
+    for (name, addr) in &dna.axons {
         let clean = addr.replace("axon://", "");
         routes.insert(
-            name,
+            name.clone(),
             Target::AxonCluster(vec![cell_cli::golgi::AxonTerminal {
                 id: "static".into(),
                 addr: clean,
-                rtt: std::time::Duration::from_secs(1),
-                last_seen: std::time::Instant::now(),
+                rtt: Duration::from_secs(1),
+                last_seen: Instant::now(),
             }]),
         );
     }
 
-    // Initialize Golgi
     let golgi = Golgi::new(traits.name.clone(), &run_dir, traits.listen.clone(), routes)?;
 
-    sys_log(
-        "INFO",
-        &format!("Cell '{}' (or Colony) is operational.", traits.name),
-    );
+    // Keep guard alive
+    let _g = guard;
 
     tokio::select! {
-        res = golgi.run() => {
-            if let Err(e) = res {
-                sys_log("CRITICAL", &format!("Golgi failure: {}", e));
-            }
-        },
-        _ = tokio::signal::ctrl_c() => sys_log("INFO", "Apoptosis triggered..."),
+        _ = golgi.run() => {},
+        _ = tokio::signal::ctrl_c() => {}
     }
+    Ok(())
+}
 
+fn inventory_cells(dir: &Path, registry: &mut CellRegistry) -> Result<()> {
+    if dir.is_dir() {
+        let genome_file = dir.join("genome.toml");
+        if genome_file.exists() {
+            if let Ok(txt) = std::fs::read_to_string(&genome_file) {
+                if let Ok(g) = toml::from_str::<Genome>(&txt) {
+                    if let Some(t) = g.genome {
+                        registry.insert(t.name, dir.to_path_buf());
+                    }
+                    if let Some(ws) = g.workspace {
+                        for m in ws.members {
+                            inventory_cells(&dir.join(m), registry)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -263,58 +396,61 @@ async fn snapshot_genomes(root: &Path, axons: &HashMap<String, String>) -> Resul
     let temp_id_path = root.join("run/temp_builder_identity");
     let identity = antigens::Antigens::load_or_create(temp_id_path)?;
 
-    for (name, addr) in axons {
-        let clean_addr = addr.replace("axon://", "");
+    for (name, raw_addr) in axons {
+        // 1. Resolve
+        let addr = resolve_address(name, raw_addr).await?;
+
         sys_log(
             "INFO",
-            &format!("Fetching schema from {} ({})", name, clean_addr),
+            &format!("Snapshotting schema from {} ({})", name, addr),
         );
 
-        let start = std::time::Instant::now();
         let mut connected = false;
+        // 2. Connect & Download
+        if let Ok(stream) = TcpStream::connect(&addr).await {
+            if let Ok((mut secure, _)) =
+                synapse::connect_secure(stream, &identity.keypair, true).await
+            {
+                let mut buf = vec![0u8; 4096];
 
-        while start.elapsed() < std::time::Duration::from_secs(10) {
-            if let Ok(stream) = TcpStream::connect(&clean_addr).await {
-                if let Ok((mut secure, _)) =
-                    synapse::connect_secure(stream, &identity.keypair, true).await
-                {
-                    let mut buf = vec![0u8; 4096];
-                    // Connect Frame
-                    let mut payload = vec![0x01];
-                    payload.extend(&(name.len() as u32).to_be_bytes());
-                    payload.extend(name.as_bytes());
-                    let len = secure.state.write_message(&payload, &mut buf).unwrap();
+                // Handshake
+                let mut payload = vec![0x01];
+                payload.extend(&(name.len() as u32).to_be_bytes());
+                payload.extend(name.as_bytes());
+                let len = secure.state.write_message(&payload, &mut buf).unwrap();
+                synapse::write_frame(&mut secure.inner, &buf[..len]).await?;
+
+                let frame = synapse::read_frame(&mut secure.inner).await?;
+                let len = secure.state.read_message(&frame, &mut buf)?;
+                if len > 0 && buf[0] == 0x00 {
+                    // Request
+                    let req = b"__GENOME__";
+                    let mut v = (req.len() as u32).to_be_bytes().to_vec();
+                    v.extend_from_slice(req);
+                    let len = secure.state.write_message(&v, &mut buf).unwrap();
                     synapse::write_frame(&mut secure.inner, &buf[..len]).await?;
 
-                    // Read ACK
+                    // Response
                     let frame = synapse::read_frame(&mut secure.inner).await?;
                     let len = secure.state.read_message(&frame, &mut buf)?;
-                    if len > 0 && buf[0] == 0x00 {
-                        // Fetch Genome
-                        let req = b"__GENOME__";
-                        let mut v = (req.len() as u32).to_be_bytes().to_vec();
-                        v.extend_from_slice(req);
-                        let len = secure.state.write_message(&v, &mut buf).unwrap();
-                        synapse::write_frame(&mut secure.inner, &buf[..len]).await?;
-
-                        let frame = synapse::read_frame(&mut secure.inner).await?;
-                        let len = secure.state.read_message(&frame, &mut buf)?;
-                        if len >= 4 {
-                            let jlen = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize;
-                            if len >= 4 + jlen {
-                                let json = &buf[4..4 + jlen];
-                                std::fs::write(schema_dir.join(format!("{}.json", name)), json)?;
-                                connected = true;
-                                break;
-                            }
+                    if len >= 4 {
+                        let jlen = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize;
+                        if len >= 4 + jlen {
+                            let json = &buf[4..4 + jlen];
+                            std::fs::write(schema_dir.join(format!("{}.json", name)), json)?;
+                            connected = true;
                         }
                     }
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
+
         if !connected {
-            sys_log("WARN", &format!("Could not fetch schema for {}", name));
+            anyhow::bail!(
+                "CRITICAL: Could not download schema for '{}' from {}. Compilation aborted.",
+                name,
+                addr
+            );
         }
     }
     Ok(())

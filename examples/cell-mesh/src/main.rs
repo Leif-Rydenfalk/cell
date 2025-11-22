@@ -1,73 +1,151 @@
 use anyhow::Result;
 use cell_sdk::*;
-use rand::Rng;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 
-// Define the Protocol
+// --- PROTOCOL DEFINITION ---
+// Optimized for zero-allocation (no Strings/Vecs)
 signal_receptor! {
     name: chatterbox,
     input: Gossip {
         from_pid: u32,
-        content: String,
+        sent_at_nanos: u128,
     },
     output: Ack {
-        status: String,
+        code: u8, // 1 = OK (Avoids String allocation)
     }
+}
+
+// --- STATS HOLDER ---
+#[derive(Default)]
+struct Stats {
+    count: u64,
+    total_latency_us: u128,
+    window_start: Option<Instant>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let my_pid = std::process::id();
-    
-    // 1. BACKGROUND TALKER (Client)
-    // Every worker is also a client ("Mesh" behavior)
+
+    // 1. HIGH SPEED CLIENT (Tight Loop)
     tokio::spawn(async move {
-        // Wait for system to boot
-        sleep(Duration::from_secs(5)).await; 
+        sleep(Duration::from_secs(2)).await; // Let system settle
+        println!("Starting High-Frequency Client...");
+
+        let mut req_count: u64 = 0;
+        let mut total_rtt_us: u128 = 0;
+        let mut min_rtt = u128::MAX;
+        let mut max_rtt = 0;
+        let mut last_report = Instant::now();
 
         loop {
-            // Sleep random amount (100ms to 2000ms) to create chaotic traffic
-            let delay = rand::thread_rng().gen_range(100..2000);
-            sleep(Duration::from_millis(delay)).await;
+            let start_time = Instant::now();
+            
+            // Use SystemTime for cross-process timestamping
+            let now_system = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
 
             let msg = Gossip {
                 from_pid: my_pid,
-                content: format!("Hello from process {}", my_pid),
+                sent_at_nanos: now_system,
             };
 
-            // Call the colony. 
-            // Your Golgi router will Round-Robin this to a random peer (or self).
+            // Call - No payload, minimal overhead
             match call_as!(chatterbox, msg) {
-                Ok(ack) => {
-                    // Success (Silent to keep logs clean, or uncomment to see acks)
-                    // println!("Sent gossip, got: {}", ack.status);
+                Ok(_) => {
+                    let rtt = start_time.elapsed().as_micros();
+                    req_count += 1;
+                    total_rtt_us += rtt;
+                    if rtt < min_rtt { min_rtt = rtt; }
+                    if rtt > max_rtt { max_rtt = rtt; }
                 }
-                Err(e) => {
-                    println!("Failed to gossip: {}", e);
+                Err(_) => {
+                    // In super-tight loops, errors usually mean channel saturation.
+                    // Tiny backoff to let the mesh recover.
+                    sleep(Duration::from_millis(5)).await;
+                }
+            }
+
+            // Optimization: Only check time/print logs every 1000 requests
+            // This prevents the "checking what time it is" logic from slowing down the benchmark.
+            if req_count % 1000 == 0 {
+                if last_report.elapsed() >= Duration::from_secs(1) {
+                    let elapsed = last_report.elapsed().as_secs_f64();
+                    let rps = req_count as f64 / elapsed;
+                    let avg_rtt = if req_count > 0 { total_rtt_us / (req_count as u128) } else { 0 };
+
+                    println!(
+                        "CLIENT >> Tx: {} | RPS: {:.0} | RTT(us) Min:{}/Avg:{}/Max:{}",
+                        req_count, rps, min_rtt, avg_rtt, max_rtt
+                    );
+
+                    // Reset
+                    req_count = 0;
+                    total_rtt_us = 0;
+                    min_rtt = u128::MAX;
+                    max_rtt = 0;
+                    last_report = Instant::now();
                 }
             }
         }
     });
 
-    // 2. LISTENER (Server)
-    println!("Chatterbox Node {} Online.", my_pid);
+    // 2. SERVER (Receiver)
+    println!("Chatterbox Node {} Listening.", my_pid);
+
+    let server_stats = Arc::new(Mutex::new(Stats::default()));
 
     Membrane::bind(__GENOME__, move |vesicle| {
+        let rx_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+
+        // Deserialize (Zero-copy, very fast for u32/u128)
         let msg = cell_sdk::rkyv::check_archived_root::<Gossip>(vesicle.as_slice())
             .map_err(|e| anyhow::anyhow!("Bad Data: {}", e))?;
 
-        let my_pid = std::process::id();
+        // --- Stats Logic ---
+        // We use a block here to drop the lock immediately after updating
+        {
+            let mut stats = server_stats.lock().unwrap();
+            
+            if stats.window_start.is_none() {
+                stats.window_start = Some(Instant::now());
+            }
 
-        // LOGGING: This goes to stdout -> Pipe -> Vacuole -> service.log
-        // We will see who talked to whom.
-        println!("Recv: [{} says '{}']", msg.from_pid, msg.content);
+            if rx_time > msg.sent_at_nanos {
+                let latency_ns = rx_time - msg.sent_at_nanos;
+                stats.total_latency_us += latency_ns / 1000;
+            }
+            stats.count += 1;
 
-        let resp = Ack {
-            status: format!("Ack from {}", my_pid),
-        };
+            // Log every 5 seconds
+            if let Some(start) = stats.window_start {
+                if start.elapsed() >= Duration::from_secs(5) {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let throughput = stats.count as f64 / elapsed;
+                    let avg_lat = stats.total_latency_us / (stats.count as u128);
 
-        let bytes = cell_sdk::rkyv::to_bytes::<_, 256>(&resp)?.into_vec();
+                    println!(
+                        "SERVER >> Total: {} | Rate: {:.0}/s | Avg 1-Way: {} us",
+                        stats.count, throughput, avg_lat
+                    );
+
+                    stats.count = 0;
+                    stats.total_latency_us = 0;
+                    stats.window_start = Some(Instant::now());
+                }
+            }
+        }
+
+        // Return 1 byte ack
+        let resp = Ack { code: 1 };
+        let bytes = cell_sdk::rkyv::to_bytes::<_, 16>(&resp)?.into_vec(); // Small buffer 16
         Ok(vesicle::Vesicle::wrap(bytes))
     })
 }
