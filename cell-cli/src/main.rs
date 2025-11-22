@@ -7,7 +7,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, UdpSocket}; // Added UdpSocket
 use tokio::sync::Mutex;
 
@@ -313,6 +314,7 @@ fn spawn_cell_background(dir: &Path, _bin: &Path) -> Result<()> {
     Ok(())
 }
 
+// [HEAVILY MODIFIED] The Runtime Loop
 async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result<()> {
     let run_dir = dir.join("run");
     if run_dir.exists() {
@@ -324,26 +326,79 @@ async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result
     let mut routes = HashMap::new();
     let golgi_sock_path = run_dir.join("golgi.sock");
 
-    let cell_sock = run_dir.join("cell.sock");
-    let log_path = run_dir.join("service.log");
+    // We no longer hold guards in a Vec.
+    // We move them into async monitor tasks which persist until the runtime drops.
+    // When 'mitosis' ends (Ctrl+C), the runtime kills the tasks,
+    // dropping the guards, triggering the Kill signal.
 
-    let guard = nucleus::activate(
-        &cell_sock,
-        nucleus::LogStrategy::File(log_path),
-        &bin_path,
-        &golgi_sock_path,
-    )?;
+    let replicas = traits.replicas.unwrap_or(1);
 
-    routes.insert(traits.name.clone(), Target::GapJunction(cell_sock));
+    if replicas > 1 {
+        sys_log("INFO", &format!("Spawning Colony: {} workers.", replicas));
+        let socket_dir = run_dir.join("sockets");
+        std::fs::create_dir_all(&socket_dir)?;
+
+        let log_path = run_dir.join("service.log");
+        // Wrap Vacuole in Arc so multiple monitors can log to it
+        let vacuole = Arc::new(vacuole::Vacuole::new(log_path).await?);
+        let mut worker_sockets = Vec::new();
+
+        for i in 0..replicas {
+            let worker_dir = run_dir.join("workers").join(i.to_string());
+            std::fs::create_dir_all(&worker_dir)?;
+            let sock_path = worker_dir.join("cell.sock");
+            worker_sockets.push(sock_path.clone());
+
+            let mut guard = nucleus::activate(
+                &sock_path,
+                nucleus::LogStrategy::Piped,
+                &bin_path,
+                &golgi_sock_path,
+            )?;
+
+            let (out, err) = guard.take_pipes();
+            let id = format!("w-{}", i);
+            vacuole.attach(id.clone(), out, err);
+
+            // SPAWN MONITOR
+            let v = vacuole.clone();
+            tokio::spawn(async move {
+                monitor_child(guard, LogTarget::Vacuole(v, id)).await;
+            });
+        }
+        routes.insert(
+            traits.name.clone(),
+            Target::LocalColony(Arc::new(worker_sockets)),
+        );
+    } else {
+        // Single Cell
+        let cell_sock = run_dir.join("cell.sock");
+        let log_path = run_dir.join("service.log");
+
+        // We clone the path for the monitor to open later if needed
+        let monitor_log_path = log_path.clone();
+
+        let guard = nucleus::activate(
+            &cell_sock,
+            nucleus::LogStrategy::File(log_path),
+            &bin_path,
+            &golgi_sock_path,
+        )?;
+
+        // SPAWN MONITOR
+        tokio::spawn(async move {
+            monitor_child(guard, LogTarget::File(monitor_log_path)).await;
+        });
+
+        routes.insert(traits.name.clone(), Target::GapJunction(cell_sock));
+    }
+
     for (name, path) in &dna.junctions {
         routes.insert(
             name.clone(),
             Target::GapJunction(dir.join(path).join("run/cell.sock")),
         );
     }
-
-    // IMPORTANT: Pass the RAW axon addresses to Golgi.
-    // Golgi has its own continuous discovery loop.
     for (name, addr) in &dna.axons {
         let clean = addr.replace("axon://", "");
         routes.insert(
@@ -359,14 +414,62 @@ async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result
 
     let golgi = Golgi::new(traits.name.clone(), &run_dir, traits.listen.clone(), routes)?;
 
-    // Keep guard alive
-    let _g = guard;
-
     tokio::select! {
-        _ = golgi.run() => {},
-        _ = tokio::signal::ctrl_c() => {}
+        res = golgi.run() => {
+            if let Err(e) = res { sys_log("CRITICAL", &format!("Golgi crashed: {}", e)); }
+        },
+        _ = tokio::signal::ctrl_c() => {
+            sys_log("INFO", "Apoptosis triggered (Signal Received). Shutting down cells...");
+            // The function returns, main returns, Runtime drops tasks, Guards drop, Children killed.
+        }
     }
     Ok(())
+}
+
+// Monitoring Logic
+
+enum LogTarget {
+    Vacuole(Arc<vacuole::Vacuole>, String),
+    File(PathBuf),
+}
+
+async fn monitor_child(mut guard: nucleus::ChildGuard, target: LogTarget) {
+    // Wait for the process to exit
+    let status = guard.wait().await;
+
+    let msg = match status {
+        Ok(s) if s.success() => "Process exited cleanly (Success).".to_string(),
+        Ok(s) => match s.code() {
+            Some(c) => format!("CRITICAL: Process crashed with Exit Code: {}", c),
+            None => "Process terminated by signal.".to_string(),
+        },
+        Err(e) => format!("Supervisor Error: Failed to wait on child: {}", e),
+    };
+
+    // Log to System/Console
+    if msg.contains("CRITICAL") {
+        sys_log("ERROR", &msg);
+    }
+
+    // Log to Persistent File
+    match target {
+        LogTarget::Vacuole(v, id) => {
+            v.log(&id, &msg).await;
+        }
+        LogTarget::File(path) => {
+            // Open file in append mode to write the crash report
+            if let Ok(mut file) = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .await
+            {
+                let timestamp = humantime::format_rfc3339_seconds(SystemTime::now());
+                let line = format!("[{}] [SUPERVISOR] {}\n", timestamp, msg);
+                let _ = file.write_all(line.as_bytes()).await;
+            }
+        }
+    }
 }
 
 fn inventory_cells(dir: &Path, registry: &mut CellRegistry) -> Result<()> {

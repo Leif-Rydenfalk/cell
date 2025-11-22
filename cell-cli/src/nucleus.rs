@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::Stdio; // Enum definitions
+use std::process::{ExitStatus, Stdio}; // Enum definitions
 use std::time::SystemTime;
 use tokio::process::{Child, Command}; // Async Command
 
@@ -27,6 +27,11 @@ impl ChildGuard {
         Option<tokio::process::ChildStderr>,
     ) {
         (self.0.stdout.take(), self.0.stderr.take())
+    }
+
+    // Allow the supervisor to wait for the child to die naturally
+    pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        self.0.wait().await
     }
 }
 

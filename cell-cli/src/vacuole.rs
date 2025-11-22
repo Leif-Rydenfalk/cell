@@ -141,4 +141,11 @@ impl Vacuole {
         }
         Ok(())
     }
+
+    // Allow manual logging from the Supervisor
+    pub async fn log(&self, id: &str, msg: &str) {
+        let timestamp = humantime::format_rfc3339_seconds(std::time::SystemTime::now());
+        let log_line = format!("[{}] [{}] [SUPERVISOR] {}", timestamp, id, msg);
+        let _ = self.sender.send(log_line).await;
+    }
 }
