@@ -29,9 +29,15 @@ impl ChildGuard {
         (self.0.stdout.take(), self.0.stderr.take())
     }
 
-    // Allow the supervisor to wait for the child to die naturally
-    pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+    /// Allows the supervisor to wait for natural exit (crash/completion)
+    pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         self.0.wait().await
+    }
+
+    /// Explicitly kill the process and return immediately (async friendly).
+    /// We use this instead of Drop when we want to control the timing.
+    pub async fn kill(&mut self) -> std::io::Result<()> {
+        self.0.start_kill()
     }
 }
 

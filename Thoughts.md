@@ -12,6 +12,10 @@ if a cell fails the cell which depends on should be able to get a concrete sdk e
 This means cells can handle it in a match to for example find a new better alternative cell or spawn a local instance.
 
 
+Security	Basic	Noise Protocol is secure, but you blindly trust any key. A whitelist (allow_keys) would be the next step.
+Updates	Basic	You verify git clone, but you don't auto git pull to update existing repos.
+Metrics	Missing	No Prometheus/Grafana export for CPU/RAM/Latency.
+
 
 
 cell-cli - cell is the command line tool.

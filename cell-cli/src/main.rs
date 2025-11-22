@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, UdpSocket}; // Added UdpSocket
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
+use tokio::task::JoinSet;
 
 // Import from internal lib
 use cell_cli::golgi::{pheromones, Golgi, Target}; // Import pheromones
@@ -314,7 +315,7 @@ fn spawn_cell_background(dir: &Path, _bin: &Path) -> Result<()> {
     Ok(())
 }
 
-// [HEAVILY MODIFIED] The Runtime Loop
+// The Runtime Loop
 async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result<()> {
     let run_dir = dir.join("run");
     if run_dir.exists() {
@@ -326,10 +327,11 @@ async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result
     let mut routes = HashMap::new();
     let golgi_sock_path = run_dir.join("golgi.sock");
 
-    // We no longer hold guards in a Vec.
-    // We move them into async monitor tasks which persist until the runtime drops.
-    // When 'mitosis' ends (Ctrl+C), the runtime kills the tasks,
-    // dropping the guards, triggering the Kill signal.
+    // 1. Create Shutdown Channel
+    let (shutdown_tx, _) = broadcast::channel::<()>(1);
+
+    // 2. Create Task Tracker
+    let mut monitors = JoinSet::new();
 
     let replicas = traits.replicas.unwrap_or(1);
 
@@ -339,7 +341,6 @@ async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result
         std::fs::create_dir_all(&socket_dir)?;
 
         let log_path = run_dir.join("service.log");
-        // Wrap Vacuole in Arc so multiple monitors can log to it
         let vacuole = Arc::new(vacuole::Vacuole::new(log_path).await?);
         let mut worker_sockets = Vec::new();
 
@@ -360,22 +361,21 @@ async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result
             let id = format!("w-{}", i);
             vacuole.attach(id.clone(), out, err);
 
-            // SPAWN MONITOR
             let v = vacuole.clone();
-            tokio::spawn(async move {
-                monitor_child(guard, LogTarget::Vacuole(v, id)).await;
-            });
+            // We must subscribe to the broadcast channel for THIS specific task
+            let rx = shutdown_tx.subscribe();
+
+            // Pass 'rx' as the 3rd argument
+            monitors.spawn(monitor_child(guard, LogTarget::Vacuole(v, id), rx));
         }
         routes.insert(
             traits.name.clone(),
             Target::LocalColony(Arc::new(worker_sockets)),
         );
     } else {
-        // Single Cell
+        // Single Cell Mode
         let cell_sock = run_dir.join("cell.sock");
         let log_path = run_dir.join("service.log");
-
-        // We clone the path for the monitor to open later if needed
         let monitor_log_path = log_path.clone();
 
         let guard = nucleus::activate(
@@ -385,14 +385,14 @@ async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result
             &golgi_sock_path,
         )?;
 
-        // SPAWN MONITOR
-        tokio::spawn(async move {
-            monitor_child(guard, LogTarget::File(monitor_log_path)).await;
-        });
+        // Subscribe here as well
+        let rx = shutdown_tx.subscribe();
+        monitors.spawn(monitor_child(guard, LogTarget::File(monitor_log_path), rx));
 
         routes.insert(traits.name.clone(), Target::GapJunction(cell_sock));
     }
 
+    // [Rest of the function remains the same...]
     for (name, path) in &dna.junctions {
         routes.insert(
             name.clone(),
@@ -417,10 +417,18 @@ async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result
     tokio::select! {
         res = golgi.run() => {
             if let Err(e) = res { sys_log("CRITICAL", &format!("Golgi crashed: {}", e)); }
+            let _ = shutdown_tx.send(()); // Kill children if router dies
         },
         _ = tokio::signal::ctrl_c() => {
-            sys_log("INFO", "Apoptosis triggered (Signal Received). Shutting down cells...");
-            // The function returns, main returns, Runtime drops tasks, Guards drop, Children killed.
+            sys_log("INFO", "Apoptosis triggered. Shutting down cells...");
+
+            // 1. Broadcast Kill Signal
+            let _ = shutdown_tx.send(());
+
+            // 2. Wait for all monitors to finish cleanup
+            while let Some(_) = monitors.join_next().await {}
+
+            sys_log("INFO", "Shutdown complete.");
         }
     }
     Ok(())
@@ -433,31 +441,46 @@ enum LogTarget {
     File(PathBuf),
 }
 
-async fn monitor_child(mut guard: nucleus::ChildGuard, target: LogTarget) {
-    // Wait for the process to exit
-    let status = guard.wait().await;
+async fn monitor_child(
+    mut guard: nucleus::ChildGuard,
+    target: LogTarget,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    let status_msg;
 
-    let msg = match status {
-        Ok(s) if s.success() => "Process exited cleanly (Success).".to_string(),
-        Ok(s) => match s.code() {
-            Some(c) => format!("CRITICAL: Process crashed with Exit Code: {}", c),
-            None => "Process terminated by signal.".to_string(),
-        },
-        Err(e) => format!("Supervisor Error: Failed to wait on child: {}", e),
-    };
+    tokio::select! {
+        // Case A: Child exits naturally (crash or finish)
+        res = guard.wait() => {
+            match res {
+                Ok(s) if s.success() => status_msg = "Process exited cleanly (Success).".to_string(),
+                Ok(s) => {
+                    match s.code() {
+                        Some(c) => status_msg = format!("CRITICAL: Process crashed with Exit Code: {}", c),
+                        None => status_msg = "Process terminated by signal.".to_string(),
+                    }
+                },
+                Err(e) => status_msg = format!("Supervisor Error: Failed to wait on child: {}", e),
+            }
+        }
 
-    // Log to System/Console
-    if msg.contains("CRITICAL") {
-        sys_log("ERROR", &msg);
+        // Case B: Parent requests shutdown (Ctrl+C)
+        _ = shutdown_rx.recv() => {
+            // 1. Trigger Kill
+            let _ = guard.kill().await;
+
+            // 2. Wait for OS to confirm death (Reap zombie)
+            let _ = guard.wait().await;
+
+            status_msg = "Shutdown by Supervisor.".to_string();
+        }
     }
 
-    // Log to Persistent File
+    // Log the result to disk/console
     match target {
         LogTarget::Vacuole(v, id) => {
-            v.log(&id, &msg).await;
+            v.log(&id, &status_msg).await;
         }
         LogTarget::File(path) => {
-            // Open file in append mode to write the crash report
             if let Ok(mut file) = tokio::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -465,7 +488,7 @@ async fn monitor_child(mut guard: nucleus::ChildGuard, target: LogTarget) {
                 .await
             {
                 let timestamp = humantime::format_rfc3339_seconds(SystemTime::now());
-                let line = format!("[{}] [SUPERVISOR] {}\n", timestamp, msg);
+                let line = format!("[{}] [SUPERVISOR] {}\n", timestamp, status_msg);
                 let _ = file.write_all(line.as_bytes()).await;
             }
         }

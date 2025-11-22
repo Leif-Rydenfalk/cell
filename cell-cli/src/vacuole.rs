@@ -1,17 +1,19 @@
 use anyhow::Result;
+use std::fs::{self, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::sync::mpsc;
+use std::thread;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout};
-use tokio::sync::mpsc;
 use tokio::task;
 
 const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 const BACKUP_COUNT: usize = 5;
 
-/// The Vacuole aggregates logs from multiple sources (Colony Workers)
-/// and pipes them into a centralized, thread-safe log file with rotation.
 pub struct Vacuole {
     sender: mpsc::Sender<String>,
+    _handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Vacuole {
@@ -20,110 +22,83 @@ impl Vacuole {
             tokio::fs::create_dir_all(p).await?;
         }
 
-        // Create the channel
-        let (tx, mut rx) = mpsc::channel::<String>(1024);
+        let (tx, rx) = mpsc::channel::<String>();
+        let path_clone = log_path.clone();
 
-        // Spawn the Writer Task
-        task::spawn(async move {
-            let file = match Self::open_log(&log_path).await {
+        let handle = thread::spawn(move || {
+            // 1. Initial Open
+            let mut file = match OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path_clone)
+            {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("Vacuole failed to open log: {}", e);
+                    eprintln!("[VACUOLE] Failed to open log: {}", e);
                     return;
                 }
             };
 
-            // We track size manually to avoid stat() calls on every write
-            let mut current_size = match file.metadata().await {
-                Ok(m) => m.len(),
-                Err(_) => 0,
-            };
+            // Track size manually to avoid syscalls on every line
+            let mut current_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let mut writer = BufWriter::new(file);
 
-            let mut writer = tokio::io::BufWriter::new(file);
-
-            while let Some(line) = rx.recv().await {
+            while let Ok(line) = rx.recv() {
                 let bytes = line.as_bytes();
                 let len = bytes.len() as u64 + 1; // +1 for newline
 
-                // Check Rotation
+                // 2. Check Rotation
                 if current_size + len > MAX_LOG_SIZE {
-                    let _ = writer.flush().await;
-                    drop(writer); // Release file handle
+                    // Flush and Drop current writer to close the file handle
+                    let _ = writer.flush();
+                    drop(writer);
 
-                    if let Err(e) = Self::rotate(&log_path).await {
-                        eprintln!("Vacuole rotation failed: {}", e);
+                    // Perform Rotation (log -> log.1, etc)
+                    if let Err(e) = Self::rotate(&path_clone) {
+                        eprintln!("[VACUOLE] Rotation failed: {}", e);
                     }
 
-                    // Re-open
-                    match Self::open_log(&log_path).await {
+                    // Re-Open
+                    match OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path_clone)
+                    {
                         Ok(f) => {
-                            writer = tokio::io::BufWriter::new(f);
                             current_size = 0;
+                            writer = BufWriter::new(f);
                         }
                         Err(e) => {
-                            eprintln!("Vacuole failed to re-open log: {}", e);
+                            eprintln!("[VACUOLE] Failed to re-open log: {}", e);
                             return;
                         }
                     }
                 }
 
-                // Write
-                if writer.write_all(bytes).await.is_err() {
+                // 3. Write
+                if writer.write_all(bytes).is_err() {
                     break;
                 }
-                if writer.write_all(b"\n").await.is_err() {
+                if writer.write_all(b"\n").is_err() {
                     break;
                 }
-
-                // In a high-throughput scenario, we might rely on the BufWriter's internal buffer
-                // rather than flushing every line. However, for logs, latency matters.
-                // We'll flush if the channel is empty (opportunistic flush)
-                if rx.is_empty() {
-                    let _ = writer.flush().await;
+                if writer.flush().is_err() {
+                    break;
                 }
 
                 current_size += len;
             }
         });
 
-        Ok(Self { sender: tx })
+        Ok(Self {
+            sender: tx,
+            _handle: Some(handle),
+        })
     }
 
-    pub fn attach(&self, id: String, stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) {
-        if let Some(out) = stdout {
-            let tx = self.sender.clone();
-            let id = id.clone();
-            task::spawn(async move {
-                let mut reader = BufReader::new(out).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx.send(format!("[{}] {}", id, line)).await;
-                }
-            });
-        }
-
-        if let Some(err) = stderr {
-            let tx = self.sender.clone();
-            let id = id.clone();
-            task::spawn(async move {
-                let mut reader = BufReader::new(err).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx.send(format!("[{}] [ERR] {}", id, line)).await;
-                }
-            });
-        }
-    }
-
-    async fn open_log(path: &Path) -> std::io::Result<tokio::fs::File> {
-        tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .await
-    }
-
-    async fn rotate(path: &Path) -> std::io::Result<()> {
-        // log.4 -> log.5 (Delete log.5 first)
-        // log.3 -> log.4
+    /// Synchronous rotation logic (safe to run in the OS thread)
+    fn rotate(path: &Path) -> std::io::Result<()> {
+        // log.4 -> log.5
         // ...
         // log -> log.1
         for i in (0..BACKUP_COUNT).rev() {
@@ -136,16 +111,46 @@ impl Vacuole {
             let dst = path.with_extension(format!("log.{}", i + 1));
 
             if src.exists() {
-                let _ = tokio::fs::rename(&src, &dst).await;
+                // On Windows, you can't rename over an existing file usually,
+                // but on Linux (POSIX), atomic rename replaces the target.
+                // To be safe cross-platform, remove dst first.
+                if dst.exists() {
+                    let _ = fs::remove_file(&dst);
+                }
+                let _ = fs::rename(&src, &dst);
             }
         }
         Ok(())
     }
 
-    // Allow manual logging from the Supervisor
+    pub fn attach(&self, id: String, stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) {
+        if let Some(out) = stdout {
+            let tx = self.sender.clone();
+            let id = id.clone();
+            task::spawn(async move {
+                let mut reader = BufReader::new(out).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let _ = tx.send(format!("[{}] {}", id, line));
+                }
+            });
+        }
+
+        if let Some(err) = stderr {
+            let tx = self.sender.clone();
+            let id = id.clone();
+            task::spawn(async move {
+                let mut reader = BufReader::new(err).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let _ = tx.send(format!("[{}] [ERR] {}", id, line));
+                }
+            });
+        }
+    }
+
     pub async fn log(&self, id: &str, msg: &str) {
         let timestamp = humantime::format_rfc3339_seconds(std::time::SystemTime::now());
-        let log_line = format!("[{}] [{}] [SUPERVISOR] {}", timestamp, id, msg);
-        let _ = self.sender.send(log_line).await;
+        let _ = self
+            .sender
+            .send(format!("[{}] [{}] [SUPERVISOR] {}", timestamp, id, msg));
     }
 }
