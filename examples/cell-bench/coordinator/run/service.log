@@ -44,3 +44,49 @@ Running: Max Bandwidth (8 Threads, 64KB)
    Throughput: 7273 Req/sec
    Bandwidth:  476.67 MB/s
 ---------------------------------------
+
+[Coordinator] Starting Benchmark Suite
+=======================================
+[System] Waiting for peer discovery...
+.....
+[System] Peer 'worker' discovered and reachable.
+[System] Warming up connection pools... Done.
+
+Running: Latency Test (Single Thread)
+   Duration:   594.91ms
+   Throughput: 16809 Req/sec
+   Bandwidth:  0.02 MB/s
+---------------------------------------
+Running: Max Throughput (8 Threads)
+   Duration:   31.77s
+   Throughput: 25179 Req/sec
+   Bandwidth:  0.03 MB/s
+---------------------------------------
+Running: Max Bandwidth (8 Threads, 64KB)
+   Duration:   12.54s
+   Throughput: 6378 Req/sec
+   Bandwidth:  418.01 MB/s
+---------------------------------------
+
+[Coordinator] Starting Benchmark Suite
+=======================================
+[System] Waiting for peer discovery...
+.......
+[System] Peer 'worker' discovered and reachable.
+[System] Warming up connection pools... Done.
+
+Running: Latency Test (Single Thread)
+   Duration:   684.11ms
+   Throughput: 14618 Req/sec
+   Bandwidth:  0.01 MB/s
+---------------------------------------
+Running: Max Throughput (8 Threads)
+   Duration:   19.16s
+   Throughput: 41755 Req/sec
+   Bandwidth:  0.04 MB/s
+---------------------------------------
+Running: Max Bandwidth (8 Threads, 64KB)
+   Duration:   11.28s
+   Throughput: 7093 Req/sec
+   Bandwidth:  464.83 MB/s
+---------------------------------------
