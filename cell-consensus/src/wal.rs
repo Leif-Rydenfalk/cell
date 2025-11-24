@@ -68,3 +68,89 @@ impl WriteAheadLog {
         Ok(entries)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::LogEntry;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_wal_write_and_read() -> Result<()> {
+        let tmp = NamedTempFile::new()?;
+        let path = tmp.path();
+
+        let mut wal = WriteAheadLog::open(path)?;
+
+        let entry1 = LogEntry::Command(b"hello".to_vec());
+        let entry2 = LogEntry::Command(b"world".to_vec());
+        let entry3 = LogEntry::ConfigChange;
+
+        wal.append(&entry1)?;
+        wal.append(&entry2)?;
+        wal.append(&entry3)?;
+
+        // Re-read immediately
+        let entries = wal.read_all()?;
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0], entry1);
+        assert_eq!(entries[1], entry2);
+        assert_eq!(entries[2], entry3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_recovery() -> Result<()> {
+        let tmp = NamedTempFile::new()?;
+        let path = tmp.path().to_owned();
+
+        let entry = LogEntry::Command(vec![1, 2, 3, 4]);
+
+        // 1. Open, Write, Close
+        {
+            let mut wal = WriteAheadLog::open(&path)?;
+            wal.append(&entry)?;
+        } // wal dropped here, file closed
+
+        // 2. Re-open
+        {
+            let mut wal_reopened = WriteAheadLog::open(&path)?;
+            let entries = wal_reopened.read_all()?;
+
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0], entry);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_corruption_handling() -> Result<()> {
+        let tmp = NamedTempFile::new()?;
+        let path = tmp.path();
+
+        // 1. Create valid WAL
+        {
+            let mut wal = WriteAheadLog::open(path)?;
+            wal.append(&LogEntry::Command(b"valid".to_vec()))?;
+        }
+
+        // 2. Corrupt the file (truncate slightly to break CRC/Len)
+        let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
+        let len = file.metadata()?.len();
+        file.set_len(len - 2)?; // Cut off 2 bytes from the end
+
+        // 3. Attempt read
+        let mut wal = WriteAheadLog::open(path)?;
+        let entries = wal.read_all()?;
+
+        // Depending on implementation, it should either return 0 entries
+        // (if the first one was corrupted) or return strict error.
+        // Our current impl breaks loop on read error, so it might return empty.
+        // Ideally, a robust WAL would return the valid prefix.
+        assert!(entries.is_empty(), "Should not return corrupted entry");
+
+        Ok(())
+    }
+}
