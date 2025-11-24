@@ -293,17 +293,30 @@ async fn handle_local_signal(
 
 async fn handle_remote_signal(
     stream: TcpStream,
-    addr: std::net::SocketAddr,
+    _addr: std::net::SocketAddr,
     routes: Arc<RwLock<HashMap<String, Target>>>,
     identity: Arc<Antigens>,
     rr_index: Arc<AtomicUsize>,
-    mitochondria: Arc<Mitochondria>, // Passed down
+    mitochondria: Arc<Mitochondria>,
     is_donor: bool,
 ) -> Result<()> {
+    // Disable Nagle's algorithm. We want low-latency RPC, not bandwidth optimization.
     stream.set_nodelay(true)?;
+
+    // 1. SECURE HANDSHAKE (Mutual Authentication)
+    // We use the Noise_XX pattern. This guarantees:
+    // - The server is who they say they are.
+    // - The client is who they say they are.
+    // - Forward Secrecy for the session.
+    // If this fails, the connection is dropped immediately.
     let (mut secure_stream, remote_pub) =
         synapse::connect_secure(stream, &identity.keypair, false).await?;
-    let remote_id = base64::encode(remote_pub); // Simplified ID
+
+    // 2. IDENTITY DERIVATION
+    // The public key IS the identity. We encode it to Base64 to use as the Peer ID
+    // for the Mitochondria ledger. This ensures we bill the correct cryptographically
+    // verified entity.
+    let remote_id = base64::encode(remote_pub);
 
     let frame = synapse::read_frame(&mut secure_stream.inner).await?;
     let mut buf = vec![0u8; 1024];
@@ -313,6 +326,8 @@ async fn handle_remote_signal(
         return Ok(());
     }
 
+    // 3. ROUTING & ACCESS CONTROL
+    // Packet Format: [Op: 0x01] [Len: u32] [TargetName: utf8]
     if buf[0] == 0x01 {
         let name_len = u32::from_be_bytes(buf[1..5].try_into()?) as usize;
         let target_name = String::from_utf8(buf[5..5 + name_len].to_vec())?;
@@ -322,9 +337,12 @@ async fn handle_remote_signal(
         let chosen_route = {
             let r = routes.read().await;
             match r.get(&target_name) {
+                // Load Balancing: Colony (Round-Robin)
                 Some(Target::LocalColony(sockets)) => Some(RouteChoice::Colony(sockets.clone())),
-                // If I am a donor, I might accept work for services not explicitly in routes if I have a generic handler,
-                // but for MVP we assume donor runs specific "Worker" cells that are in routes.
+                // Direct Routing: Single Cell (Gap Junction)
+                Some(Target::GapJunction(path)) => Some(RouteChoice::Unix(path.clone())),
+                // Note: We currently do not allow forwarding TCP-to-TCP (Mesh Routing)
+                // to prevent uncontrolled relaying in the donor economy.
                 _ => None,
             }
         };
@@ -333,19 +351,18 @@ async fn handle_remote_signal(
             Some(RouteChoice::Colony(sockets)) => {
                 match connect_to_colony_with_retry(&sockets, &rr_index).await {
                     Some(target) => {
-                        // ACK
+                        // ACK (0x00) - Connection Accepted
                         let len = secure_stream
                             .state
                             .write_message(&[0x00], &mut buf)
                             .unwrap();
                         synapse::write_frame(&mut secure_stream.inner, &buf[..len]).await?;
 
-                        // Execute
+                        // BRIDGE: Decrypt from Network -> Write to Unix Socket
                         synapse::bridge_secure_to_plain(secure_stream, target).await?;
 
-                        // BILLING (Post-execution)
-                        // In the real system, bridge_secure_to_plain would return bytes transferred or timing.
-                        // Here we use wall-clock time of the connection as a proxy for CPU time.
+                        // BILLING: Economy
+                        // We only charge if we explicitly opted-in as a donor.
                         let duration_ms = start_time.elapsed().as_millis() as u64;
                         if is_donor {
                             let _ =
@@ -353,7 +370,37 @@ async fn handle_remote_signal(
                         }
                     }
                     None => {
-                        // NACK
+                        // NACK (0xFF) - Service Exists but Workers Unavailable
+                        let len = secure_stream
+                            .state
+                            .write_message(&[0xFF], &mut buf)
+                            .unwrap();
+                        synapse::write_frame(&mut secure_stream.inner, &buf[..len]).await?;
+                    }
+                }
+            }
+            Some(RouteChoice::Unix(path)) => {
+                match UnixStream::connect(path).await {
+                    Ok(target) => {
+                        // ACK (0x00)
+                        let len = secure_stream
+                            .state
+                            .write_message(&[0x00], &mut buf)
+                            .unwrap();
+                        synapse::write_frame(&mut secure_stream.inner, &buf[..len]).await?;
+
+                        // BRIDGE
+                        synapse::bridge_secure_to_plain(secure_stream, target).await?;
+
+                        // BILLING
+                        let duration_ms = start_time.elapsed().as_millis() as u64;
+                        if is_donor {
+                            let _ =
+                                mitochondria.synthesize_atp(&remote_id, &target_name, duration_ms);
+                        }
+                    }
+                    Err(_) => {
+                        // NACK (0xFF) - Service Unavailable (Socket missing)
                         let len = secure_stream
                             .state
                             .write_message(&[0xFF], &mut buf)
@@ -363,6 +410,8 @@ async fn handle_remote_signal(
                 }
             }
             _ => {
+                // NACK (0xFF) - Route Not Found / Security Deny
+                // We do not reveal *why* the route failed to the client to prevent enumeration.
                 let len = secure_stream
                     .state
                     .write_message(&[0xFF], &mut buf)

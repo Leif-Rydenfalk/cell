@@ -5,7 +5,7 @@ use serial_test::serial;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UnixListener}; // Change UnixStream to UnixListener
+use tokio::net::{TcpStream, UnixListener};
 
 /// Simulates a running "Worker" process (Nucleus).
 /// Acts as a Server listening on its own socket.
@@ -22,8 +22,6 @@ async fn spawn_mock_nucleus(
         UnixListener::bind(&socket_path).expect("Mock Nucleus failed to bind Service Socket");
 
     // 2. Accept Connection from Golgi
-    // In a real scenario, Golgi connects when a request arrives.
-    // So we loop to accept connections.
     loop {
         match listener.accept().await {
             Ok((mut stream, _)) => {
@@ -81,14 +79,13 @@ async fn test_full_handshake_and_routing() -> Result<()> {
         Target::GapJunction(worker_sock.clone()),
     );
 
-    // 1. Spawn Mock Nucleus FIRST (So it is listening when Golgi tries to connect)
+    // 1. Spawn Mock Nucleus FIRST
     let schema = r#"{ "input": "Job", "output": "Result" }"#;
     let sock_path = worker_sock.clone();
     tokio::spawn(async move {
         spawn_mock_nucleus(sock_path, "worker", schema).await;
     });
 
-    // Allow Mock Nucleus to bind
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // 2. Start Golgi
@@ -97,16 +94,16 @@ async fn test_full_handshake_and_routing() -> Result<()> {
         &run_dir,
         Some(axon_addr.clone()),
         routes,
+        false, // <--- FIX: is_donor = false
     )?;
 
     tokio::spawn(async move {
         golgi.run().await.unwrap();
     });
 
-    // Allow Golgi to bind
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // 3. Client Logic (Same as before)
+    // 3. Client Logic
     let client_id_path = run_dir.join("client_id");
     let client_identity = antigens::Antigens::load_or_create(client_id_path)?;
 
@@ -165,18 +162,20 @@ async fn test_full_handshake_and_routing() -> Result<()> {
 #[tokio::test]
 #[serial]
 async fn test_route_not_found() -> Result<()> {
-    // This test remains correct (no mock nucleus needed to test failure)
     let temp = tempfile::tempdir()?;
     let run_dir = temp.path().join("run");
     std::fs::create_dir_all(&run_dir)?;
 
     let port = 9092;
     let axon_addr = format!("127.0.0.1:{}", port);
+
+    // FIX: Add false for is_donor
     let golgi = Golgi::new(
         "router".to_string(),
         &run_dir,
         Some(axon_addr.clone()),
         HashMap::new(),
+        false,
     )?;
 
     tokio::spawn(async move {

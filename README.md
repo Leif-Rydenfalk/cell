@@ -87,3 +87,9 @@ But as a **zero-dependency, single-binary, <5 kLOC proof-of-concept**, Cell alre
 * 100 k+ RPC/s on localhost (Unix sockets).  
 * 10 k+ RPC/s between laptops over Wi-Fi (QUIC).  
 * End-to-end encryption, service discovery, load-balancing, logging, and billing in one `cargo run`.
+
+## License
+MIT OR Apache-2.0 – do what you want.
+
+## Author
+17 y/o, self-taught. 

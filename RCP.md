@@ -6,10 +6,10 @@ Zero-copy, compile-time–checked remote-procedure framework that turns a 4-core
 
 ## One-liner demo
 ```bash
-git clone https://github.com/you/cell && cd cell
+git clone https://github.com/Leif-Rydenfalk/cell && cd cell
 cargo install --path cell-cli
-cd examples/cell-distributed-bench
-cell run coordinator && cell use coordinator '{}'   # 5 GB/s on laptop below
+cd examples/cell-bench
+cell mitosis .   # 5 GB/s on laptop below
 ```
 
 ## Numbers (Intel i5-7600K 3.8 GHz, 4 cores)

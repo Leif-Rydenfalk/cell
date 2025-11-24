@@ -1,5 +1,4 @@
 use anyhow::Result;
-use cell_cli::antigens::Antigens;
 use cell_cli::golgi::{Golgi, Target};
 use cell_cli::synapse;
 use std::collections::HashMap;
@@ -15,13 +14,13 @@ async fn test_secure_handshake() -> Result<()> {
     let server_addr = "127.0.0.1:9095";
     let routes = HashMap::new();
 
-    // Note: This relies on Antigens loading from ~/.cell.
-    // In a clean environment, this will create a key.
+    // FIX: Add false for is_donor
     let golgi = Golgi::new(
         "router".to_string(),
         &run_dir,
         Some(server_addr.to_string()),
         routes,
+        false,
     )?;
 
     tokio::spawn(async move {
