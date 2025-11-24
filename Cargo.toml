@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["cell-cli", "cell-sdk", "cell-macros"]
+members = ["cell-cli", "cell-sdk", "cell-macros", "cell-consensus"]
 exclude = ["examples"]
 
 [workspace.package]
