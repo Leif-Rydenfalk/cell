@@ -1,6 +1,5 @@
 use anyhow::Result;
 use cell_cli::mitochondria::Mitochondria;
-use std::time::Duration;
 
 #[test]
 fn test_atp_calculation() {

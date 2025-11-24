@@ -1,5 +1,5 @@
 use anyhow::Result;
-use cell_cli::golgi::{Golgi, Target};
+use cell_cli::golgi::Golgi;
 use cell_cli::synapse;
 use std::collections::HashMap;
 use tokio::net::TcpStream;
@@ -60,7 +60,7 @@ async fn test_secure_handshake() -> Result<()> {
 
     // 5. Read Response
     let frame = synapse::read_frame(&mut secure_stream.inner).await?;
-    let len = secure_stream.state.read_message(&frame, &mut buf).unwrap();
+    let _len = secure_stream.state.read_message(&frame, &mut buf).unwrap();
 
     // Expect NACK (0xFF) because "ghost_service" doesn't exist
     assert_eq!(buf[0], 0xFF);

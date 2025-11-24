@@ -1,7 +1,6 @@
 use anyhow::Result;
 use cell_cli::nucleus;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 use std::time::Duration; // Required for chmod
 
 #[tokio::test]

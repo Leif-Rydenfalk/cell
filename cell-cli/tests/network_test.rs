@@ -128,13 +128,13 @@ async fn test_full_handshake_and_routing() -> Result<()> {
 
     // Read ACK
     let frame = synapse::read_frame(&mut secure_stream.inner).await?;
-    let len = secure_stream.state.read_message(&frame, &mut buf)?;
+    let _len = secure_stream.state.read_message(&frame, &mut buf)?;
 
     assert_eq!(
         buf[0], 0x00,
         "Expected ACK (0x00), got NACK (0xFF). Is the mock nucleus running?"
     );
-    println!("✅ Route Established");
+    println!("Route Established");
 
     // Fetch Genome
     let req = b"__GENOME__";
@@ -148,13 +148,13 @@ async fn test_full_handshake_and_routing() -> Result<()> {
     synapse::write_frame(&mut secure_stream.inner, &buf[..len]).await?;
 
     let frame = synapse::read_frame(&mut secure_stream.inner).await?;
-    let len = secure_stream.state.read_message(&frame, &mut buf)?;
+    let _len = secure_stream.state.read_message(&frame, &mut buf)?;
 
     let resp_len = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize;
     let json_resp = String::from_utf8(buf[4..4 + resp_len].to_vec())?;
 
     assert_eq!(json_resp, schema);
-    println!("✅ Schema Fetched: {}", json_resp);
+    println!("Schema Fetched: {}", json_resp);
 
     Ok(())
 }
@@ -203,7 +203,7 @@ async fn test_route_not_found() -> Result<()> {
     synapse::write_frame(&mut secure_stream.inner, &buf[..len]).await?;
 
     let frame = synapse::read_frame(&mut secure_stream.inner).await?;
-    let len = secure_stream.state.read_message(&frame, &mut buf)?;
+    let _len = secure_stream.state.read_message(&frame, &mut buf)?;
 
     assert_eq!(buf[0], 0xFF);
     Ok(())
