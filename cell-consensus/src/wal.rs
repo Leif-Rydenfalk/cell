@@ -46,23 +46,37 @@ impl WriteAheadLog {
         let mut crc_buf = [0u8; 4];
 
         loop {
+            // 1. Read Length
+            // If we fail to read the length (EOF), we assume end of log.
             if self.file.read_exact(&mut len_buf).is_err() {
-                break; // EOF
+                break;
             }
             let len = u64::from_le_bytes(len_buf);
 
+            // 2. Read CRC
+            // If we have a length but no CRC, it's a corrupted/partial tail.
             if self.file.read_exact(&mut crc_buf).is_err() {
-                break; // Corrupt/Truncated
+                break;
             }
             let _expected_crc = u32::from_le_bytes(crc_buf);
 
+            // 3. Read Payload
             let mut payload = vec![0u8; len as usize];
-            self.file.read_exact(&mut payload)?;
+            // If we can't read the full payload, it's a partial write.
+            if self.file.read_exact(&mut payload).is_err() {
+                break;
+            }
 
-            // In prod: Verify CRC here
+            // Optional: Verify CRC here in production
+            // if crc32fast::hash(&payload) != _expected_crc { break; }
 
-            let entry: LogEntry = bincode::deserialize(&payload)?;
-            entries.push(entry);
+            // 4. Deserialize
+            // If deserialization fails, we stop (assume garbage data).
+            if let Ok(entry) = bincode::deserialize(&payload) {
+                entries.push(entry);
+            } else {
+                break;
+            }
         }
 
         Ok(entries)
@@ -90,7 +104,6 @@ mod tests {
         wal.append(&entry2)?;
         wal.append(&entry3)?;
 
-        // Re-read immediately
         let entries = wal.read_all()?;
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0], entry1);
@@ -107,13 +120,11 @@ mod tests {
 
         let entry = LogEntry::Command(vec![1, 2, 3, 4]);
 
-        // 1. Open, Write, Close
         {
             let mut wal = WriteAheadLog::open(&path)?;
             wal.append(&entry)?;
-        } // wal dropped here, file closed
+        }
 
-        // 2. Re-open
         {
             let mut wal_reopened = WriteAheadLog::open(&path)?;
             let entries = wal_reopened.read_all()?;
@@ -139,16 +150,13 @@ mod tests {
         // 2. Corrupt the file (truncate slightly to break CRC/Len)
         let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
         let len = file.metadata()?.len();
-        file.set_len(len - 2)?; // Cut off 2 bytes from the end
+        file.set_len(len - 2)?; // Cut off 2 bytes from the end (truncates payload or CRC)
 
         // 3. Attempt read
         let mut wal = WriteAheadLog::open(path)?;
         let entries = wal.read_all()?;
 
-        // Depending on implementation, it should either return 0 entries
-        // (if the first one was corrupted) or return strict error.
-        // Our current impl breaks loop on read error, so it might return empty.
-        // Ideally, a robust WAL would return the valid prefix.
+        // Should handle the partial read gracefully and return empty (since the only entry is broken)
         assert!(entries.is_empty(), "Should not return corrupted entry");
 
         Ok(())

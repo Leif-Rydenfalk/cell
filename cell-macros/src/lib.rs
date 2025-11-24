@@ -16,7 +16,6 @@ pub fn signal_receptor(input: TokenStream) -> TokenStream {
 
     let schema_json = generate_json(&schema);
 
-    // FIX: Use ::cell_sdk prefix everywhere.
     let expanded = quote! {
         #[derive(::serde::Serialize, ::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
         // We need to tell rkyv to check bytes. Note: This attribute often requires Archive to be in scope or correctly qualified.

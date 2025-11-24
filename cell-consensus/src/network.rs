@@ -3,27 +3,33 @@ use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 
 /// Handles peer-to-peer replication traffic.
 /// Listens on `port + 1` of the cell's main port.
 pub struct RaftNetwork {
     peers: Vec<String>,
     inbox: broadcast::Sender<LogEntry>,
+    // Store handle to abort task on Drop
+    _listener_task: JoinHandle<()>,
 }
 
 impl RaftNetwork {
     pub async fn new(my_id: u64, peers: Vec<String>) -> Result<Self> {
         let (tx, _) = broadcast::channel(100);
-        
-        // Hack: We assume for this demo that the consensus port is 10000 + id
+
         let port = 10000 + my_id;
         let addr = format!("0.0.0.0:{}", port);
-        
+
+        // Explicitly set reuseaddr/port usually not needed for basic tests if we drop correctly,
+        // but helps avoiding TIME_WAIT issues in tight loops.
         let listener = TcpListener::bind(&addr).await?;
         println!("[Raft] Consensus Network Active on {}", addr);
 
         let tx_clone = tx.clone();
-        tokio::spawn(async move {
+
+        // Spawn and keep handle
+        let handle = tokio::spawn(async move {
             loop {
                 if let Ok((mut socket, _)) = listener.accept().await {
                     let tx = tx_clone.clone();
@@ -43,7 +49,11 @@ impl RaftNetwork {
             }
         });
 
-        Ok(Self { peers, inbox: tx })
+        Ok(Self {
+            peers,
+            inbox: tx,
+            _listener_task: handle,
+        })
     }
 
     pub fn listen(&self) -> broadcast::Receiver<LogEntry> {
@@ -55,13 +65,18 @@ impl RaftNetwork {
         let len = (bytes.len() as u32).to_le_bytes();
 
         for peer in &self.peers {
-            // In a real system, we keep persistent connections.
-            // Here we open-send-close for simplicity.
             if let Ok(mut stream) = TcpStream::connect(peer).await {
                 let _ = stream.write_all(&len).await;
                 let _ = stream.write_all(&bytes).await;
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for RaftNetwork {
+    fn drop(&mut self) {
+        // Crucial: Kill the listener so the port is freed
+        self._listener_task.abort();
     }
 }

@@ -14,7 +14,6 @@ async fn test_secure_handshake() -> Result<()> {
     let server_addr = "127.0.0.1:9095";
     let routes = HashMap::new();
 
-    // FIX: Add false for is_donor
     let golgi = Golgi::new(
         "router".to_string(),
         &run_dir,

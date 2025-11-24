@@ -94,7 +94,7 @@ async fn test_full_handshake_and_routing() -> Result<()> {
         &run_dir,
         Some(axon_addr.clone()),
         routes,
-        false, // <--- FIX: is_donor = false
+        false,
     )?;
 
     tokio::spawn(async move {
@@ -169,7 +169,6 @@ async fn test_route_not_found() -> Result<()> {
     let port = 9092;
     let axon_addr = format!("127.0.0.1:{}", port);
 
-    // FIX: Add false for is_donor
     let golgi = Golgi::new(
         "router".to_string(),
         &run_dir,
