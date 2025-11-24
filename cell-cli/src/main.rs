@@ -9,13 +9,13 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpStream, UdpSocket}; // Added UdpSocket
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinSet;
 
 // Import from internal lib
-use cell_cli::golgi::{pheromones, Golgi, Target}; // Import pheromones
-use cell_cli::{antigens, nucleus, synapse, sys_log, vacuole};
+use cell_cli::golgi::{pheromones, Golgi, Target};
+use cell_cli::{antigens, mitochondria, nucleus, synapse, sys_log, vacuole};
 
 #[derive(Parser)]
 #[command(name = "membrane")]
@@ -26,7 +26,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
-    Mitosis { dir: PathBuf },
+    /// Boots the Cell Runtime.
+    Mitosis {
+        dir: PathBuf,
+        /// Enable Donor Mode: Offer compute resources to the network in exchange for ATP.
+        #[arg(long)]
+        donor: bool,
+    },
+    /// Manage financial resources (ATP).
+    Wallet { dir: PathBuf },
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -62,11 +70,36 @@ type RunningSet = Arc<Mutex<HashSet<String>>>;
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.action {
-        Action::Mitosis { dir } => mitosis(&dir).await,
+        Action::Mitosis { dir, donor } => mitosis(&dir, donor).await,
+        Action::Wallet { dir } => wallet(&dir).await,
     }
 }
 
-async fn mitosis(dir: &Path) -> Result<()> {
+async fn wallet(dir: &Path) -> Result<()> {
+    let run_dir = dir.join("run");
+    if !run_dir.exists() {
+        // Try looking in current dir if not found (development convenience)
+        if !dir.join("mitochondria.json").exists() {
+            anyhow::bail!(
+                "No runtime data found at {}. Have you run 'mitosis' yet?",
+                dir.display()
+            );
+        }
+    }
+
+    // In a real run, mitochondria.json might be in root or run/, checking both for flexibility
+    let ledger_root = if dir.join("mitochondria.json").exists() {
+        dir
+    } else {
+        &run_dir
+    };
+
+    let mito = mitochondria::Mitochondria::load_or_init(ledger_root)?;
+    mito.print_statement();
+    Ok(())
+}
+
+async fn mitosis(dir: &Path, is_donor: bool) -> Result<()> {
     let dir = dir.canonicalize().context("Invalid directory")?;
     let genome_path = dir.join("genome.toml");
 
@@ -89,7 +122,7 @@ async fn mitosis(dir: &Path) -> Result<()> {
             let m_txt = std::fs::read_to_string(path.join("genome.toml"))?;
             let m_dna: Genome = toml::from_str(&m_txt)?;
             if let Some(traits) = m_dna.genome {
-                ensure_active(&traits.name, &registry, running.clone(), false).await?;
+                ensure_active(&traits.name, &registry, running.clone(), false, is_donor).await?;
             }
         }
         sys_log(
@@ -98,7 +131,7 @@ async fn mitosis(dir: &Path) -> Result<()> {
         );
         tokio::signal::ctrl_c().await?;
     } else if let Some(traits) = dna.genome {
-        ensure_active(&traits.name, &registry, running.clone(), true).await?;
+        ensure_active(&traits.name, &registry, running.clone(), true, is_donor).await?;
     }
 
     Ok(())
@@ -109,6 +142,7 @@ async fn ensure_active(
     registry: &CellRegistry,
     running: RunningSet,
     is_root: bool,
+    is_donor: bool,
 ) -> Result<()> {
     {
         let mut set = running.lock().await;
@@ -160,7 +194,16 @@ async fn ensure_active(
                     cell_name, axon_name
                 ),
             );
-            Box::pin(ensure_active(axon_name, registry, running.clone(), false)).await?;
+            // Recursively boot dependency
+            // Note: Dependencies spawned this way inherit the 'donor' status
+            Box::pin(ensure_active(
+                axon_name,
+                registry,
+                running.clone(),
+                false,
+                is_donor,
+            ))
+            .await?;
 
             // Wait for it to come up
             let mut attempts = 0;
@@ -178,6 +221,8 @@ async fn ensure_active(
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         } else {
+            // In the future, this is where we would check the content-addressed network
+            // to download the binary if we have enough ATP.
             anyhow::bail!("CRITICAL: Dependency '{}' is missing from network AND local workspace. Cannot compile.", axon_name);
         }
     }
@@ -196,10 +241,10 @@ async fn ensure_active(
 
     if is_root {
         sys_log("INFO", &format!("[{}] Starting (Foreground)...", cell_name));
-        run_cell_runtime(cell_path, &dna, bin_path).await?;
+        run_cell_runtime(cell_path, &dna, bin_path, is_donor).await?;
     } else {
         sys_log("INFO", &format!("[{}] Spawning (Background)...", cell_name));
-        spawn_cell_background(cell_path, &bin_path)?;
+        spawn_cell_background(cell_path, &bin_path, is_donor)?;
     }
 
     Ok(())
@@ -223,7 +268,7 @@ async fn resolve_address(name: &str, raw_addr: &str) -> Result<String> {
         &format!("Searching network for '{}' (Pheromones)...", name),
     );
 
-    // Create a standard UDP socket for listening (reuse port logic similar to pheromones.rs)
+    // Create a standard UDP socket for listening
     let socket = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
@@ -303,14 +348,18 @@ fn compile_cell(dir: &Path, name: &str) -> Result<PathBuf> {
     anyhow::bail!("Binary not found for {}", name);
 }
 
-fn spawn_cell_background(dir: &Path, _bin: &Path) -> Result<()> {
+fn spawn_cell_background(dir: &Path, _bin: &Path, is_donor: bool) -> Result<()> {
     let self_exe = std::env::current_exe()?;
     let log_file = std::fs::File::create(dir.join("run/daemon.log"))?;
 
-    Command::new(self_exe)
-        .arg("mitosis")
-        .arg(dir)
-        .stdout(log_file.try_clone()?)
+    let mut cmd = Command::new(self_exe);
+    cmd.arg("mitosis").arg(dir);
+
+    if is_donor {
+        cmd.arg("--donor");
+    }
+
+    cmd.stdout(log_file.try_clone()?)
         .stderr(log_file)
         .spawn()
         .context("Failed to spawn background cell")?;
@@ -318,7 +367,12 @@ fn spawn_cell_background(dir: &Path, _bin: &Path) -> Result<()> {
 }
 
 // The Runtime Loop
-async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result<()> {
+async fn run_cell_runtime(
+    dir: &Path,
+    dna: &Genome,
+    bin_path: PathBuf,
+    is_donor: bool,
+) -> Result<()> {
     let run_dir = dir.join("run");
     if run_dir.exists() {
         std::fs::remove_dir_all(&run_dir)?;
@@ -394,7 +448,6 @@ async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result
         routes.insert(traits.name.clone(), Target::GapJunction(cell_sock));
     }
 
-    // [Rest of the function remains the same...]
     for (name, path) in &dna.junctions {
         routes.insert(
             name.clone(),
@@ -410,11 +463,18 @@ async fn run_cell_runtime(dir: &Path, dna: &Genome, bin_path: PathBuf) -> Result
                 addr: clean,
                 rtt: Duration::from_secs(1),
                 last_seen: Instant::now(),
+                is_donor: false, // Static configs default to false for now
             }]),
         );
     }
 
-    let golgi = Golgi::new(traits.name.clone(), &run_dir, traits.listen.clone(), routes)?;
+    let golgi = Golgi::new(
+        traits.name.clone(),
+        &run_dir,
+        traits.listen.clone(),
+        routes,
+        is_donor, // Pass donor flag to router
+    )?;
 
     tokio::select! {
         res = golgi.run() => {
@@ -454,14 +514,26 @@ async fn monitor_child(
         // Case A: Child exits naturally (crash or finish)
         res = guard.wait() => {
             match res {
-                Ok(s) if s.success() => status_msg = "Process exited cleanly (Success).".to_string(),
-                Ok(s) => {
-                    match s.code() {
-                        Some(c) => status_msg = format!("CRITICAL: Process crashed with Exit Code: {}", c),
-                        None => status_msg = "Process terminated by signal.".to_string(),
+                Ok(stats) => {
+                    // stats is of type nucleus::Metabolism
+                    if stats.exit_code == Some(0) {
+                        status_msg = format!(
+                            "Process exited cleanly. CPU: {}ms, RAM: {}KB, Wall: {}ms",
+                            stats.cpu_time_ms,
+                            stats.max_rss_kb,
+                            stats.wall_time_ms
+                        );
+                    } else {
+                        status_msg = format!(
+                            "CRITICAL: Process crashed. Code: {:?}. CPU: {}ms",
+                            stats.exit_code,
+                            stats.cpu_time_ms
+                        );
                     }
-                },
-                Err(e) => status_msg = format!("Supervisor Error: Failed to wait on child: {}", e),
+                }
+                Err(e) => {
+                    status_msg = format!("Supervisor Error: Failed to wait on child: {}", e);
+                }
             }
         }
 
@@ -470,10 +542,19 @@ async fn monitor_child(
             // 1. Trigger Kill
             let _ = guard.kill().await;
 
-            // 2. Wait for OS to confirm death (Reap zombie)
-            let _ = guard.wait().await;
-
-            status_msg = "Shutdown by Supervisor.".to_string();
+            // 2. We MUST still wait() to reap the zombie and get final stats
+            // Since we updated nucleus.rs, this wait() also returns Metabolism
+            match guard.wait().await {
+                Ok(stats) => {
+                    status_msg = format!(
+                        "Shutdown by Supervisor. Partial CPU: {}ms",
+                        stats.cpu_time_ms
+                    );
+                }
+                Err(e) => {
+                    status_msg = format!("Shutdown by Supervisor (Wait failed: {})", e);
+                }
+            }
         }
     }
 
@@ -525,7 +606,6 @@ async fn snapshot_genomes(root: &Path, axons: &HashMap<String, String>) -> Resul
     let identity = antigens::Antigens::load_or_create(temp_id_path)?;
 
     for (name, raw_addr) in axons {
-        // 1. Resolve
         let addr = resolve_address(name, raw_addr).await?;
 
         sys_log(
@@ -534,7 +614,6 @@ async fn snapshot_genomes(root: &Path, axons: &HashMap<String, String>) -> Resul
         );
 
         let mut connected = false;
-        // 2. Connect & Download
         if let Ok(stream) = TcpStream::connect(&addr).await {
             if let Ok((mut secure, _)) =
                 synapse::connect_secure(stream, &identity.keypair, true).await
@@ -582,34 +661,4 @@ async fn snapshot_genomes(root: &Path, axons: &HashMap<String, String>) -> Resul
         }
     }
     Ok(())
-}
-
-fn fetch_source(workspace_root: &Path, name: &str, url: &str) -> Result<PathBuf> {
-    let modules_dir = workspace_root.join(".cell-modules");
-    let target_dir = modules_dir.join(name);
-
-    // If it already exists, we assume it's good (or we should use git pull?)
-    if target_dir.exists() {
-        return Ok(target_dir);
-    }
-
-    sys_log(
-        "INFO",
-        &format!("Fetching missing cell '{}' from {}", name, url),
-    );
-
-    std::fs::create_dir_all(&modules_dir)?;
-
-    let status = Command::new("git")
-        .args(&["clone", url, target_dir.to_str().unwrap()])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("Failed to execute git")?;
-
-    if !status.success() {
-        anyhow::bail!("Failed to clone source for {}", name);
-    }
-
-    Ok(target_dir)
 }

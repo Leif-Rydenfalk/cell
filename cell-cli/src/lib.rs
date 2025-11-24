@@ -1,6 +1,7 @@
 pub mod antigens;
 pub mod genesis;
 pub mod golgi;
+pub mod mitochondria;
 pub mod nucleus;
 pub mod synapse;
 pub mod vacuole;

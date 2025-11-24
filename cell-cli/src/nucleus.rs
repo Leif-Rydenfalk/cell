@@ -3,9 +3,9 @@ use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio}; // Enum definitions
-use std::time::SystemTime;
-use tokio::process::{Child, Command}; // Async Command
+use std::process::{ExitStatus, Stdio};
+use std::time::{Instant, SystemTime};
+use tokio::process::{Child, Command};
 
 #[cfg(target_os = "linux")]
 use cgroups_rs::{cgroup_builder::CgroupBuilder, hierarchies, CgroupPid};
@@ -15,37 +15,72 @@ fn sys_log(level: &str, msg: &str) {
     eprintln!("[{}] [{}] [NUCLEUS] {}", timestamp, level, msg);
 }
 
-/// A wrapper that kills the child process when it goes out of scope.
-pub struct ChildGuard(Child);
+// Stats returned after process death for billing
+#[derive(Debug, Default, Clone)]
+pub struct Metabolism {
+    pub exit_code: Option<i32>,
+    pub cpu_time_ms: u64, // Combined User + System
+    pub max_rss_kb: u64,  // Max RAM usage
+    pub wall_time_ms: u64,
+}
+
+pub struct ChildGuard {
+    child: Child,
+    start_time: Instant,
+}
 
 impl ChildGuard {
-    /// Extracts pipes from the async child. No conversion needed.
     pub fn take_pipes(
         &mut self,
     ) -> (
         Option<tokio::process::ChildStdout>,
         Option<tokio::process::ChildStderr>,
     ) {
-        (self.0.stdout.take(), self.0.stderr.take())
+        (self.child.stdout.take(), self.child.stderr.take())
     }
 
-    /// Allows the supervisor to wait for natural exit (crash/completion)
-    pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.0.wait().await
+    /// Waits for process exit and calculates resource usage (The Bill)
+    /// Modified to take &mut self so it doesn't move ownership during select!
+    pub async fn wait(&mut self) -> Result<Metabolism> {
+        let status = self.child.wait().await?;
+        let wall_time = self.start_time.elapsed().as_millis() as u64;
+
+        // Collect Resource Usage (rusage)
+        // In a production Linux env, we would parse /sys/fs/cgroup/.../cpu.stat here.
+        // For this implementation, we default to wall_time as the billing metric.
+        let (cpu_ms, rss_kb) = self.read_cgroup_stats().unwrap_or((wall_time, 0));
+
+        Ok(Metabolism {
+            exit_code: status.code(),
+            cpu_time_ms: cpu_ms,
+            max_rss_kb: rss_kb,
+            wall_time_ms: wall_time,
+        })
     }
 
-    /// Explicitly kill the process and return immediately (async friendly).
-    /// We use this instead of Drop when we want to control the timing.
+    /// Explicitly kill the process
     pub async fn kill(&mut self) -> std::io::Result<()> {
-        self.0.start_kill()
+        self.child.start_kill()
+    }
+
+    // Attempt to read accurate stats from Linux Cgroups
+    fn read_cgroup_stats(&self) -> Option<(u64, u64)> {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(_id) = self.child.id() {
+                // Placeholder for Cgroup parsing logic
+                // In a full implementation, you would read cpu.stat here
+                return Some((0, 0));
+            }
+        }
+        None
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        let _ = self.0.start_kill(); // Async kill signal
-                                     // We can't await inside Drop, but start_kill() is non-blocking on Tokio.
-                                     // The OS will reap the zombie eventually or we rely on Tokio runtime reaping.
+        // Ensure child is cleaned up if the guard goes out of scope
+        let _ = self.child.start_kill();
     }
 }
 
@@ -61,7 +96,7 @@ pub fn activate(
     binary: &Path,
     golgi_sock: &Path,
 ) -> Result<ChildGuard> {
-    // 1. Socket Activation (Sync IO is fine here, done once during startup)
+    // 1. Socket Activation
     if let Some(p) = cell_sock.parent() {
         std::fs::create_dir_all(p)?;
     }
@@ -109,7 +144,6 @@ pub fn activate(
             sys_log("INFO", &format!("Nucleus active. Log: {}", path.display()));
         }
         LogStrategy::Piped => {
-            // Tokio's piped() is non-blocking and async-ready
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
         }
@@ -136,7 +170,10 @@ pub fn activate(
     // Forget listener to keep FD open in child
     std::mem::forget(listener);
 
-    Ok(ChildGuard(child))
+    Ok(ChildGuard {
+        child,
+        start_time: Instant::now(),
+    })
 }
 
 #[cfg(target_os = "linux")]
