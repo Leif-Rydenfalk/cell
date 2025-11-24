@@ -1,6 +1,6 @@
 A rust api for building global infrastructure.
 
-A needs based api. You only specify what you need - the cell network finds out how and if its possible - you know during compile time.
+A needs based api. You only specify what you need - the cell network finds out how and if its possible - and you know if it is during compile time.
 
 All cell creation and apoptosis should have a sdk abi for creating and managing cells - each cell is a manager of other cells.
 
@@ -8,6 +8,8 @@ If you need 10 of one type of cell you specify so in the rust code and run it an
 The cell daemon manages the actual creation and destruction of the cells but either the cell.toml, genome.toml or the sdk lets you manage infrastructure by specifying what you need. Not how.
 
 
+
+Cell should never send binaries to other cells. Cell must send a link to an external verified source like github and pull it and build locally and then verify the hash with a hash given by the cell network - the one all cells of this type has - the type identifier for a specific cell.
 
 
 
