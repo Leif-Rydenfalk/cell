@@ -1,4 +1,5 @@
 pub mod antigens;
+pub mod config;
 pub mod genesis;
 pub mod golgi;
 pub mod mitochondria;
