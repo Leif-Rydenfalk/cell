@@ -10,6 +10,7 @@ git clone https://github.com/Leif-Rydenfalk/cell && cd cell
 cargo install --path cell-cli
 cd examples/cell-bench
 cell mitosis .   # 5 GB/s on laptop below
+tail -f run/service.log # Run in another terminal - show results
 ```
 
 ## Numbers (Intel i5-7600K 3.8 GHz, 4 cores)
