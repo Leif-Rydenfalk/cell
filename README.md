@@ -3,7 +3,7 @@ Think of it as a **peer-to-peer, secure, micro-service mesh** that lets you:
 
 * Declare services (“cells”) with a single macro (`signal_receptor!`).  
 * Compile each cell to a native binary that speaks QUIC + Noise.  
-* Boot an entire application cluster with one CLI command (`membrane mitosis`).  
+* Boot an entire application cluster with one CLI command (`cell mitosis`).  
 * Pay / get paid in “ATP” tokens for the CPU time you consume / provide.  
 * Discover peers automatically via UDP multicast “pheromones” or a lighthouse.  
 * Route traffic through Unix sockets locally and QUIC remotely with zero-copy serialization (rkyv).  
