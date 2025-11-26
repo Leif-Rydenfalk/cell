@@ -184,8 +184,13 @@ async fn ensure_active(
                     }
                 }
                 attempts += 1;
+
+                if attempts == 3 {
+                    sys_log("WARN", &format!("Dependency '{}' is taking a long time. Check run/service.log for crashes.", axon_name));
+                }
+
                 if attempts > 10 {
-                    anyhow::bail!("Dependency '{}' failed to boot.", axon_name);
+                    anyhow::bail!("Dependency '{}' failed to boot (Timeout).", axon_name);
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
