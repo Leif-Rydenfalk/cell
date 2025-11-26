@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
+use std::process::Stdio;
 use std::time::{Instant, SystemTime};
 use tokio::process::{Child, Command};
 
@@ -40,14 +40,11 @@ impl ChildGuard {
     }
 
     /// Waits for process exit and calculates resource usage (The Bill)
-    /// Modified to take &mut self so it doesn't move ownership during select!
     pub async fn wait(&mut self) -> Result<Metabolism> {
         let status = self.child.wait().await?;
         let wall_time = self.start_time.elapsed().as_millis() as u64;
 
         // Collect Resource Usage (rusage)
-        // In a production Linux env, we would parse /sys/fs/cgroup/.../cpu.stat here.
-        // For this implementation, we default to wall_time as the billing metric.
         let (cpu_ms, rss_kb) = self.read_cgroup_stats().unwrap_or((wall_time, 0));
 
         Ok(Metabolism {
@@ -69,7 +66,6 @@ impl ChildGuard {
         {
             if let Some(_id) = self.child.id() {
                 // Placeholder for Cgroup parsing logic
-                // In a full implementation, you would read cpu.stat here
                 return Some((0, 0));
             }
         }
@@ -94,6 +90,7 @@ pub fn activate(
     cell_sock: &Path,
     log_strategy: LogStrategy,
     binary: &Path,
+    runner: Option<&String>,
     golgi_sock: &Path,
 ) -> Result<ChildGuard> {
     // 1. Socket Activation
@@ -120,7 +117,16 @@ pub fn activate(
     let cgroup = setup_cgroup();
 
     // 3. Prepare Async Command
-    let mut cmd = Command::new(binary);
+    let mut cmd = if let Some(run_cmd) = runner {
+        // Interpreted Mode: "python3 /path/to/script.py"
+        let mut c = Command::new(run_cmd);
+        c.arg(binary);
+        c
+    } else {
+        // Binary Mode: "/path/to/binary"
+        Command::new(binary)
+    };
+
     cmd.env("CELL_SOCKET_FD", fd.to_string())
         .env("CELL_GOLGI_SOCK", golgi_sock)
         .stdin(Stdio::null());
@@ -180,12 +186,7 @@ pub fn activate(
 fn setup_cgroup() -> Option<cgroups_rs::Cgroup> {
     let hier = hierarchies::auto();
     let gname = format!("cell_{}", std::process::id());
-    match CgroupBuilder::new(&gname)
-        .memory()
-        // .memory_hard_limit(1024 * 1024 * 1024)
-        .done()
-        .build(hier)
-    {
+    match CgroupBuilder::new(&gname).memory().done().build(hier) {
         Ok(cg) => Some(cg),
         Err(_) => None,
     }

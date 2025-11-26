@@ -1,0 +1,2 @@
+[workspace]
+members = ["python-worker", "rust-client"]

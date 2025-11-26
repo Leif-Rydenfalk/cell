@@ -17,7 +17,7 @@ struct DaemonCli {
     /// Path to the cell directory (containing genome.toml)
     dir: PathBuf,
 
-    /// Path to the compiled binary to run
+    /// Path to the compiled binary (or script) to run
     #[arg(long)]
     bin: PathBuf,
 
@@ -48,6 +48,11 @@ async fn run_cell_runtime(dir: &Path, bin_path: PathBuf, is_donor: bool) -> Resu
         .genome
         .as_ref()
         .ok_or_else(|| anyhow!("No [genome] found"))?;
+
+    // --- NEW: Extract Runner ---
+    let runner = traits.runner.as_ref();
+    // ---------------------------
+
     let mut routes = HashMap::new();
     let golgi_sock_path = run_dir.join("golgi.sock");
 
@@ -78,6 +83,7 @@ async fn run_cell_runtime(dir: &Path, bin_path: PathBuf, is_donor: bool) -> Resu
                 &sock_path,
                 nucleus::LogStrategy::Piped,
                 &bin_path,
+                runner, // <--- Pass Runner
                 &golgi_sock_path,
             )?;
 
@@ -104,6 +110,7 @@ async fn run_cell_runtime(dir: &Path, bin_path: PathBuf, is_donor: bool) -> Resu
             &cell_sock,
             nucleus::LogStrategy::File(log_path),
             &bin_path,
+            runner, // <--- Pass Runner
             &golgi_sock_path,
         )?;
 

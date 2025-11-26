@@ -21,8 +21,21 @@ pub struct WorkspaceTraits {
 #[derive(Deserialize, Debug, Clone)]
 pub struct CellTraits {
     pub name: String,
+
     #[serde(default)]
     pub listen: Option<String>,
+
     #[serde(default)]
     pub replicas: Option<u32>,
+
+    /// The interpreter to use (e.g., "python3").
+    /// If None, assumes a compiled binary.
+    #[serde(default)]
+    pub runner: Option<String>,
+
+    /// The path to the executable or script (e.g., "main.py").
+    /// For Rust cells, this is optional (auto-detected via Cargo).
+    /// For Interpreted cells, this is required.
+    #[serde(default)]
+    pub binary: Option<String>,
 }

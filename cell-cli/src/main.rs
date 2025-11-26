@@ -132,6 +132,12 @@ async fn ensure_active(
     let txt = std::fs::read_to_string(cell_path.join("genome.toml"))?;
     let dna: Genome = toml::from_str(&txt)?;
 
+    // Extract traits to check for runner/binary
+    let traits = dna
+        .genome
+        .as_ref()
+        .ok_or_else(|| anyhow!("Invalid genome"))?;
+
     sys_log("INFO", &format!("[{}] Checking dependencies...", cell_name));
 
     for (axon_name, axon_addr) in &dna.axons {
@@ -196,8 +202,28 @@ async fn ensure_active(
 
     snapshot_genomes(cell_path, &dna.axons).await?;
 
-    sys_log("INFO", &format!("[{}] Compiling...", cell_name));
-    let bin_path = compile_cell(cell_path, cell_name)?;
+    // --- LOGIC SPLIT: Interpreted vs Compiled ---
+    let bin_path = if traits.runner.is_some() {
+        // INTERPRETED MODE
+        sys_log(
+            "INFO",
+            &format!("[{}] Interpreted Mode. Skipping compilation.", cell_name),
+        );
+
+        let script_name = traits.binary.as_ref().ok_or_else(|| {
+            anyhow!("'binary' field (script path) is required for interpreted cells.")
+        })?;
+
+        let script_path = cell_path.join(script_name);
+        if !script_path.exists() {
+            anyhow::bail!("Script not found at: {}", script_path.display());
+        }
+        script_path
+    } else {
+        // COMPILED MODE
+        sys_log("INFO", &format!("[{}] Compiling...", cell_name));
+        compile_cell(cell_path, cell_name)?
+    };
 
     if is_root {
         sys_log(
@@ -341,8 +367,6 @@ async fn launch_daemon_foreground(dir: &Path, bin_path: &Path, is_donor: bool) -
         cmd.arg("--donor");
     }
 
-    // Pass Ctrl+C through to daemon?
-    // In foreground, we just spawn and wait.
     let mut child = cmd.spawn().context("Failed to launch cell-daemon")?;
 
     // Wait for the daemon to exit
