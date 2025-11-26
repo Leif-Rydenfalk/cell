@@ -110,6 +110,9 @@ async fn test_durability_on_restart() -> Result<()> {
         // Node drops here
     }
 
+    // FIX: Wait for OS to release the port (TIME_WAIT state)
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
     // 2. Restart Node with same WAL
     {
         let sm = Arc::new(MockSM::new());

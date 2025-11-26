@@ -13,6 +13,7 @@ async fn test_donor_discovery() -> Result<()> {
         9000,
         "public_key_observer".to_string(),
         false, // Observer is NOT a donor
+        None,  // No IPC socket
     )
     .await?;
 
@@ -24,6 +25,7 @@ async fn test_donor_discovery() -> Result<()> {
         9001,
         "public_key_donor".to_string(),
         true, // <--- THIS NODE IS A DONOR
+        None, // No IPC socket
     )
     .await?;
 
@@ -34,6 +36,7 @@ async fn test_donor_discovery() -> Result<()> {
         9002,
         "public_key_leech".to_string(),
         false, // <--- THIS NODE IS NOT A DONOR
+        None,  // No IPC socket
     )
     .await?;
 

@@ -141,27 +141,33 @@ fn handle_transport(
     handler: &dyn Fn(Vesicle) -> Result<Vesicle>,
 ) -> Result<()> {
     loop {
+        // 1. Read the packet
         let incoming = match read_vesicle(stream) {
             Ok(v) => v,
-            Err(_) => break, // Connection closed
+            Err(_) => break, // Clean EOF (Client disconnected)
         };
 
+        // 2. Handle Schema Sync (Internal)
         if incoming.as_slice() == b"__GENOME__" {
             let v_out = Vesicle::wrap(genome.to_vec());
-            if send_vesicle(stream, v_out).is_err() {
+            if let Err(e) = send_vesicle(stream, v_out) {
+                eprintln!("[SDK] Failed to send Genome: {}", e);
                 break;
             }
             continue;
         }
 
+        // 3. Invoke User Logic
         match handler(incoming) {
             Ok(response) => {
-                if send_vesicle(stream, response).is_err() {
+                if let Err(e) = send_vesicle(stream, response) {
+                    eprintln!("[SDK] Failed to send Response: {}", e);
                     break;
                 }
             }
             Err(e) => {
-                eprintln!("Handler Error: {:?}", e);
+                // We print the error to Stderr so it shows up in run/service.log
+                eprintln!("[SDK] Handler Error (Dropping Connection): {:?}", e);
                 break;
             }
         }

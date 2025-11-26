@@ -182,7 +182,7 @@ fn setup_cgroup() -> Option<cgroups_rs::Cgroup> {
     let gname = format!("cell_{}", std::process::id());
     match CgroupBuilder::new(&gname)
         .memory()
-        .memory_hard_limit(1024 * 1024 * 1024)
+        // .memory_hard_limit(1024 * 1024 * 1024)
         .done()
         .build(hier)
     {
