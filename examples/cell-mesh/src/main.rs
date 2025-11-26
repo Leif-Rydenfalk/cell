@@ -5,7 +5,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 
 // --- PROTOCOL DEFINITION ---
-// Optimized for zero-allocation (no Strings/Vecs)
+// The signal_receptor! macro now automatically derives the #[protein] traits
+// (Serde, Rkyv, CheckBytes) for the generated structs.
 signal_receptor! {
     name: chatterbox,
     input: Gossip {
@@ -13,7 +14,7 @@ signal_receptor! {
         sent_at_nanos: u128,
     },
     output: Ack {
-        code: u8, // 1 = OK (Avoids String allocation)
+        code: u8, // 1 = OK (Avoids String allocation for max speed)
     }
 }
 
@@ -30,6 +31,7 @@ async fn main() -> Result<()> {
     let my_pid = std::process::id();
 
     // 1. HIGH SPEED CLIENT (Tight Loop)
+    // Runs in the background to simulate mesh traffic
     tokio::spawn(async move {
         sleep(Duration::from_secs(2)).await; // Let system settle
         println!("Starting High-Frequency Client...");
@@ -54,7 +56,7 @@ async fn main() -> Result<()> {
                 sent_at_nanos: now_system,
             };
 
-            // Call - No payload, minimal overhead
+            // Call As: Zero-copy serialization of the 'Gossip' struct
             match call_as!(chatterbox, msg) {
                 Ok(_) => {
                     let rtt = start_time.elapsed().as_micros();
@@ -64,14 +66,12 @@ async fn main() -> Result<()> {
                     if rtt > max_rtt { max_rtt = rtt; }
                 }
                 Err(_) => {
-                    // In super-tight loops, errors usually mean channel saturation.
-                    // Tiny backoff to let the mesh recover.
+                    // Tiny backoff on error to let the mesh recover
                     sleep(Duration::from_millis(5)).await;
                 }
             }
 
-            // Optimization: Only check time/print logs every 1000 requests
-            // This prevents the "checking what time it is" logic from slowing down the benchmark.
+            // Stats Reporting (Every 1000 requests to minimize syscall overhead)
             if req_count % 1000 == 0 {
                 if last_report.elapsed() >= Duration::from_secs(1) {
                     let elapsed = last_report.elapsed().as_secs_f64();
@@ -92,7 +92,8 @@ async fn main() -> Result<()> {
                 }
             }
 
-            sleep(Duration::from_millis(100)).await;
+            // Simple throttle to prevent 100% CPU usage in this demo
+            sleep(Duration::from_millis(1)).await;
         }
     });
 
@@ -107,12 +108,14 @@ async fn main() -> Result<()> {
             .unwrap_or_default()
             .as_nanos();
 
-        // Deserialize (Zero-copy, very fast for u32/u128)
+        // 1. Zero-Copy Validation
         let msg = cell_sdk::rkyv::check_archived_root::<Gossip>(vesicle.as_slice())
             .map_err(|e| anyhow::anyhow!("Bad Data: {}", e))?;
 
+        // 2. Access Data (No Allocation)
+        let sent_at = msg.sent_at_nanos;
+
         // --- Stats Logic ---
-        // We use a block here to drop the lock immediately after updating
         {
             let mut stats = server_stats.lock().unwrap();
             
@@ -120,8 +123,8 @@ async fn main() -> Result<()> {
                 stats.window_start = Some(Instant::now());
             }
 
-            if rx_time > msg.sent_at_nanos {
-                let latency_ns = rx_time - msg.sent_at_nanos;
+            if rx_time > sent_at {
+                let latency_ns = rx_time - sent_at;
                 stats.total_latency_us += latency_ns / 1000;
             }
             stats.count += 1;
@@ -145,9 +148,9 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Return 1 byte ack
+        // 3. Response
         let resp = Ack { code: 1 };
-        let bytes = cell_sdk::rkyv::to_bytes::<_, 16>(&resp)?.into_vec(); // Small buffer 16
+        let bytes = cell_sdk::rkyv::to_bytes::<_, 16>(&resp)?.into_vec();
         Ok(vesicle::Vesicle::wrap(bytes))
     })
 }

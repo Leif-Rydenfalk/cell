@@ -66,7 +66,7 @@ Currently, we download binaries or source code via git/http.
 *   **The Problem:** DNS hijacking or GitHub compromise could inject malicious code into the compilation step.
 *   **The Solution:**
     1.  **IPFS / Content Addressing:** Code should be fetched by its **Hash** (CID), not its location. `call_as!(worker, ...)` should resolve to a specific immutable hash of the worker code.
-    2.  **Signed Genomes:** Cell Genomes (`genome.toml`) must be cryptographically signed by the author. The runtime should refuse to spawn a cell if the signature does not match the trusted developer's key.
+    2.  **Signed Genomes:** Cell Genomes (`Cell.toml`) must be cryptographically signed by the author. The runtime should refuse to spawn a cell if the signature does not match the trusted developer's key.
 
 ---
 

@@ -1,6 +1,6 @@
 This is a massive, visionary codebase. You are building **Systemd meets BitTorrent**, optimized for zero-copy IPC and mutually authenticated crypto. The biological metaphor isn't just flavor; it's a robust architectural constraint that enforces isolation and autonomy.
 
-Based on your `INTERNAL_COMMUNICATION.md` and `Thoughts.md`, you are at the specific pivot point where you move from a **Local Mesh** (hardcoded `axon://` IPs in `genome.toml`) to a **Global Organic Network** (dynamic discovery and execution).
+Based on your `INTERNAL_COMMUNICATION.md` and `Thoughts.md`, you are at the specific pivot point where you move from a **Local Mesh** (hardcoded `axon://` IPs in `Cell.toml`) to a **Global Organic Network** (dynamic discovery and execution).
 
 Here are the three concrete architectural changes required to unlock the "BitTorrent for Compute" capabilities, with implementation details based on your current code.
 
@@ -8,7 +8,7 @@ Here are the three concrete architectural changes required to unlock the "BitTor
 
 ### 1. The Golgi Pivot: Dynamic Routing (No More Hardcoded IPs)
 
-**The Problem:** Currently, your `Golgi` (router) only routes to peers explicitly defined in `genome.toml` -> `[axons]`. This prevents "organic" discovery.
+**The Problem:** Currently, your `Golgi` (router) only routes to peers explicitly defined in `Cell.toml` -> `[axons]`. This prevents "organic" discovery.
 **The Fix:** Modify `handle_local_signal` in `cell-cli/src/golgi/mod.rs` to fall back to the **Pheromone Registry** if a static route is missing.
 
 **Update `cell-cli/src/golgi/mod.rs`:**
@@ -21,7 +21,7 @@ Here are the three concrete architectural changes required to unlock the "BitTor
 if op[0] == 0x01 {
     let target_name = read_len_str(&mut stream).await?;
 
-    // 1. Check Static Routes (genome.toml)
+    // 1. Check Static Routes (Cell.toml)
     let route = {
         let r = routes.read().await;
         r.get(&target_name).cloned()
@@ -29,7 +29,7 @@ if op[0] == 0x01 {
 
     // 2. Fallback: Check Pheromone Cache (Dynamic Discovery)
     // This allows calling cells that appeared via UDP multicast 
-    // without them being in genome.toml
+    // without them being in Cell.toml
     let route = match route {
         Some(r) => Some(r),
         None => {

@@ -25,7 +25,7 @@ While you don't have a 10,000-node cluster yet, the **architecture** is that of 
 
 | Biological Concept | Your Code Implementation |
 | :--- | :--- |
-| **DNA** | `genome.toml` (Configuration & Traits) |
+| **DNA** | `Cell.toml` (Configuration & Traits) |
 | **Nucleus** | `nucleus.rs` (Process Supervisor & Cgroups) |
 | **Membrane** | `cell-sdk` / `cell.py` (The Interface/ABI) |
 | **Golgi** | `golgi/mod.rs` (Router, Load Balancer) |

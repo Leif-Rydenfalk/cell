@@ -12,12 +12,12 @@ When you run `cell mitosis .`, the CLI executes a **Recursive Topological Boot**
 
 ### Phase 1: The Inventory
 Before doing anything, the CLI recursively scans the current directory and all subdirectories to build a **Local Registry**.
-*   It looks for `genome.toml` files.
+*   It looks for `Cell.toml` files.
 *   It maps `Cell Name` -> `File Path`.
 *   *Result:* The CLI knows which cells *can* be built from source locally.
 
 ### Phase 2: Dependency Resolution (Recursive)
-The CLI inspects the `[axons]` section of your `genome.toml`. For every dependency (e.g., `worker`), it performs the following logic:
+The CLI inspects the `[axons]` section of your `Cell.toml`. For every dependency (e.g., `worker`), it performs the following logic:
 
 #### Step A: Network Discovery (Where is it?)
 The CLI attempts to find the dependency's IP address using three strategies in order:
@@ -76,7 +76,7 @@ You have a `coordinator` and a `worker` in the same folder. Nothing is running.
 8.  Coordinator spawns.
 
 ### Scenario B: The "Dad's Worker" (Hybrid Network)
-You are building `my-cell`. Your `genome.toml` has `dad = "axon://dads-pc"`. You do **not** have the source code for `dads-pc`.
+You are building `my-cell`. Your `Cell.toml` has `dad = "axon://dads-pc"`. You do **not** have the source code for `dads-pc`.
 1.  You run `cell mitosis my-cell`.
 2.  CLI sees `dad` dependency.
 3.  CLI listens on UDP (Pheromones).
@@ -86,7 +86,7 @@ You are building `my-cell`. Your `genome.toml` has `dad = "axon://dads-pc"`. You
 7.  `my-cell` compiles using the exact types defined on Dad's running machine.
 
 ### Scenario C: The Broken Chain
-Your `genome.toml` depends on `auth-service`.
+Your `Cell.toml` depends on `auth-service`.
 1.  `auth-service` is not running on the network.
 2.  `auth-service` source code is not in your directory.
 3.  **Result:** `Mitosis Failed: CRITICAL: Dependency 'auth-service' is missing from network AND local workspace.`
@@ -98,7 +98,7 @@ Your `genome.toml` depends on `auth-service`.
 ```mermaid
 graph TD
     Start[cell mitosis .] --> Inventory[Scan Recursive Inventory]
-    Inventory --> ReadGenome[Read genome.toml]
+    Inventory --> ReadGenome[Read Cell.toml]
     ReadGenome --> CheckDeps{Has Axons?}
     
     CheckDeps -- Yes --> LoopDeps[For Each Dependency]

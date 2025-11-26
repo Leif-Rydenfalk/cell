@@ -59,7 +59,7 @@ examples/
 ```
 
 ## The Complete Metaphor Mapping
-Genome.toml (The Plan) →
+Cell.toml (The Plan) →
 ribosome (The Compiler/Macro) reads the plan →
 Synthesizes Proteins (Rust Structs) →
 Which float in the cytosol (SDK) →

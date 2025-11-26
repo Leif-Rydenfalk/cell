@@ -7,7 +7,7 @@ A DePIN - Decentralized Physical Infrastructure Network
 All cell creation and apoptosis should have a sdk abi for creating and managing cells - each cell is a manager of other cells.
 
 If you need 10 of one type of cell you specify so in the rust code and run it and get compile time checks on this.
-The cell daemon manages the actual creation and destruction of the cells but either the cell.toml, genome.toml or the sdk lets you manage infrastructure by specifying what you need. Not how.
+The cell daemon manages the actual creation and destruction of the cells but either the cell.toml, Cell.toml or the sdk lets you manage infrastructure by specifying what you need. Not how.
 
 
 
@@ -92,7 +92,7 @@ I would rather that all cells where registry cells. The exact same code everywhe
 
 
 
-each cell.toml / genome.toml has a resources field with min and max:
+each cell.toml / Cell.toml has a resources field with min and max:
 as donor: acts as the max resources this cell is allowed to utilize from the host system.
 as publisher: acts as the resources this cell needs to run.
 
@@ -137,7 +137,7 @@ Metrics	Missing	No Prometheus/Grafana export for CPU/RAM/Latency.
 
 cell-cli - cell is the command line tool.
 cell.toml is the config.
-no genome.toml or
+no Cell.toml or
 
 
 
@@ -447,7 +447,7 @@ Here is the proposal for renaming your architecture to the **Cellular Model**.
 | `router` | **`Golgi`** | The shipping department. It takes raw data (Proteins), packages them into packets (Vesicles), and routes them to the correct destination, whether inside or outside the cell. |
 | `nucleus` | **`Nucleus`** | (Keep this). It holds the "DNA" (your binary) and controls execution. It decides when to replicate or self-destruct (Apoptosis). |
 | `cell-sdk` | **`Cytosol`** | The internal environment. This is the library your code "floats" in. It provides the medium for reactions (functions) to happen. |
-| `cell.toml` | **`Genome.toml`** | The blueprint. It defines the traits of the cell (Needs GPU? Needs 8GB RAM?) and its lineage (Dependencies). |
+| `cell.toml` | **`Cell.toml`** | The blueprint. It defines the traits of the cell (Needs GPU? Needs 8GB RAM?) and its lineage (Dependencies). |
 
 ### 2. The Networking (Communication)
 
@@ -475,7 +475,7 @@ Biology distinguishes between "touching neighbors" and "distant signals."
 
 Imagine reading your `main.rs` with this new language. It becomes a description of a living organism.
 
-**The Manifest (`Genome.toml`)**
+**The Manifest (`Cell.toml`)**
 ```toml
 [genome]
 name = "worker_bee"
@@ -651,7 +651,7 @@ f. **Windows support**
 --------------------------------------------------
 4. Possible Killer Feature (if you’re looking for one)
 --------------------------------------------------
-**“Cellular Functions”** – compile a *single* Rust function to WASM, wrap it in a 5-line genome.toml, and `mitosis` spawns it inside a pre-compiled WASM runtime (Wasmtime). You’d get:
+**“Cellular Functions”** – compile a *single* Rust function to WASM, wrap it in a 5-line Cell.toml, and `mitosis` spawns it inside a pre-compiled WASM runtime (Wasmtime). You’d get:
 
 - millisecond cold-start (no LLVM)  
 - memory limits via Wasmtime’s store limits instead of cgroups  
@@ -2007,7 +2007,7 @@ root-cell
       └─ snapshot-cell
 ```
 
-`root-cell/genome.toml`
+`root-cell/Cell.toml`
 ```toml
 [genome]
 name = "root"
@@ -2018,7 +2018,7 @@ user-svc    = { path = "user",    replicas = 5 }
 billing-svc = { path = "billing", replicas = 2 }
 ```
 
-`gateway/genome.toml`
+`gateway/Cell.toml`
 ```toml
 [genome]
 name = "gateway"
@@ -2087,7 +2087,7 @@ Because artifacts are content-addressed, **common subtrees** are downloaded only
 ----------------------------------------------------
 | Cargo | Cell |
 |---|---|
-| `Cargo.toml` workspace | `genome.toml` + `[cells]` table |
+| `Cargo.toml` workspace | `Cell.toml` + `[cells]` table |
 | `cargo build` | `cell build` (recursive, parallel) |
 | type-check across crates | schema-check across cells |
 | `cargo run` | `cell mitosis .` (build **+** spawn whole tree) |
@@ -2097,5 +2097,5 @@ Because artifacts are content-addressed, **common subtrees** are downloaded only
 --------------------------------------------------------
 7.  TL;DR
 --------------------------------------------------------
-Write **nested `genome.toml` files** exactly like nested `Cargo.toml` workspaces.  
+Write **nested `Cell.toml` files** exactly like nested `Cargo.toml` workspaces.  
 `cell mitosis .` gives you **Cargo-level safety** and **Docker-level isolation** for **hundreds of recursively-linked services**—then `cell publish .` clones the **entire running forest** to any node on Earth.

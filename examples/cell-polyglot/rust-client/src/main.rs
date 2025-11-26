@@ -1,16 +1,15 @@
 use anyhow::Result;
 use cell_sdk::vesicle::Vesicle;
-use cell_sdk::Synapse;
-use serde::{Deserialize, Serialize};
+use cell_sdk::{Synapse, protein};
+// Note: We don't need to import serde::Serialize manually anymore, 
+// #[protein] does it, but we do need serde_json for the manual encoding.
 
-// Standard Rust Structs derived with Serde
-// Note: We use standard serde_json, NOT rkyv here!
-#[derive(Serialize, Debug)]
+#[protein]
 struct TextRequest {
     text: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[protein]
 struct TextResponse {
     original: String,
     reversed: String,
@@ -22,12 +21,13 @@ struct TextResponse {
 async fn main() -> Result<()> {
     println!("Rust Client Starting...");
     
-    // 1. Create Data
+    // 1. Create Data (Protein)
     let req = TextRequest {
         text: "Polyglot Cells are Cool".to_string(),
     };
 
-    // 2. Serialize to JSON Bytes
+    // 2. Serialize to JSON Bytes (For Python compatibility)
+    // Since #[protein] derived Serde::Serialize, this works out of the box.
     let payload = serde_json::to_vec(&req)?;
     let v_out = Vesicle::wrap(payload);
 
@@ -39,6 +39,7 @@ async fn main() -> Result<()> {
     let v_in = synapse.fire(v_out)?;
 
     // 5. Deserialize Response
+    // #[protein] derived Serde::Deserialize too.
     let resp: TextResponse = serde_json::from_slice(v_in.as_slice())?;
     
     println!("Response from Python:");

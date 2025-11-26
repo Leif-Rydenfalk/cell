@@ -70,7 +70,7 @@ async fn wallet(dir: &Path) -> Result<()> {
 
 async fn mitosis(dir: &Path, is_donor: bool) -> Result<()> {
     let dir = dir.canonicalize().context("Invalid directory")?;
-    let genome_path = dir.join("genome.toml");
+    let genome_path = dir.join("Cell.toml");
 
     sys_log("INFO", "Scanning workspace for cellular life...");
     let mut registry = CellRegistry::new();
@@ -80,7 +80,7 @@ async fn mitosis(dir: &Path, is_donor: bool) -> Result<()> {
         &format!("Discovered {} local cells.", registry.len()),
     );
 
-    let txt = std::fs::read_to_string(&genome_path).context("Missing genome.toml")?;
+    let txt = std::fs::read_to_string(&genome_path).context("Missing Cell.toml")?;
     let dna: Genome = toml::from_str(&txt)?;
     let running = Arc::new(Mutex::new(HashSet::new()));
 
@@ -88,7 +88,7 @@ async fn mitosis(dir: &Path, is_donor: bool) -> Result<()> {
         sys_log("INFO", "Workspace detected. Resolving dependency graph...");
         for member_dir in ws.members {
             let path = dir.join(member_dir);
-            let m_txt = std::fs::read_to_string(path.join("genome.toml"))?;
+            let m_txt = std::fs::read_to_string(path.join("Cell.toml"))?;
             let m_dna: Genome = toml::from_str(&m_txt)?;
             if let Some(traits) = m_dna.genome {
                 ensure_active(&traits.name, &registry, running.clone(), false, is_donor).await?;
@@ -129,7 +129,7 @@ async fn ensure_active(
         )
     })?;
 
-    let txt = std::fs::read_to_string(cell_path.join("genome.toml"))?;
+    let txt = std::fs::read_to_string(cell_path.join("Cell.toml"))?;
     let dna: Genome = toml::from_str(&txt)?;
 
     // Extract traits to check for runner/binary
@@ -380,7 +380,7 @@ async fn launch_daemon_foreground(dir: &Path, bin_path: &Path, is_donor: bool) -
 
 fn inventory_cells(dir: &Path, registry: &mut CellRegistry) -> Result<()> {
     if dir.is_dir() {
-        let genome_file = dir.join("genome.toml");
+        let genome_file = dir.join("Cell.toml");
         if genome_file.exists() {
             if let Ok(txt) = std::fs::read_to_string(&genome_file) {
                 if let Ok(g) = toml::from_str::<Genome>(&txt) {

@@ -305,7 +305,7 @@ async fn dad_bot(req: JokeReq, state: &mut DadMemory) -> Result<String> {
 You don't change your code. You change the runtime config.
 
 ```toml
-# dad-workspace/genome.toml
+# dad-workspace/Cell.toml
 [nucleus]
 name = "dad_bot"
 replicas = "auto" # The Daemon spawns more cells if CPU > 80%

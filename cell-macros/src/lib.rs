@@ -4,7 +4,46 @@ use quote::{quote, ToTokens};
 use std::fs;
 use std::path::PathBuf;
 use syn::parse::{Parse, ParseStream};
-use syn::{braced, parse_macro_input, Expr, Field, Ident, Token, Type};
+use syn::{braced, parse_macro_input, DeriveInput, Expr, Field, Ident, Token, Type};
+
+/// The #[protein] attribute acts as the biological building block for data.
+///
+/// It automatically derives:
+/// - Serde (Serialize, Deserialize) for Polyglot/JSON support.
+/// - Rkyv (Archive, Serialize, Deserialize) for Zero-Copy Rust support.
+/// - Debug and Clone.
+///
+/// It also enforces `check_bytes` for security to prevent undefined behavior
+/// when reading untrusted memory.
+#[proc_macro_attribute]
+pub fn protein(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // We use DeriveInput to support both Structs and Enums
+    let input = parse_macro_input!(item as DeriveInput);
+
+    let expanded = quote! {
+        #[derive(
+            // JSON / Polyglot Support
+            ::serde::Serialize,
+            ::serde::Deserialize,
+            // Zero-Copy Rust Support
+            ::cell_sdk::rkyv::Archive,
+            ::cell_sdk::rkyv::Serialize,
+            ::cell_sdk::rkyv::Deserialize,
+            // Standard Traits
+            Clone,
+            Debug,
+        )]
+        // Point to the specific rkyv version re-exported by cell_sdk
+        #[archive(crate = "::cell_sdk::rkyv")]
+        // Security: Validation of incoming bytes is mandatory
+        #[archive(check_bytes)]
+        // Ensure the Zero-Copy view is also Debuggable
+        #[archive_attr(derive(Debug))]
+        #input
+    };
+
+    TokenStream::from(expanded)
+}
 
 #[proc_macro]
 pub fn signal_receptor(input: TokenStream) -> TokenStream {
@@ -16,21 +55,35 @@ pub fn signal_receptor(input: TokenStream) -> TokenStream {
 
     let schema_json = generate_json(&schema);
 
+    // Note: We manually apply the attributes here instead of using #[protein]
+    // because we are generating the structs from scratch, not decorating existing ones.
     let expanded = quote! {
-        #[derive(::serde::Serialize, ::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
-        // We need to tell rkyv to check bytes. Note: This attribute often requires Archive to be in scope or correctly qualified.
+        #[derive(
+            ::serde::Serialize,
+            ::serde::Deserialize,
+            ::cell_sdk::rkyv::Archive,
+            ::cell_sdk::rkyv::Serialize,
+            ::cell_sdk::rkyv::Deserialize,
+            Clone,
+            Debug
+        )]
+        #[archive(crate = "::cell_sdk::rkyv")]
         #[archive(check_bytes)]
         #[archive_attr(derive(Debug))]
-        // Rkyv derive macros often look for 'rkyv' crate. We trick it by providing an alias if needed,
-        // or relying on the user importing cell_sdk::rkyv.
-        // However, using fully qualified paths in derive is safer.
-        #[archive(crate = "::cell_sdk::rkyv")]
         pub struct #req_name { #(pub #req_fields),* }
 
-        #[derive(::serde::Serialize, ::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
+        #[derive(
+            ::serde::Serialize,
+            ::serde::Deserialize,
+            ::cell_sdk::rkyv::Archive,
+            ::cell_sdk::rkyv::Serialize,
+            ::cell_sdk::rkyv::Deserialize,
+            Clone,
+            Debug
+        )]
+        #[archive(crate = "::cell_sdk::rkyv")]
         #[archive(check_bytes)]
         #[archive_attr(derive(Debug))]
-        #[archive(crate = "::cell_sdk::rkyv")]
         pub struct #resp_name { #(pub #resp_fields),* }
 
         #[doc(hidden)]
@@ -66,6 +119,8 @@ pub fn call_as(input: TokenStream) -> TokenStream {
         Err(e) => TokenStream::from(quote! { compile_error!(#e) }),
     }
 }
+
+// --- Internal Parsing Logic ---
 
 struct ReceptorDef {
     name: Ident,
@@ -163,7 +218,6 @@ fn parse_and_generate_call(
     let output_ident = syn::Ident::new(output_type_str, proc_macro2::Span::call_site());
 
     Ok(quote! {
-        // Wrap in an immediately invoked closure to ensure '?' works correctly anywhere
         (move || -> ::anyhow::Result<#output_ident> {
             let payload = ::cell_sdk::rkyv::to_bytes::<_, 1024>(&#expr)
                 .map_err(|e| ::anyhow::anyhow!("Packing error: {}", e))?

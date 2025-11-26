@@ -25,7 +25,7 @@ Biological names map to CS concepts
 
 | Biology | Computing |
 |---------|-----------|
-| Genome | `genome.toml` metadata (name, listen addr, replicas, dependencies). |
+| Genome | `Cell.toml` metadata (name, listen addr, replicas, dependencies). |
 | Cell | One Rust binary that implements a `signal_receptor!`. |
 | Nucleus | The `ChildGuard` that spawns the cell and tracks CPU / RSS via cgroups. |
 | Mitochondria | Ledger file (`mitochondria.json`) that mints or burns ATP for every millisecond of work. |

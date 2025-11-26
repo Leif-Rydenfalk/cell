@@ -14,7 +14,7 @@ use tokio::task::JoinSet;
 #[derive(Parser)]
 #[command(name = "cell-daemon")]
 struct DaemonCli {
-    /// Path to the cell directory (containing genome.toml)
+    /// Path to the cell directory (containing Cell.toml)
     dir: PathBuf,
 
     /// Path to the compiled binary (or script) to run
@@ -34,8 +34,8 @@ async fn main() -> Result<()> {
 
 async fn run_cell_runtime(dir: &Path, bin_path: PathBuf, is_donor: bool) -> Result<()> {
     // Load Genome
-    let genome_path = dir.join("genome.toml");
-    let txt = std::fs::read_to_string(&genome_path).map_err(|_| anyhow!("Missing genome.toml"))?;
+    let genome_path = dir.join("Cell.toml");
+    let txt = std::fs::read_to_string(&genome_path).map_err(|_| anyhow!("Missing Cell.toml"))?;
     let dna: Genome = toml::from_str(&txt)?;
 
     let run_dir = dir.join("run");
