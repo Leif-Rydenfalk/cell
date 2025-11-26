@@ -342,7 +342,21 @@ fn spawn_daemon_background(dir: &Path, bin_path: &Path, is_donor: bool) -> Resul
         .parent()
         .unwrap()
         .join("cell-daemon");
-    let log_file = std::fs::File::create(dir.join("run/daemon.log"))?;
+
+    // Check 1: Does the daemon binary exist?
+    if !daemon_exe.exists() {
+        anyhow::bail!("Binary missing: {}", daemon_exe.display());
+    }
+
+    // Check 2: Create the 'run' directory (The Fix for Error 2)
+    let run_dir = dir.join("run");
+    if !run_dir.exists() {
+        std::fs::create_dir_all(&run_dir).context("Failed to create 'run' directory")?;
+    }
+
+    // Check 3: Create the log file
+    let log_file =
+        std::fs::File::create(run_dir.join("daemon.log")).context("Failed to create daemon.log")?;
 
     let mut cmd = Command::new(daemon_exe);
     cmd.arg(dir).arg("--bin").arg(bin_path);
@@ -351,7 +365,7 @@ fn spawn_daemon_background(dir: &Path, bin_path: &Path, is_donor: bool) -> Resul
         cmd.arg("--donor");
     }
 
-    cmd.stdout(log_file.try_clone()?)
+    cmd.stdout(log_file.try_clone().context("Failed to clone stdout")?)
         .stderr(log_file)
         .spawn()
         .context("Failed to spawn cell-daemon")?;

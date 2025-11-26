@@ -11,7 +11,7 @@ The cell daemon manages the actual creation and destruction of the cells but eit
 
 
 
-Cell should never send binaries to other cells. Cell must send a link to an external verified source like github and pull it and build locally and then verify the hash with a hash given by the cell network - the one all cells of this type has - the type identifier for a specific cell.
+Cell should rarely send raw binaries to other cells. Cell must send a link to an external verified source like github and pull it and build locally and then verify the hash with a hash given by the cell network - the one all cells of this type has - the type identifier for a specific cell.
 
 
 
