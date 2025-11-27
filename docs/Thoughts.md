@@ -14,6 +14,7 @@ The cell daemon manages the actual creation and destruction of the cells but eit
 Cell should rarely send raw binaries to other cells. Cell must send a link to an external verified source like github and pull it and build locally and then verify the hash with a hash given by the cell network - the one all cells of this type has - the type identifier for a specific cell.
 
 
+cell network node contains metadata - node specs: cpu, gpu, operating system, architecture and cell networks uses this to query right resources for people. different resources have different value for different people. some software runs on some hardware.
 
 
 
