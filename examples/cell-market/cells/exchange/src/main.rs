@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     println!("[Exchange] Consensus Active (FP: {:x}). Spawning Traders...", MarketMsg::SCHEMA_FINGERPRINT);
 
     // --- RESTORED LOGIC START ---
-    for _ in 0..5 {
+    for _ in 0..100 {
         tokio::spawn(async move {
             // The exchange recursively spawns traders.
             // Because they share the same DNA folder, it finds the 'trader' binary.

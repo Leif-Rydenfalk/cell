@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     println!("[Genesis] Monitoring Market Stability...");
     let start = std::time::Instant::now();
 
-    for i in 0..10 {
+    for i in 0..30 {
         tokio::time::sleep(Duration::from_secs(1)).await;
         
         // Use our local definition

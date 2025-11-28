@@ -1,12 +1,21 @@
 pub mod wal;
 
-use anyhow::Result; // Removed unused Context
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use wal::{LogEntry, WriteAheadLog};
 
-// ... [Config and Traits remain the same] ...
+#[derive(Debug)]
+enum WalCmd {
+    Append {
+        entries: Vec<LogEntry>,
+        /// Notify caller when batch is both written and fsync-ed.
+        done: oneshot::Sender<Result<()>>,
+    },
+}
+
+
 pub struct RaftConfig {
     pub id: u64,
     pub storage_path: std::path::PathBuf,
@@ -18,7 +27,6 @@ pub trait StateMachine: Send + Sync + 'static {
     fn restore(&self, snapshot: &[u8]);
 }
 
-// ... [RaftMessage remains the same] ...
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RaftMessage {
     AppendEntries {
@@ -42,7 +50,7 @@ pub enum RaftMessage {
 
 pub struct RaftNode {
     id: u64,
-    wal: Arc<Mutex<WriteAheadLog>>,
+    wal_tx: mpsc::UnboundedSender<WalCmd>, 
     state_machine: Arc<dyn StateMachine>,
     commit_index: Arc<Mutex<u64>>, 
     network_tx: broadcast::Sender<RaftMessage>,
@@ -67,7 +75,7 @@ impl RaftNode {
 
         Ok(Arc::new(Self {
             id: config.id,
-            wal: Arc::new(Mutex::new(wal)),
+            wal_tx,
             state_machine: sm,
             commit_index: Arc::new(Mutex::new(last_index)),
             network_tx: tx,
@@ -76,10 +84,7 @@ impl RaftNode {
 
     pub async fn propose(&self, command: Vec<u8>) -> Result<u64> {
         let entry = LogEntry::Command(command.clone());
-        {
-            let mut w = self.wal.lock().await;
-            w.append(&entry)?;
-        }
+        self.append_via_channel(std::slice::from_ref(&entry)).await?;
         self.state_machine.apply(&command);
         let mut idx = self.commit_index.lock().await;
         *idx += 1;
@@ -95,10 +100,7 @@ impl RaftNode {
             .collect();
             
         // 1. Group Commit to Disk
-        {
-            let mut w = self.wal.lock().await;
-            w.append_batch(&entries)?;
-        }
+        self.append_via_channel(&entries).await?;
 
         // 2. Apply all to Memory
         for cmd in &commands {
@@ -110,6 +112,17 @@ impl RaftNode {
         *idx += commands.len() as u64;
         
         Ok(*idx)
+    }
+
+    // ----- 5.  Helper: channel + oneshot for back-pressure -----
+    async fn append_via_channel(&self, entries: &[LogEntry]) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.wal_tx.send(WalCmd::Append {
+            entries: entries.to_vec(),
+            done: tx,
+        })?;
+        // wait until WAL task finished the fsync
+        rx.await?
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<RaftMessage> {
