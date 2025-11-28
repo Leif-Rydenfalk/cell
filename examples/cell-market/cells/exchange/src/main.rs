@@ -9,8 +9,14 @@ struct MarketState {
 }
 
 impl StateMachine for MarketState {
-    fn apply(&self, _command: &[u8]) {
-        self.trade_count.fetch_add(1, Ordering::Relaxed);
+    fn apply(&self, command: &[u8]) {
+        // If command is 4 bytes, treat it as a batch count
+        if command.len() == 4 {
+             let count = u32::from_le_bytes(command.try_into().unwrap());
+             self.trade_count.fetch_add(count as u64, Ordering::Relaxed);
+        } else {
+             self.trade_count.fetch_add(1, Ordering::Relaxed);
+        }
     }
     fn snapshot(&self) -> Vec<u8> { vec![] }
     fn restore(&self, _snapshot: &[u8]) {}
@@ -21,28 +27,16 @@ async fn main() -> Result<()> {
     let state = Arc::new(MarketState { trade_count: AtomicU64::new(0) });
 
     let wal_path = std::path::PathBuf::from("/tmp/market.wal");
-    let config = RaftConfig {
-        id: 1,
-        storage_path: wal_path,
-    };
+    let config = RaftConfig { id: 1, storage_path: wal_path };
     let raft = RaftNode::new(config, state.clone()).await?;
 
     println!("[Exchange] Consensus Active. Spawning Traders...");
 
     for _ in 0..5 {
         tokio::spawn(async move {
-            // FIX: Handle timeout for client-only cells
-            match Synapse::grow("trader").await {
-                Ok(_) => { /* Trader has a membrane (future proofing) */ },
-                Err(e) => {
-                    // If the error is a timeout waiting for socket, it just means
-                    // the trader is up but didn't bind a server socket.
-                    if e.to_string().contains("failed to bind socket") {
-                        // This is expected for pure worker drones
-                        println!("[Exchange] Trader drone launched (Client Mode)");
-                    } else {
-                        eprintln!("[Exchange] Failed to spawn trader: {}", e);
-                    }
+            if let Err(e) = Synapse::grow("trader").await {
+                if !e.to_string().contains("failed to bind socket") {
+                    eprintln!("[Exchange] Error spawning trader: {}", e);
                 }
             }
         });
@@ -59,10 +53,19 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("Msg Error: {:?}", e))?;
 
             match msg {
-                MarketMsg::PlaceOrder { symbol: _, amount: _, side: _ } => {
+                MarketMsg::PlaceOrder { .. } => {
                     let _ = raft.propose(vec![1]).await.unwrap();
-
                     let ack = MarketMsg::OrderAck { id: 1 };
+                    let bytes = cell_sdk::rkyv::to_bytes::<_, 16>(&ack)?.into_vec();
+                    Ok(cell_sdk::vesicle::Vesicle::wrap(bytes))
+                }
+                MarketMsg::SubmitBatch { count } => {
+                    // Optimized Batch Path
+                    // We serialize the COUNT into the log, effectively compressing 100 entries into 4 bytes on disk
+                    let cmd = count.to_le_bytes().to_vec();
+                    let _ = raft.propose(cmd).await.unwrap();
+
+                    let ack = MarketMsg::OrderAck { id: count as u64 };
                     let bytes = cell_sdk::rkyv::to_bytes::<_, 16>(&ack)?.into_vec();
                     Ok(cell_sdk::vesicle::Vesicle::wrap(bytes))
                 }

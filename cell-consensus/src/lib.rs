@@ -1,19 +1,16 @@
 pub mod wal;
 
-use anyhow::{Context, Result};
+use anyhow::Result; // Removed unused Context
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use wal::{LogEntry, WriteAheadLog};
 
-// --- Public Config ---
-
+// ... [Config and Traits remain the same] ...
 pub struct RaftConfig {
     pub id: u64,
     pub storage_path: std::path::PathBuf,
 }
-
-// --- Traits ---
 
 pub trait StateMachine: Send + Sync + 'static {
     fn apply(&self, command: &[u8]);
@@ -21,8 +18,7 @@ pub trait StateMachine: Send + Sync + 'static {
     fn restore(&self, snapshot: &[u8]);
 }
 
-// --- Raft Protocol ---
-
+// ... [RaftMessage remains the same] ...
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RaftMessage {
     AppendEntries {
@@ -44,8 +40,6 @@ pub enum RaftMessage {
     },
 }
 
-// --- The Engine ---
-
 pub struct RaftNode {
     id: u64,
     wal: Arc<Mutex<WriteAheadLog>>,
@@ -55,11 +49,7 @@ pub struct RaftNode {
 }
 
 impl RaftNode {
-    pub async fn new(
-        config: RaftConfig, 
-        sm: Arc<dyn StateMachine>
-    ) -> Result<Arc<Self>> {
-        // 1. WAL Recovery
+    pub async fn new(config: RaftConfig, sm: Arc<dyn StateMachine>) -> Result<Arc<Self>> {
         let mut wal = WriteAheadLog::open(&config.storage_path)?;
         let entries = wal.read_all()?;
         
@@ -84,34 +74,41 @@ impl RaftNode {
         }))
     }
 
-    /// Propose a new state transition (Command)
     pub async fn propose(&self, command: Vec<u8>) -> Result<u64> {
-        // For MVP: We assume Leaderless / All-Write consistency (Mesh Mode)
         let entry = LogEntry::Command(command.clone());
-        
-        // 1. Durability (Disk)
         {
             let mut w = self.wal.lock().await;
             w.append(&entry)?;
         }
-
-        // 2. State Machine (Memory)
         self.state_machine.apply(&command);
-
-        // 3. Update Commit Index
         let mut idx = self.commit_index.lock().await;
         *idx += 1;
-        
-        // 4. Broadcast to peers (Best Effort Replication)
-        let msg = RaftMessage::AppendEntries {
-            term: 1,
-            leader_id: self.id,
-            prev_log_index: *idx - 1,
-            entries: vec![entry],
-            leader_commit: *idx,
-        };
-        let _ = self.network_tx.send(msg);
+        Ok(*idx)
+    }
 
+    // NEW: Batch Proposal
+    pub async fn propose_batch(&self, commands: Vec<Vec<u8>>) -> Result<u64> {
+        if commands.is_empty() { return Ok(0); }
+
+        let entries: Vec<LogEntry> = commands.iter()
+            .map(|c| LogEntry::Command(c.clone()))
+            .collect();
+            
+        // 1. Group Commit to Disk
+        {
+            let mut w = self.wal.lock().await;
+            w.append_batch(&entries)?;
+        }
+
+        // 2. Apply all to Memory
+        for cmd in &commands {
+            self.state_machine.apply(cmd);
+        }
+
+        // 3. Update Index
+        let mut idx = self.commit_index.lock().await;
+        *idx += commands.len() as u64;
+        
         Ok(*idx)
     }
 

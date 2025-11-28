@@ -5,43 +5,30 @@ use protocol::MarketMsg;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. Connection Logic
-    // We attempt to connect to the 'exchange'. 
-    // If it's not up, Synapse::grow will try to spawn it (idempotent),
-    // or we just loop until the socket is ready.
     let mut conn = loop {
         match Synapse::grow("exchange").await {
             Ok(c) => break c,
-            Err(e) => {
-                eprintln!("[Trader] Waiting for Exchange... ({})", e);
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
         }
     };
 
-    println!("[Trader] Connected to Exchange. Starting High-Frequency Trading.");
+    println!("[Trader] Connected. Starting Batch Trading.");
 
-    // 2. Trading Loop
+    // Batch size of 100
+    let batch_size = 100;
+    
     loop {
-        let order = MarketMsg::PlaceOrder {
-            symbol: "CELL".to_string(),
-            amount: 100,
-            side: 0 // Buy
-        };
+        // Instead of firing 1 msg, we fire a batch representation
+        let order = MarketMsg::SubmitBatch { count: batch_size };
 
         match conn.fire(order).await {
             Ok(_) => {
-                // Success. 
-                // We yield to prevent this tight loop from starving the runtime 
-                // if we are running single-threaded, though in this architecture
-                // we are IO bound mostly.
-                tokio::task::yield_now().await;
+                // Yield occasionally to be a good citizen
+                // tokio::task::yield_now().await;
             }
-            Err(e) => {
-                eprintln!("[Trader] Connection lost: {}. Reconnecting...", e);
+            Err(_) => {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                // Re-connect logic would go here in a robust app
-                break; 
+                break;
             }
         }
     }

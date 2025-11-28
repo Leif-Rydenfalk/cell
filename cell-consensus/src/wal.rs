@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result; // Removed unused Context
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -7,7 +7,7 @@ use std::path::Path;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum LogEntry {
     Command(Vec<u8>),
-    ConfigChange, // Placeholder for cluster membership changes
+    ConfigChange,
 }
 
 pub struct WriteAheadLog {
@@ -28,6 +28,22 @@ impl WriteAheadLog {
     }
 
     pub fn append(&mut self, entry: &LogEntry) -> Result<()> {
+        self.write_entry_to_buffer(entry)?;
+        self.file.sync_data()?;
+        Ok(())
+    }
+
+    // NEW: Batch optimization
+    pub fn append_batch(&mut self, entries: &[LogEntry]) -> Result<()> {
+        for entry in entries {
+            self.write_entry_to_buffer(entry)?;
+        }
+        // Sync only once for the whole batch
+        self.file.sync_data()?;
+        Ok(())
+    }
+
+    fn write_entry_to_buffer(&mut self, entry: &LogEntry) -> Result<()> {
         let bytes = bincode::serialize(entry)?;
         let len = bytes.len() as u64;
         let crc = crc32fast::hash(&bytes);
@@ -36,7 +52,6 @@ impl WriteAheadLog {
         self.file.write_all(&len.to_le_bytes())?;
         self.file.write_all(&crc.to_le_bytes())?;
         self.file.write_all(&bytes)?;
-        self.file.sync_data()?;
         Ok(())
     }
 
