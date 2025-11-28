@@ -38,11 +38,24 @@ async fn run_cell_runtime(dir: &Path, bin_path: PathBuf, is_donor: bool) -> Resu
     let txt = std::fs::read_to_string(&genome_path).map_err(|_| anyhow!("Missing Cell.toml"))?;
     let dna: Genome = toml::from_str(&txt)?;
 
-    let run_dir = dir.join("run");
+    // Structure for .cell directory
+    let cell_root = dir.join(".cell");
+    let run_dir = cell_root.join("run");
+    let log_dir = cell_root.join("logs");
+    let data_dir = cell_root.join("data");
+
+    // Clean up previous run sockets/pids but KEEP data and logs
     if run_dir.exists() {
         std::fs::remove_dir_all(&run_dir)?;
     }
+
     std::fs::create_dir_all(&run_dir)?;
+    std::fs::create_dir_all(&log_dir)?;
+    std::fs::create_dir_all(&data_dir)?;
+
+    let pid = std::process::id();
+    let pid_file = run_dir.join("daemon.pid");
+    std::fs::write(&pid_file, pid.to_string())?;
 
     let traits = dna
         .genome
@@ -143,6 +156,7 @@ async fn run_cell_runtime(dir: &Path, bin_path: PathBuf, is_donor: bool) -> Resu
     let golgi = Golgi::new(
         traits.name.clone(),
         &run_dir,
+        &data_dir,
         traits.listen.clone(),
         routes,
         is_donor,

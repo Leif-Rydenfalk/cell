@@ -81,5 +81,3 @@ cargo bench  # requires nightly for `std::simd`
 ## License
 MIT OR Apache-2.0 – do what you want, just don’t blame us if you saturate your NIC.
 
-## Author
-17 y/o, self-taught. 

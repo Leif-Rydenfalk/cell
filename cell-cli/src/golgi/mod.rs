@@ -70,16 +70,17 @@ impl Golgi {
     /// Loads identity and economy (Mitochondria) subsystems.
     pub fn new(
         name: String,
-        run_dir: &std::path::Path,
+        run_dir: &std::path::Path,  // Where sockets go (.cell/run)
+        data_dir: &std::path::Path, // Where persistent data goes (.cell/data)
         axon_bind: Option<String>,
         routes_map: HashMap<String, Target>,
         is_donor: bool,
     ) -> Result<Self> {
-        let identity_path = run_dir.join("identity");
+        let identity_path = data_dir.join("identity");
         let identity =
             Antigens::load_or_create(identity_path).context("Failed to load node identity.")?;
 
-        let mitochondria = Mitochondria::load_or_init(run_dir)?;
+        let mitochondria = Mitochondria::load_or_init(data_dir)?;
 
         sys_log(
             "INFO",
@@ -168,7 +169,6 @@ impl Golgi {
 
                 // --- OPPORTUNISTIC GAP JUNCTION (Optimization) ---
                 // If the peer is local (socket file exists on disk), we bypass TCP/Encryption entirely.
-                // This restores ~5GB/s throughput for local communication.
                 let mut local_socket_found = false;
 
                 if let Some(path_str) = &p.ipc_socket {

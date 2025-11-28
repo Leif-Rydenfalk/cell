@@ -1,23 +1,67 @@
-use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
+use anyhow::Result;
 use regex::Regex;
-use serde::Deserialize;
-use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc; // Added for Golgi Arc optimization
-use std::time::SystemTime;
-use tokio::net::TcpStream;
 
 use crate::sys_log;
+
+pub struct CellMeta {
+    pub name: String,
+    pub path: PathBuf,
+    pub provides: Vec<String>, // Names of receptors defined here
+    pub consumes: Vec<String>, // Names of cells called from here
+}
+
+pub fn scan_cell_dependencies(cell_root: &Path) -> Result<CellMeta> {
+    let src_dir = cell_root.join("src");
+
+    let mut meta = CellMeta {
+        name: String::new(),
+        path: cell_root.to_path_buf(),
+        provides: Vec::new(),
+        consumes: Vec::new(),
+    };
+
+    if !src_dir.exists() {
+        return Ok(meta);
+    }
+
+    let re_call = Regex::new(r"call_as!\s*\(\s*([a-zA-Z0-9_]+)")?;
+    let re_receptor = Regex::new(r"signal_receptor!\s*\{\s*name:\s*([a-zA-Z0-9_]+)")?;
+
+    // Pass a mutable closure (&mut |entry| ...)
+    visit_dirs(&src_dir, &mut |entry| {
+        let path = entry.path();
+        if path.extension().map_or(false, |e| e == "rs") {
+            let content = fs::read_to_string(&path)?;
+            let clean = strip_comments(&content);
+
+            for cap in re_receptor.captures_iter(&clean) {
+                meta.provides.push(cap[1].to_string());
+            }
+
+            for cap in re_call.captures_iter(&clean) {
+                meta.consumes.push(cap[1].to_string());
+            }
+        }
+        Ok(())
+    })?;
+
+    meta.consumes.sort();
+    meta.consumes.dedup();
+
+    Ok(meta)
+}
 
 /// Recursively scans the project's `src` folder for `signal_receptor!` definitions
 /// and generates the `.cell-genomes/{name}.json` files required for compilation.
 pub fn run_genesis(root: &Path) -> Result<()> {
     let src_dir = root.join("src");
-    let schema_dir = root.join(".cell-genomes");
+
+    // Unified directory structure
+    let cell_dir = root.join(".cell");
+    let schema_dir = cell_dir.join("genomes");
 
     // If src doesn't exist (e.g. workspace root), we skip silently
     if !src_dir.exists() {
@@ -34,7 +78,7 @@ pub fn run_genesis(root: &Path) -> Result<()> {
     )?;
 
     // 2. Recursive Walk
-    visit_dirs(&src_dir, &|entry| {
+    visit_dirs(&src_dir, &mut |entry| {
         process_file(entry.path(), &schema_dir, &re)
     })?;
 
@@ -42,7 +86,7 @@ pub fn run_genesis(root: &Path) -> Result<()> {
 }
 
 /// Helper to recursively walk directories
-fn visit_dirs(dir: &Path, cb: &dyn Fn(&fs::DirEntry) -> Result<()>) -> io::Result<()> {
+fn visit_dirs(dir: &Path, cb: &mut dyn FnMut(&fs::DirEntry) -> Result<()>) -> io::Result<()> {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries {
             let entry = entry?;

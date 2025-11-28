@@ -23,8 +23,8 @@ pub fn protein(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #[derive(
             // JSON / Polyglot Support
-            ::serde::Serialize,
-            ::serde::Deserialize,
+            ::cell_sdk::serde::Serialize,
+            ::cell_sdk::serde::Deserialize,
             // Zero-Copy Rust Support
             ::cell_sdk::rkyv::Archive,
             ::cell_sdk::rkyv::Serialize,
@@ -33,6 +33,7 @@ pub fn protein(_attr: TokenStream, item: TokenStream) -> TokenStream {
             Clone,
             Debug,
         )]
+         #[serde(crate = "::cell_sdk::serde")]
         // Point to the specific rkyv version re-exported by cell_sdk
         #[archive(crate = "::cell_sdk::rkyv")]
         // Security: Validation of incoming bytes is mandatory
@@ -59,22 +60,23 @@ pub fn signal_receptor(input: TokenStream) -> TokenStream {
     // because we are generating the structs from scratch, not decorating existing ones.
     let expanded = quote! {
         #[derive(
-            ::serde::Serialize,
-            ::serde::Deserialize,
+            ::cell_sdk::serde::Serialize,
+            ::cell_sdk::serde::Deserialize,
             ::cell_sdk::rkyv::Archive,
             ::cell_sdk::rkyv::Serialize,
             ::cell_sdk::rkyv::Deserialize,
             Clone,
             Debug
         )]
+        #[serde(crate = "::cell_sdk::serde")]
         #[archive(crate = "::cell_sdk::rkyv")]
         #[archive(check_bytes)]
         #[archive_attr(derive(Debug))]
         pub struct #req_name { #(pub #req_fields),* }
 
         #[derive(
-            ::serde::Serialize,
-            ::serde::Deserialize,
+            ::cell_sdk::serde::Serialize,
+            ::cell_sdk::serde::Deserialize,
             ::cell_sdk::rkyv::Archive,
             ::cell_sdk::rkyv::Serialize,
             ::cell_sdk::rkyv::Deserialize,
@@ -102,7 +104,8 @@ pub fn call_as(input: TokenStream) -> TokenStream {
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let schema_path = PathBuf::from(&manifest_dir)
-        .join(".cell-genomes")
+        .join(".cell")
+        .join("genomes")
         .join(format!("{}.json", cell_str));
 
     let schema_json = match fs::read_to_string(&schema_path) {

@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 pub use cell_macros::{call_as, protein, signal_receptor};
 // Re-export rkyv so the macros can find it reliably via ::cell_sdk::rkyv
 pub use rkyv;
+pub use serde;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -35,7 +36,7 @@ impl Membrane {
             unsafe { UnixListener::from_raw_fd(fd) }
         } else {
             // Fallback: Bind manually (Dev/Test Mode)
-            let path = Path::new("run/cell.sock");
+            let path = Path::new(".cell/run/cell.sock");
             if let Some(p) = path.parent() {
                 std::fs::create_dir_all(p)?;
             }
@@ -86,7 +87,7 @@ impl Synapse {
 
         // 2. Connect New
         let golgi_path =
-            std::env::var("CELL_GOLGI_SOCK").unwrap_or_else(|_| "run/golgi.sock".to_string());
+            std::env::var("CELL_GOLGI_SOCK").unwrap_or_else(|_| ".cell/run/golgi.sock".to_string());
 
         let mut stream = UnixStream::connect(&golgi_path)
             .with_context(|| format!("Failed to connect to Golgi at {}", golgi_path))?;

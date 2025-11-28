@@ -40,7 +40,6 @@ pub struct Pheromone {
     /// ## Optimization
     /// If a peer receives this and sees that the file exists on its own disk,
     /// it will upgrade the connection to a raw Unix socket, bypassing TCP/Encryption
-    /// for maximum throughput (~5GB/s).
     pub ipc_socket: Option<String>,
 }
 
