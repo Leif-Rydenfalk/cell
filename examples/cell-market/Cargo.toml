@@ -7,6 +7,5 @@ edition = "2021"
 anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
 cell-sdk = { path = "../../cell-sdk" }
-protocol = { path = "./cells/protocol" }
 dirs = "5.0"
 toml_edit = "0.22"

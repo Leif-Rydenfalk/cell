@@ -1,10 +1,32 @@
 use anyhow::{Context, Result};
-use cell_sdk::{MyceliumRoot, Synapse};
-use protocol::MarketMsg;
+use cell_sdk::{MyceliumRoot, Synapse, protein};
 use std::fs;
-use std::path::{Path, PathBuf}; // Fixed warning
+use std::path::Path;
 use std::time::Duration;
 use toml_edit::{DocumentMut, value};
+
+// --- SCHEMA DEFINITION (Orchestrator) ---
+// The orchestrator acts as a client here.
+// It will check ~/.cell/schema/MarketV1.lock just like the Trader does.
+#[protein(class = "MarketV1")]
+pub enum MarketMsg {
+    PlaceOrder {
+        symbol: String,
+        amount: u64,
+        side: u8,
+    },
+    SubmitBatch {
+        count: u32,
+    },
+    OrderAck {
+        id: u64,
+    },
+    SnapshotRequest,
+    SnapshotResponse {
+        total_trades: u64,
+    },
+}
+// ----------------------------------------
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,8 +56,12 @@ async fn main() -> Result<()> {
 
     for i in 0..10 {
         tokio::time::sleep(Duration::from_secs(1)).await;
+        
+        // Use our local definition
         let req = MarketMsg::SnapshotRequest;
+        
         if let Ok(resp_vesicle) = exchange_conn.fire(req).await {
+            // Deserialize using our local definition
             if let Ok(MarketMsg::SnapshotResponse { total_trades }) = 
                 cell_sdk::rkyv::from_bytes::<MarketMsg>(resp_vesicle.as_slice()) {
                 
@@ -55,14 +81,14 @@ async fn deploy_and_patch(src_cells: &Path, sdk_path: &Path, consensus_path: &Pa
     fs::create_dir_all(&dna_root)?;
 
     println!("[Deploy] Syncing DNA to {:?}", dna_root);
-    let components = vec!["protocol", "exchange", "trader"];
+    
+    // REMOVED: "protocol" from this list
+    let components = vec!["exchange", "trader"];
 
     for component in components {
         let src = src_cells.join(component);
         let dst = dna_root.join(component);
 
-        // OPTIMIZATION: Do NOT remove_dir_all. This preserves dna.hash.
-        // We just recursively overwrite files.
         copy_dir_recursive(&src, &dst)?;
 
         let toml_path = dst.join("Cargo.toml");
@@ -81,7 +107,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         if ty.is_dir() {
             copy_dir_recursive(&entry.path(), &dst_path)?;
         } else {
-            // Simple overwrite
             fs::copy(entry.path(), &dst_path)?;
         }
     }
@@ -103,7 +128,6 @@ fn patch_cargo_toml(path: &Path, sdk_path: &Path, consensus_path: &Path) -> Resu
     replace_path(&mut doc, "cell-sdk", sdk_path);
     replace_path(&mut doc, "cell-consensus", consensus_path);
     
-    // Only write if changed to preserve timestamps (helps incremental build)
     if doc.to_string() != content {
         fs::write(path, doc.to_string())?;
     }

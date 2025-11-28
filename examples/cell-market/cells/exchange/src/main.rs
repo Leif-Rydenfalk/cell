@@ -4,7 +4,6 @@ use cell_consensus::{RaftNode, RaftConfig, StateMachine};
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 
 // --- SCHEMA DEFINITION (Authority) ---
-// This writes ~/.cell/schema/MarketV1.lock during build
 #[protein(class = "MarketV1")]
 pub enum MarketMsg {
     PlaceOrder {
@@ -44,13 +43,27 @@ impl StateMachine for MarketState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // ... [Same implementation as before, just using local MarketMsg] ...
     let state = Arc::new(MarketState { trade_count: AtomicU64::new(0) });
     let wal_path = std::path::PathBuf::from("/tmp/market.wal");
     let config = RaftConfig { id: 1, storage_path: wal_path };
     let raft = RaftNode::new(config, state.clone()).await?;
 
-    println!("[Exchange] Consensus Active (FP: {:x}).", MarketMsg::SCHEMA_FINGERPRINT);
+    println!("[Exchange] Consensus Active (FP: {:x}). Spawning Traders...", MarketMsg::SCHEMA_FINGERPRINT);
+
+    // --- RESTORED LOGIC START ---
+    for _ in 0..5 {
+        tokio::spawn(async move {
+            // The exchange recursively spawns traders.
+            // Because they share the same DNA folder, it finds the 'trader' binary.
+            if let Err(e) = Synapse::grow("trader").await {
+                // Ignore benign race conditions during startup
+                if !e.to_string().contains("failed to bind socket") {
+                    eprintln!("[Exchange] Error spawning trader: {}", e);
+                }
+            }
+        });
+    }
+    // --- RESTORED LOGIC END ---
 
     Membrane::bind("exchange", move |vesicle| {
         let raft = raft.clone();
