@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use fd_lock::RwLock;
 use std::fs::File;
-use std::path::{Path, PathBuf};
-use tokio::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
+use tokio::net::UnixListener; // Removed unused UnixStream, Path
 
 pub struct Membrane;
 
@@ -55,7 +55,7 @@ impl Membrane {
                 let last = la_clone.load(std::sync::atomic::Ordering::Relaxed);
 
                 if now - last > 60 {
-                    println!("Apoptosis Triggered (Idle).");
+                    // Silent exit is cleaner for examples
                     std::process::exit(0);
                 }
             }
@@ -113,21 +113,16 @@ impl Membrane {
     }
 }
 
-// Logic duplicated to match Synapse without circular dependency
 fn resolve_socket_dir() -> PathBuf {
     if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
         return PathBuf::from(p);
     }
-
-    // Container Check
     let container_socket_dir = std::path::Path::new("/tmp/cell");
     let container_umbilical = std::path::Path::new("/tmp/mitosis.sock");
 
     if container_socket_dir.exists() && container_umbilical.exists() {
         return container_socket_dir.to_path_buf();
     }
-
-    // Host Check
     if let Some(home) = dirs::home_dir() {
         return home.join(".cell/run");
     }

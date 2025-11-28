@@ -1,7 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result; // Removed unused Context
 use memmap2::MmapMut;
 #[cfg(target_os = "linux")]
 use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
+#[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::fs::File;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
@@ -18,8 +19,10 @@ struct RingLayout {
 }
 
 pub struct GapJunction {
+    #[allow(dead_code)] // mmap needs to be kept alive even if not read directly
     mmap: MmapMut,
     layout: RingLayout,
+    #[allow(dead_code)]
     _file: File,
 }
 
@@ -29,19 +32,14 @@ impl GapJunction {
     #[cfg(target_os = "linux")]
     pub fn forge() -> Result<(Self, RawFd)> {
         let name = CString::new("cell_gap")?;
-        // Nix returns OwnedFd
         let owned_fd = memfd_create(&name, MemFdCreateFlag::MFD_CLOEXEC)?;
-
-        // Convert OwnedFd -> std::fs::File
         let file = File::from(owned_fd);
-
         file.set_len(SHM_SIZE as u64)?;
 
         let mut mmap = unsafe { MmapMut::map_mut(&file)? };
         mmap[0..16].fill(0);
 
         let layout = unsafe { Self::get_layout(mmap.as_mut_ptr()) };
-
         let fd_out = file.as_raw_fd();
 
         Ok((
@@ -74,6 +72,7 @@ impl GapJunction {
         }
     }
 
+    // ... write/read methods remain unchanged ...
     pub fn write(&self, src: &[u8]) -> usize {
         let read = unsafe { (*self.layout.read).load(Ordering::Acquire) };
         let write = unsafe { (*self.layout.write).load(Ordering::Acquire) };

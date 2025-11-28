@@ -1,56 +1,66 @@
-use anyhow::Result;
-use cell_sdk::{MyceliumRoot, Synapse, protein};
-use std::path::Path;
-use tokio::fs;
-
-// --- PROTOCOL (Shared DNA) ---
-const PROTOCOL_SRC: &str = r#"
-use cell_sdk::protein;
-
-#[protein]
-pub enum MarketMsg {
-    PlaceOrder { symbol: String, amount: u64, side: u8 }, // 0=Buy, 1=Sell
-    OrderAck { id: u64 },
-    SnapshotRequest,
-    SnapshotResponse { total_trades: u64 },
-}
-"#;
-
-// --- MAIN ORCHESTRATOR ---
+use anyhow::{Context, Result};
+use cell_sdk::{MyceliumRoot, Synapse};
+use protocol::MarketMsg;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+// FIX: Use correct crate and struct name (DocumentMut)
+use toml_edit::{DocumentMut, value};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. Setup the DNA Library
-    // Note: If the source string inside setup_dna changes, Ribosome will detect the hash change.
-    setup_dna().await?;
+    let example_root = std::env::current_dir().context("Failed to get current dir")?;
+    let cells_source = example_root.join("cells");
+    
+    // Calculate absolute paths to the framework crates
+    let framework_root = example_root
+        .parent().unwrap() // examples/
+        .parent().unwrap(); // cell-engine/
+    
+    let sdk_path = framework_root.join("cell-sdk").canonicalize()?;
+    let consensus_path = framework_root.join("cell-consensus").canonicalize()?;
+
+    if !cells_source.exists() {
+        anyhow::bail!("Cells directory not found at {:?}. Run from 'examples/cell-market'", cells_source);
+    }
+
+    // Deploy and patch Cargo.toml
+    deploy_and_patch(&cells_source, &sdk_path, &consensus_path).await?;
 
     println!("\n=== SYSTEM IGNITION ===");
-    
-    // 2. Start the Root
+
+    // Start the Root
     let _root = MyceliumRoot::ignite().await?;
     println!("[Genesis] Mycelium Root Active.");
 
-    // 3. Spawn the Exchange
-    println!("[Genesis] Growing Exchange Cell...");
+    // Spawn Exchange
+    println!("[Genesis] Growing Exchange Cell (this triggers compilation)...");
     let mut exchange_conn = Synapse::grow("exchange").await?;
     println!("[Genesis] Exchange Online.");
 
-    // 4. Verification Loop
+    // Verification Loop
     let start = std::time::Instant::now();
-    
     println!("[Genesis] Monitoring Market Stability...");
-    for i in 0..5 {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        
+
+    // Allow time for traders to spin up
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    for i in 0..10 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
         let req = MarketMsg::SnapshotRequest;
-        let resp_vesicle = exchange_conn.fire(req).await?;
-        
-        let resp = cell_sdk::rkyv::from_bytes::<MarketMsg>(resp_vesicle.as_slice())
-            .map_err(|e| anyhow::anyhow!("Deserialization failed: {:?}", e))?;
-        
-        if let MarketMsg::SnapshotResponse { total_trades } = resp {
-            let rps = total_trades as f64 / start.elapsed().as_secs_f64();
-            println!("[Metric] T+{}: Total Trades: {} | {:.0} TPS", i, total_trades, rps);
+        match exchange_conn.fire(req).await {
+            Ok(resp_vesicle) => {
+                let resp = cell_sdk::rkyv::from_bytes::<MarketMsg>(resp_vesicle.as_slice())
+                    .map_err(|e| anyhow::anyhow!("Deserialization failed: {:?}", e))?;
+
+                if let MarketMsg::SnapshotResponse { total_trades } = resp {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let rps = total_trades as f64 / elapsed;
+                    println!("[Metric] T+{}s: Total Trades: {} | {:.2} TPS", i, total_trades, rps);
+                }
+            }
+            Err(e) => eprintln!("[Metric] Failed to query exchange: {}", e),
         }
     }
 
@@ -58,163 +68,64 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// --- HELPER: WRITE SOURCE CODE TO DISK ---
-async fn setup_dna() -> Result<()> {
-    let home = dirs::home_dir().unwrap();
+async fn deploy_and_patch(
+    src_cells: &Path, 
+    sdk_path: &Path, 
+    consensus_path: &Path
+) -> Result<()> {
+    let home = dirs::home_dir().context("Home dir not found")?;
     let dna_root = home.join(".cell/dna");
 
-    // REMOVED: Manual cache deletion. Ribosome is now smart enough to handle this.
+    println!("[Deploy] Installing DNA to {:?}", dna_root);
 
-    // --- 1. THE EXCHANGE CELL SOURCE ---
-    let exchange_dir = dna_root.join("exchange");
-    write_project(
-        &exchange_dir, 
-        "exchange", 
-        r#"
-use anyhow::Result;
-use cell_sdk::{Membrane, Synapse}; 
-use cell_consensus::{RaftNode, RaftConfig, StateMachine};
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+    let components = vec!["protocol", "exchange", "trader"];
 
-include!("protocol.rs"); 
+    for component in components {
+        let src = src_cells.join(component);
+        let dst = dna_root.join(component);
 
-struct MarketState {
-    trade_count: AtomicU64,
-}
-impl StateMachine for MarketState {
-    fn apply(&self, _command: &[u8]) {
-        self.trade_count.fetch_add(1, Ordering::Relaxed);
-    }
-    fn snapshot(&self) -> Vec<u8> { vec![] }
-    fn restore(&self, _snapshot: &[u8]) {}
-}
+        if dst.exists() {
+            fs::remove_dir_all(&dst)?;
+        }
+        copy_dir_all(&src, &dst)?;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let state = Arc::new(MarketState { trade_count: AtomicU64::new(0) });
-    
-    // WAL at /tmp to work in read-only container
-    let wal_path = std::path::PathBuf::from("/tmp/market.wal");
-
-    let config = RaftConfig {
-        id: 1,
-        storage_path: wal_path,
-    };
-    let raft = RaftNode::new(config, state.clone()).await?;
-
-    println!("[Exchange] Consensus Active. Spawning Traders...");
-
-    for i in 0..5 {
-        tokio::spawn(async move {
-            let _ = Synapse::grow("trader").await;
-        });
+        let toml_path = dst.join("Cargo.toml");
+        patch_cargo_toml(&toml_path, sdk_path, consensus_path)?;
     }
 
-    println!("[Exchange] Listening for orders...");
+    Ok(())
+}
 
-    Membrane::bind("exchange", move |vesicle| {
-        let raft = raft.clone();
-        let state = state.clone();
-        
-        async move {
-            let msg = cell_sdk::rkyv::from_bytes::<MarketMsg>(vesicle.as_slice())
-                .map_err(|e| anyhow::anyhow!("Msg Error: {:?}", e))?;
-            
-            match msg {
-                MarketMsg::PlaceOrder { symbol: _, amount: _, side: _ } => {
-                    let _ = raft.propose(vec![1]).await.unwrap();
-                    
-                    let ack = MarketMsg::OrderAck { id: 1 };
-                    let bytes = cell_sdk::rkyv::to_bytes::<_, 16>(&ack)?.into_vec();
-                    Ok(cell_sdk::vesicle::Vesicle::wrap(bytes))
-                }
-                MarketMsg::SnapshotRequest => {
-                    let count = state.trade_count.load(Ordering::Relaxed);
-                    let resp = MarketMsg::SnapshotResponse { total_trades: count };
-                    let bytes = cell_sdk::rkyv::to_bytes::<_, 16>(&resp)?.into_vec();
-                    Ok(cell_sdk::vesicle::Vesicle::wrap(bytes))
-                }
-                _ => Ok(vesicle)
+fn patch_cargo_toml(path: &Path, sdk_path: &Path, consensus_path: &Path) -> Result<()> {
+    let content = fs::read_to_string(path)?;
+    // FIX: Parse into DocumentMut
+    let mut doc = content.parse::<DocumentMut>()?;
+
+    let replace_path = |doc: &mut DocumentMut, dep: &str, new_path: &Path| {
+        if let Some(item) = doc.get_mut("dependencies").and_then(|d| d.get_mut(dep)) {
+            if item.get("path").is_some() {
+                item["path"] = value(new_path.to_string_lossy().to_string());
             }
         }
-    }).await
-}
-"#).await?;
-
-    // --- 2. THE TRADER CELL SOURCE ---
-    let trader_dir = dna_root.join("trader");
-    write_project(
-        &trader_dir, 
-        "trader", 
-        r#"
-use anyhow::Result;
-use cell_sdk::{Synapse}; 
-use std::time::Duration;
-
-include!("protocol.rs");
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Retry connection loop
-    let mut conn = loop {
-        match Synapse::grow("exchange").await {
-            Ok(c) => break c,
-            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-        }
     };
+
+    replace_path(&mut doc, "cell-sdk", sdk_path);
+    replace_path(&mut doc, "cell-consensus", consensus_path);
     
-    // Rate limited loop
-    loop {
-        let order = MarketMsg::PlaceOrder { 
-            symbol: "CELL".to_string(), 
-            amount: 100, 
-            side: 0 
-        };
-        
-        if let Err(e) = conn.fire(order).await {
-            eprintln!("Trader error: {}", e);
-            tokio::time::sleep(Duration::from_secs(1)).await;
+    fs::write(path, doc.to_string())?;
+    Ok(())
+}
+
+fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<()> {
+    fs::create_dir_all(&dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
         }
-        
-        tokio::task::yield_now().await; 
     }
-}
-"#).await?;
-
     Ok(())
-}
-
-async fn write_project(dir: &Path, name: &str, code: &str) -> Result<()> {
-    fs::create_dir_all(dir.join("src")).await?;
-    fs::write(dir.join("src/protocol.rs"), PROTOCOL_SRC).await?;
-    fs::write(dir.join("src/main.rs"), code).await?;
-
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")?;
-    let root_path = Path::new(&manifest_dir).parent().unwrap().parent().unwrap();
-    let sdk_path = root_path.join("cell-sdk").display().to_string();
-    let consensus_path = root_path.join("cell-consensus").display().to_string();
-
-    let toml = format!(r#"
-[package]
-name = "{}"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-anyhow = "1.0"
-tokio = {{ version = "1", features = ["full"] }}
-cell-sdk = {{ path = "{}" }}
-cell-consensus = {{ path = "{}" }}
-"#, name, sdk_path, consensus_path);
-
-    fs::write(dir.join("Cargo.toml"), toml).await?;
-    Ok(())
-}
-
-#[protein]
-pub enum MarketMsg {
-    PlaceOrder { symbol: String, amount: u64, side: u8 },
-    OrderAck { id: u64 },
-    SnapshotRequest,
-    SnapshotResponse { total_trades: u64 },
 }

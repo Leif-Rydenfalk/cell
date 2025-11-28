@@ -1,44 +1,28 @@
 extern crate proc_macro;
 use proc_macro::TokenStream;
-use quote::{quote, ToTokens};
+use quote::quote;
 use std::fs;
 use std::path::PathBuf;
 use syn::parse::{Parse, ParseStream};
 use syn::{braced, parse_macro_input, DeriveInput, Expr, Field, Ident, Token, Type};
 
-/// The #[protein] attribute acts as the biological building block for data.
-///
-/// It automatically derives:
-/// - Serde (Serialize, Deserialize) for Polyglot/JSON support.
-/// - Rkyv (Archive, Serialize, Deserialize) for Zero-Copy Rust support.
-/// - Debug and Clone.
-///
-/// It also enforces `check_bytes` for security to prevent undefined behavior
-/// when reading untrusted memory.
 #[proc_macro_attribute]
 pub fn protein(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // We use DeriveInput to support both Structs and Enums
     let input = parse_macro_input!(item as DeriveInput);
 
     let expanded = quote! {
         #[derive(
-            // JSON / Polyglot Support
             ::cell_sdk::serde::Serialize,
             ::cell_sdk::serde::Deserialize,
-            // Zero-Copy Rust Support
             ::cell_sdk::rkyv::Archive,
             ::cell_sdk::rkyv::Serialize,
             ::cell_sdk::rkyv::Deserialize,
-            // Standard Traits
             Clone,
             Debug,
         )]
          #[serde(crate = "::cell_sdk::serde")]
-        // Point to the specific rkyv version re-exported by cell_sdk
         #[archive(crate = "::cell_sdk::rkyv")]
-        // Security: Validation of incoming bytes is mandatory
         #[archive(check_bytes)]
-        // Ensure the Zero-Copy view is also Debuggable
         #[archive_attr(derive(Debug))]
         #input
     };
@@ -56,8 +40,6 @@ pub fn signal_receptor(input: TokenStream) -> TokenStream {
 
     let schema_json = generate_json(&schema);
 
-    // Note: We manually apply the attributes here instead of using #[protein]
-    // because we are generating the structs from scratch, not decorating existing ones.
     let expanded = quote! {
         #[derive(
             ::cell_sdk::serde::Serialize,
@@ -126,6 +108,7 @@ pub fn call_as(input: TokenStream) -> TokenStream {
 // --- Internal Parsing Logic ---
 
 struct ReceptorDef {
+    #[allow(dead_code)] // name is parsed but not currently used in generation
     name: Ident,
     input_name: Ident,
     input_fields: Vec<Field>,

@@ -4,10 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cell-sdk = { path = "../../cell-sdk" }
-cell-consensus = { path = "../../cell-consensus" }
 anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-rand = "0.8"
+cell-sdk = { path = "../../cell-sdk" }
+protocol = { path = "./cells/protocol" }
 dirs = "5.0"
+toml_edit = "0.22"

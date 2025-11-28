@@ -1,0 +1,9 @@
+[package]
+name = "protocol"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# This path is a placeholder. It gets overwritten by the Orchestrator
+# when deployed to ~/.cell/dna.
+cell-sdk = { path = "../../../../cell-sdk" }
