@@ -2,7 +2,7 @@ pub mod wal;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use wal::{LogEntry, WriteAheadLog};
 
@@ -52,7 +52,7 @@ pub struct RaftNode {
     id: u64,
     wal_tx: mpsc::UnboundedSender<WalCmd>, 
     state_machine: Arc<dyn StateMachine>,
-    commit_index: Arc<Mutex<u64>>, 
+    commit_index: AtomicU64,
     network_tx: broadcast::Sender<RaftMessage>,
 }
 
@@ -71,13 +71,24 @@ impl RaftNode {
         }
         
         let last_index = entries.len() as u64;
+        let (wal_tx, mut wal_rx) = mpsc::unbounded_channel::<WalCmd>();
+        let mut wal = wal;          // move the opened log into the task
+        tokio::spawn(async move {
+            while let Some(cmd) = wal_rx.recv().await {
+                if let WalCmd::Append { entries, done } = cmd {
+                    let res = wal.append_batch(&entries).map_err(Into::into);
+                    let _ = done.send(res);
+                }
+            }
+        });
+
         let (tx, _) = broadcast::channel(100);
 
         Ok(Arc::new(Self {
             id: config.id,
             wal_tx,
             state_machine: sm,
-            commit_index: Arc::new(Mutex::new(last_index)),
+            commit_index: AtomicU64::new(last_index),
             network_tx: tx,
         }))
     }
@@ -86,9 +97,7 @@ impl RaftNode {
         let entry = LogEntry::Command(command.clone());
         self.append_via_channel(std::slice::from_ref(&entry)).await?;
         self.state_machine.apply(&command);
-        let mut idx = self.commit_index.lock().await;
-        *idx += 1;
-        Ok(*idx)
+        Ok(self.commit_index.fetch_add(1, Ordering::Release))
     }
 
     // NEW: Batch Proposal
@@ -108,10 +117,7 @@ impl RaftNode {
         }
 
         // 3. Update Index
-        let mut idx = self.commit_index.lock().await;
-        *idx += commands.len() as u64;
-        
-        Ok(*idx)
+        Ok(self.commit_index.fetch_add(commands.len() as u64, Ordering::Release))
     }
 
     // ----- 5.  Helper: channel + oneshot for back-pressure -----

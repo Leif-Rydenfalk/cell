@@ -1,6 +1,7 @@
 use anyhow::Result;
 use cell_sdk::{Synapse, protein};
 use std::time::Duration;
+use tokio::task::yield_now;  
 
 // --- SCHEMA DEFINITION (Client) ---
 // This reads ~/.cell/schema/MarketV1.lock
@@ -36,6 +37,7 @@ async fn main() -> Result<()> {
 
     println!("[Trader] Connected (FP: {:x}).", MarketMsg::SCHEMA_FINGERPRINT);
 
+    let mut count = 0;
     loop {
         let order = MarketMsg::SubmitBatch { count: 100 };
         match conn.fire(order).await {
@@ -45,7 +47,12 @@ async fn main() -> Result<()> {
                 break;
             }
         }
+
+        // --- co-operative yielding ---
+        count += 1;
+        if count % 500 == 0 {          // tune this number
+            yield_now().await;
+        }
     }
-    
     Ok(())
 }
