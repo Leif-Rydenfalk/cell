@@ -6,9 +6,5 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
-
-# These relative paths are valid for development in the IDE,
-# but the Orchestrator will rewrite them to Absolute Paths during deployment.
 cell-sdk = { path = "../../../../cell-sdk" }
 cell-consensus = { path = "../../../../cell-consensus" }
-protocol = { path = "../protocol" }

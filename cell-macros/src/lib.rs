@@ -3,13 +3,91 @@ use proc_macro::TokenStream;
 use quote::quote;
 use std::fs;
 use std::path::PathBuf;
-use syn::parse::{Parse, ParseStream};
-use syn::{braced, parse_macro_input, DeriveInput, Expr, Field, Ident, Token, Type};
+use syn::parse::{Parse, ParseStream, Parser};
+use syn::{braced, parse_macro_input, DeriveInput, Expr, Field, Ident, LitStr, Token, Type};
+
+// Helper to parse attributes: #[protein(class = "Exchange", version = 1)]
+struct ProteinArgs {
+    class: Option<String>,
+}
+
+impl ProteinArgs {
+    fn parse(attr: TokenStream) -> Self {
+        let mut class = None;
+        if !attr.is_empty() {
+            // simplistic parser for example purposes
+            let parser = syn::meta::parser(|meta| {
+                if meta.path.is_ident("class") {
+                    let value: LitStr = meta.value()?.parse()?;
+                    class = Some(value.value());
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            });
+            let _ = parser.parse(attr);
+        }
+        Self { class }
+    }
+}
 
 #[proc_macro_attribute]
-pub fn protein(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn protein(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = ProteinArgs::parse(attr);
     let input = parse_macro_input!(item as DeriveInput);
+    let struct_name = &input.ident;
 
+    // 1. Calculate Deterministic Hash of the AST
+    // We strip whitespace/comments by using the Debug repr of the AST or a specific traversal.
+    // For this proof-of-concept, we hash the stringified token stream which effectively
+    // fingerprints the structure definition.
+    let ast_string = quote!(#input).to_string();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(ast_string.as_bytes());
+    let hash_bytes = hasher.finalize();
+    let hash_hex = hash_bytes.to_hex().to_string();
+    let fp_bytes: [u8; 8] = hash_bytes.as_bytes()[0..8].try_into().unwrap(); // Take first 8 bytes
+    let fp_u64 = u64::from_le_bytes(fp_bytes);
+
+    // 2. Side-Effect: Publish or Verify Schema
+    // This happens during compilation on the host machine.
+    if let Some(class_name) = args.class {
+        let home = dirs::home_dir().expect("No home dir");
+        let schema_dir = home.join(".cell/schema");
+        let _ = fs::create_dir_all(&schema_dir);
+        let lock_file = schema_dir.join(format!("{}.lock", class_name));
+
+        // Logic: The first one to build (the authority) writes the lock.
+        // Subsequent builds (clients) verify against it.
+        // In a real system, you might separate #[protein(authority="...")] vs #[protein(client="...")]
+        // Here we use a simpler heuristic: If it exists, verify. If not, create.
+
+        if lock_file.exists() {
+            let expected_hash = fs::read_to_string(&lock_file).expect("Failed to read lockfile");
+            if expected_hash.trim() != hash_hex {
+                // *** THE MAGIC: COMPILE TIME FAILURE ***
+                return syn::Error::new_spanned(
+                    struct_name,
+                    format!(
+                        "SCHEMA MISMATCH! \n\
+                        Remote '{}' expects hash: {} \n\
+                        Local struct produces:    {} \n\
+                        Did the server update? Run 'cell clean' or update your struct definition.",
+                        class_name,
+                        expected_hash.trim(),
+                        hash_hex
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
+        } else {
+            // We are likely the server/authority, or the first one building.
+            fs::write(&lock_file, &hash_hex).expect("Failed to write schema lock");
+        }
+    }
+
+    // 3. Generate Code
     let expanded = quote! {
         #[derive(
             ::cell_sdk::serde::Serialize,
@@ -20,11 +98,16 @@ pub fn protein(_attr: TokenStream, item: TokenStream) -> TokenStream {
             Clone,
             Debug,
         )]
-         #[serde(crate = "::cell_sdk::serde")]
+        #[serde(crate = "::cell_sdk::serde")]
         #[archive(crate = "::cell_sdk::rkyv")]
         #[archive(check_bytes)]
         #[archive_attr(derive(Debug))]
         #input
+
+        // Embed the fingerprint in the binary for runtime checks too
+        impl #struct_name {
+            pub const SCHEMA_FINGERPRINT: u64 = #fp_u64;
+        }
     };
 
     TokenStream::from(expanded)

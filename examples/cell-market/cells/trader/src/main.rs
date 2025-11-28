@@ -1,7 +1,29 @@
 use anyhow::Result;
-use cell_sdk::Synapse;
+use cell_sdk::{Synapse, protein};
 use std::time::Duration;
-use protocol::MarketMsg;
+
+// --- SCHEMA DEFINITION (Client) ---
+// This reads ~/.cell/schema/MarketV1.lock
+// If I change a field here, the compiler will panic!
+#[protein(class = "MarketV1")]
+pub enum MarketMsg {
+    PlaceOrder {
+        symbol: String,
+        amount: u64,
+        side: u8,
+    },
+    SubmitBatch {
+        count: u32,
+    },
+    OrderAck {
+        id: u64,
+    },
+    SnapshotRequest,
+    SnapshotResponse {
+        total_trades: u64,
+    },
+}
+// ----------------------------------
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -12,20 +34,12 @@ async fn main() -> Result<()> {
         }
     };
 
-    println!("[Trader] Connected. Starting Batch Trading.");
+    println!("[Trader] Connected (FP: {:x}).", MarketMsg::SCHEMA_FINGERPRINT);
 
-    // Batch size of 100
-    let batch_size = 100;
-    
     loop {
-        // Instead of firing 1 msg, we fire a batch representation
-        let order = MarketMsg::SubmitBatch { count: batch_size };
-
+        let order = MarketMsg::SubmitBatch { count: 100 };
         match conn.fire(order).await {
-            Ok(_) => {
-                // Yield occasionally to be a good citizen
-                // tokio::task::yield_now().await;
-            }
+            Ok(_) => {}
             Err(_) => {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 break;
