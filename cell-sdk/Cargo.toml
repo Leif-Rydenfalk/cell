@@ -8,9 +8,18 @@ description = "Zero-copy RPC framework and runtime SDK."
 repository = { workspace = true }
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-anyhow = { workspace = true }
-humantime = { workspace = true }
-cell-macros = { workspace = true }
-rkyv = { workspace = true }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.36", features = [
+    "full",
+    "net",
+    "process",
+    "fs",
+    "sync",
+] }
+fd-lock = "4.0"
+rand = "0.8"
+cell-macros = { path = "../cell-macros" }
+rkyv = { version = "0.7", features = ["validation"] }
+users = "0.11"
+lazy_static = "1.4"
