@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use cell_cli::genesis::run_genesis;
+use cell_cli::genesis::{run_genesis, scan_cell_dependencies};
 use clap::{Parser, Subcommand};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -140,7 +140,34 @@ async fn ensure_active(
 
     sys_log("INFO", &format!("[{}] Checking dependencies...", cell_name));
 
-    for (axon_name, axon_addr) in &dna.axons {
+    // Combine explicit axons with implicit source code dependencies
+    let mut all_dependencies = dna.axons.clone();
+
+    // Auto-discovery: Scan code for 'call_as!(dep)' and find 'dep' in local workspace
+    if let Ok(meta) = scan_cell_dependencies(cell_path) {
+        for dep in meta.consumes {
+            if !all_dependencies.contains_key(&dep) {
+                if let Some(dep_path) = registry.get(&dep) {
+                    if let Ok(dep_txt) = std::fs::read_to_string(dep_path.join("Cell.toml")) {
+                        if let Ok(dep_dna) = toml::from_str::<Genome>(&dep_txt) {
+                            if let Some(listen) = dep_dna.genome.and_then(|g| g.listen) {
+                                sys_log(
+                                    "INFO",
+                                    &format!(
+                                        "[{}] Auto-discovered dependency '{}'",
+                                        cell_name, dep
+                                    ),
+                                );
+                                all_dependencies.insert(dep, format!("axon://{}", listen));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (axon_name, axon_addr) in &all_dependencies {
         let target_addr = resolve_address(axon_name, axon_addr).await;
 
         match target_addr {
@@ -205,7 +232,8 @@ async fn ensure_active(
     );
     run_genesis(cell_path)?;
 
-    snapshot_genomes(cell_path, &dna.axons).await?;
+    // Use the combined list (config + discovered) for snapshotting
+    snapshot_genomes(cell_path, &all_dependencies).await?;
 
     // --- LOGIC SPLIT: Interpreted vs Compiled ---
     let bin_path = if traits.runner.is_some() {
@@ -317,6 +345,20 @@ fn compile_cell(dir: &Path, name: &str) -> Result<PathBuf> {
         .output()?;
 
     if !output.status.success() {
+        // Parse cargo's JSON output to show the actual error
+        let reader = std::io::BufReader::new(output.stdout.as_slice());
+        use std::io::BufRead;
+        for line in reader.lines() {
+            if let Ok(l) = line {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&l) {
+                    if let Some(rendered) = val.get("message").and_then(|m| m.get("rendered")) {
+                        if let Some(s) = rendered.as_str() {
+                            println!("{}", s);
+                        }
+                    }
+                }
+            }
+        }
         anyhow::bail!("Compilation failed for {}", name);
     }
 
@@ -419,7 +461,7 @@ fn inventory_cells(dir: &Path, registry: &mut CellRegistry) -> Result<()> {
 }
 
 async fn snapshot_genomes(root: &Path, axons: &HashMap<String, String>) -> Result<()> {
-    let schema_dir = root.join(".cell-genomes");
+    let schema_dir = root.join(".cell").join("genomes");
     std::fs::create_dir_all(&schema_dir)?;
     let temp_id_path = root.join("run/temp_builder_identity");
     let identity = antigens::Antigens::load_or_create(temp_id_path)?;

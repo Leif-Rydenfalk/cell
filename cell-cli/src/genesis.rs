@@ -264,7 +264,7 @@ mod tests {
         // Run Genesis
         run_genesis(dir.path())?;
 
-        let schema_dir = dir.path().join(".cell-genomes");
+        let schema_dir = dir.path().join(".cell").join("genomes");
 
         // Assertions
         assert!(schema_dir.join("standard.json").exists());
