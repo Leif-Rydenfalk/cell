@@ -125,6 +125,13 @@ impl Golgi {
             let l = TcpListener::bind(addr).await.context("Axon bind failed")?;
             let local = l.local_addr()?;
             sys_log("INFO", &format!("Axon Interface online: {}", local));
+
+            // Publish the actual assigned port to disk so the CLI (main.rs)
+            // can verify this cell is alive during dependency resolution.
+            if let Some(parent) = self.socket_path.parent() {
+                let _ = std::fs::write(parent.join("axon_port"), local.port().to_string());
+            }
+
             (Some(l), local.port())
         } else {
             sys_log(
@@ -139,8 +146,24 @@ impl Golgi {
             &format!("Endocrine System active. Donor Mode: {}", self.is_donor),
         );
 
+        // Advertise the direct Cell Socket (Gap Junction) instead of the Golgi Socket.
+        // This ensures peers like 'brain' connect directly to 'retina' logic, preventing protocol mismatches.
+        let my_ipc_socket = {
+            let r = self.routes.read().await;
+            if let Some(Target::GapJunction(path)) = r.get(&self.name) {
+                // Canonicalize to ensure other processes can find the absolute path
+                path.canonicalize()
+                    .unwrap_or(path.clone())
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                // If we are a Colony (LB), we don't advertise a direct socket.
+                // Peers must use TCP/Axon logic to route through us.
+                String::new()
+            }
+        };
+
         // Convert path to absolute string for broadcasting.
-        // This is crucial for neighbors to find the socket file.
         let socket_path_str = self
             .socket_path
             .canonicalize()
@@ -148,13 +171,20 @@ impl Golgi {
             .to_string_lossy()
             .to_string();
 
+        // Use my_ipc_socket if found, otherwise fall back to socket_path_str (backward compat)
+        let advertise_path = if !my_ipc_socket.is_empty() {
+            my_ipc_socket
+        } else {
+            socket_path_str
+        };
+
         let mut rx = pheromones::EndocrineSystem::start(
             self.name.clone(),
             self.service_group.clone(),
             real_port,
             self.identity.public_key_str.clone(),
             self.is_donor,
-            Some(socket_path_str), // Advertise local path
+            Some(advertise_path), // <--- Advertising the direct cell socket
         )
         .await?;
 

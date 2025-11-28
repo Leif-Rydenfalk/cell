@@ -62,9 +62,7 @@ async fn run_cell_runtime(dir: &Path, bin_path: PathBuf, is_donor: bool) -> Resu
         .as_ref()
         .ok_or_else(|| anyhow!("No [genome] found"))?;
 
-    // --- NEW: Extract Runner ---
     let runner = traits.runner.as_ref();
-    // ---------------------------
 
     let mut routes = HashMap::new();
     let golgi_sock_path = run_dir.join("golgi.sock");
@@ -153,11 +151,13 @@ async fn run_cell_runtime(dir: &Path, bin_path: PathBuf, is_donor: bool) -> Resu
         );
     }
 
+    let listen_addr = traits.listen.clone().or(Some("0.0.0.0:0".to_string()));
+
     let golgi = Golgi::new(
         traits.name.clone(),
         &run_dir,
         &data_dir,
-        traits.listen.clone(),
+        listen_addr,
         routes,
         is_donor,
     )?;
