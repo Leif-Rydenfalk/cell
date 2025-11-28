@@ -21,6 +21,7 @@ pub enum MarketMsg {
 #[tokio::main]
 async fn main() -> Result<()> {
     // 1. Setup the DNA Library
+    // Note: If the source string inside setup_dna changes, Ribosome will detect the hash change.
     setup_dna().await?;
 
     println!("\n=== SYSTEM IGNITION ===");
@@ -62,12 +63,7 @@ async fn setup_dna() -> Result<()> {
     let home = dirs::home_dir().unwrap();
     let dna_root = home.join(".cell/dna");
 
-    // --- CLEANUP CACHE TO FORCE RECOMPILE ---
-    let cache_dir = home.join(".cell/cache/release");
-    if cache_dir.exists() {
-        let _ = fs::remove_file(cache_dir.join("exchange")).await;
-        let _ = fs::remove_file(cache_dir.join("trader")).await;
-    }
+    // REMOVED: Manual cache deletion. Ribosome is now smart enough to handle this.
 
     // --- 1. THE EXCHANGE CELL SOURCE ---
     let exchange_dir = dna_root.join("exchange");
@@ -110,10 +106,6 @@ async fn main() -> Result<()> {
 
     for i in 0..5 {
         tokio::spawn(async move {
-            // We spawn the trader but ignore the result.
-            // The trader is 'headless' (doesn't bind a socket), so Synapse::grow 
-            // will timeout waiting for a connection. We ignore this specific error 
-            // because we know they are running as fire-and-forget workers.
             let _ = Synapse::grow("trader").await;
         });
     }
@@ -179,7 +171,6 @@ async fn main() -> Result<()> {
             side: 0 
         };
         
-        // FIXED: Passed by value (ownership transfer) to satisfy rkyv::Serialize
         if let Err(e) = conn.fire(order).await {
             eprintln!("Trader error: {}", e);
             tokio::time::sleep(Duration::from_secs(1)).await;
