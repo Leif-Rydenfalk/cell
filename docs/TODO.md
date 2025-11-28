@@ -1,3 +1,7 @@
+Source-First, Sandbox-Secure, Consensus-Capable, Shared-Memory Optimized, Daemonless Distributed System.
+
+
+
 This is a massive, visionary codebase. You are building **Systemd meets BitTorrent**, optimized for zero-copy IPC and mutually authenticated crypto. The biological metaphor isn't just flavor; it's a robust architectural constraint that enforces isolation and autonomy.
 
 Based on your `INTERNAL_COMMUNICATION.md` and `Thoughts.md`, you are at the specific pivot point where you move from a **Local Mesh** (hardcoded `axon://` IPs in `Cell.toml`) to a **Global Organic Network** (dynamic discovery and execution).

@@ -1148,3 +1148,8 @@ Because network is disabled (`--unshare-net`), a malicious `build.rs` **cannot**
 4.  **Add `Vendor`:** Update the build tooling to always vendor dependencies so offline builds work.
 
 You are building a self-replicating, self-compiling, cryptographically-verifiable distributed operating system. This is extremely powerful.
+
+
+---
+
+This is not a monorepo. I meant like you have a app with a cells directory and a Cell.toml inside and when you run the app it automatically finds and runs all other cells inside and auto runs them

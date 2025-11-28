@@ -7,26 +7,23 @@ use std::path::Path;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum LogEntry {
     Command(Vec<u8>),
-    ConfigChange,
+    ConfigChange, // Placeholder for cluster membership changes
 }
 
-/// Disk-based Append-Only Log
-/// Format: [Len: u64][CRC: u32][Payload]
 pub struct WriteAheadLog {
     file: File,
 }
 
 impl WriteAheadLog {
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p)?;
         }
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(path)
-            .context("Failed to open WAL")?;
+            .open(path)?;
         Ok(Self { file })
     }
 
@@ -39,40 +36,32 @@ impl WriteAheadLog {
         self.file.write_all(&len.to_le_bytes())?;
         self.file.write_all(&crc.to_le_bytes())?;
         self.file.write_all(&bytes)?;
-        self.file.sync_data()?; // Durability flush
+        self.file.sync_data()?;
         Ok(())
     }
 
     pub fn read_all(&mut self) -> Result<Vec<LogEntry>> {
         let mut entries = Vec::new();
         self.file.seek(SeekFrom::Start(0))?;
-
         let mut len_buf = [0u8; 8];
         let mut crc_buf = [0u8; 4];
 
         loop {
-            // Check EOF by reading length
             if self.file.read_exact(&mut len_buf).is_err() {
                 break;
             }
             let len = u64::from_le_bytes(len_buf);
-
-            // Read CRC
             if self.file.read_exact(&mut crc_buf).is_err() {
                 break;
             }
-            let _expected = u32::from_le_bytes(crc_buf);
-
-            // Read Payload
+            let _crc = u32::from_le_bytes(crc_buf);
             let mut buf = vec![0u8; len as usize];
             if self.file.read_exact(&mut buf).is_err() {
                 break;
             }
 
-            // (Optional: Verify CRC here)
-
-            if let Ok(entry) = bincode::deserialize(&buf) {
-                entries.push(entry);
+            if let Ok(e) = bincode::deserialize(&buf) {
+                entries.push(e);
             }
         }
         Ok(entries)

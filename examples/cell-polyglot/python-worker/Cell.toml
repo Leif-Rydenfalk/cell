@@ -1,5 +1,0 @@
-[genome]
-name = "py-worker"
-runner = "python3"
-binary = "main.py"
-listen = "0.0.0.0:9005"
