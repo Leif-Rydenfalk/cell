@@ -123,7 +123,7 @@ pub fn import(input: TokenStream) -> TokenStream {
     // 1. Look for the cached genome file
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let cache_path = std::path::Path::new(&manifest_dir)
-        .join(".cell/genomes")
+        .join(".cell/data")
         .join(format!("{}.rs", cell_name));
 
     // 2. If missing, fail compilation with a helpful message
@@ -166,11 +166,11 @@ async fn sync(cell_name: &str) -> Result<()> {
     let source_code = conn.request_genome().await?;
     
     // 4. Save to local cache
-    let path = Path::new(".cell/genomes").join(format!("{}.rs", cell_name));
+    let path = Path::new(".cell/data").join(format!("{}.rs", cell_name));
     fs::create_dir_all(path.parent().unwrap())?;
     fs::write(&path, source_code)?;
     
-    println!("✅ Genome acquired. You can now use '{}' in your code.", cell_name);
+    println!("Genome acquired. You can now use '{}' in your code.", cell_name);
     Ok(())
 }
 ```
@@ -182,7 +182,7 @@ async fn sync(cell_name: &str) -> Result<()> {
 3.  **You** run `cargo build`.
     *   *Compiler Error: "Run membrane sync dad_bot"*
 4.  **You** run `membrane sync dad_bot`.
-    *   *System finds Dad, downloads struct definitions, saves to `.cell/genomes/dad_bot.rs`.*
+    *   *System finds Dad, downloads struct definitions, saves to `.cell/data/dad_bot.rs`.*
 5.  **You** run `cargo build`.
     *   *Success.* The compiler now sees Dad's structs in your code.
 6.  **You** change `annoyance_level` to a String.

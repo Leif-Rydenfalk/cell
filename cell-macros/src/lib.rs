@@ -105,7 +105,7 @@ pub fn call_as(input: TokenStream) -> TokenStream {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let schema_path = PathBuf::from(&manifest_dir)
         .join(".cell")
-        .join("genomes")
+        .join("data")
         .join(format!("{}.json", cell_str));
 
     let schema_json = match fs::read_to_string(&schema_path) {

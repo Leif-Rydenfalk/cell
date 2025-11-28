@@ -135,7 +135,7 @@ Here is exactly how the **Compile-Time Safety Net** catches a mismatch:
 1.  **The Snapshot (Mitosis):**
     The CLI connects to "Dad's Worker" and downloads `worker.json`.
     ```json
-    // .cell-genomes/worker.json
+    // .cell/data/worker.json
     {
       "input": "ProcessImageRequest",
       "output": "ImageResult"
@@ -146,7 +146,7 @@ Here is exactly how the **Compile-Time Safety Net** catches a mismatch:
     When you run `cargo build`, your code contains a macro that reads that JSON file.
     ```rust
     // src/main.rs
-    // The macro reads ".cell-genomes/worker.json" at compile time
+    // The macro reads ".cell/data/worker.json" at compile time
     #[cell::import(service = "worker")] 
     struct WorkerClient;
     ```

@@ -46,6 +46,15 @@ async fn main() -> Result<()> {
     }
 }
 
+// Path Constants
+pub fn get_schema_dir(cell_root: &Path) -> PathBuf {
+    cell_root.join(".cell").join("data")
+}
+
+pub fn get_port_file(cell_root: &Path) -> PathBuf {
+    cell_root.join(".cell").join("run").join("axon_port")
+}
+
 async fn wallet(dir: &Path) -> Result<()> {
     let run_dir = dir.join("run");
     if !run_dir.exists() {
@@ -143,32 +152,26 @@ async fn ensure_active(
     // Combine explicit axons with implicit source code dependencies
     let mut all_dependencies = dna.axons.clone();
 
-    // Auto-discovery: Scan code for 'call_as!(dep)' and find 'dep' in local workspace
+    // Auto-discovery logic update
     if let Ok(meta) = scan_cell_dependencies(cell_path) {
         for dep in meta.consumes {
             if !all_dependencies.contains_key(&dep) {
                 if let Some(dep_path) = registry.get(&dep) {
-                    if let Ok(dep_txt) = std::fs::read_to_string(dep_path.join("Cell.toml")) {
-                        if let Ok(dep_dna) = toml::from_str::<Genome>(&dep_txt) {
-                            if let Some(listen) = dep_dna.genome.and_then(|g| g.listen) {
-                                sys_log(
-                                    "INFO",
-                                    &format!(
-                                        "[{}] Auto-discovered dependency '{}'",
-                                        cell_name, dep
-                                    ),
-                                );
-                                all_dependencies.insert(dep, format!("axon://{}", listen));
-                            }
-                        }
-                    }
+                    // We found the dependency locally.
+                    // We don't care what port it wants (Cell.toml).
+                    // We will find out what port it gets later.
+                    sys_log(
+                        "INFO",
+                        &format!("[{}] Auto-linked local cell '{}'", cell_name, dep),
+                    );
+                    all_dependencies.insert(dep, "axon://auto".to_string());
                 }
             }
         }
     }
 
     for (axon_name, axon_addr) in &all_dependencies {
-        let target_addr = resolve_address(axon_name, axon_addr).await;
+        let target_addr = resolve_address(axon_name, axon_addr, registry).await;
 
         match target_addr {
             Ok(addr) => {
@@ -205,7 +208,7 @@ async fn ensure_active(
 
             let mut attempts = 0;
             loop {
-                if let Ok(addr) = resolve_address(axon_name, axon_addr).await {
+                if let Ok(addr) = resolve_address(axon_name, axon_addr, registry).await {
                     if verify_tcp(&addr).await.is_ok() {
                         break;
                     }
@@ -233,7 +236,7 @@ async fn ensure_active(
     run_genesis(cell_path)?;
 
     // Use the combined list (config + discovered) for snapshotting
-    snapshot_genomes(cell_path, &all_dependencies).await?;
+    snapshot_genomes(cell_path, &all_dependencies, registry).await?;
 
     // --- LOGIC SPLIT: Interpreted vs Compiled ---
     let bin_path = if traits.runner.is_some() {
@@ -275,14 +278,37 @@ async fn ensure_active(
     Ok(())
 }
 
-async fn resolve_address(name: &str, raw_addr: &str) -> Result<String> {
+async fn resolve_address(name: &str, raw_addr: &str, registry: &CellRegistry) -> Result<String> {
+    // 1. Explicit IP Check
+    // If the address contains a colon (IP:Port) and isn't the placeholder "auto", use it directly.
     let clean = raw_addr.replace("axon://", "");
-    if clean.contains(':') {
+    if clean.contains(':') && clean != "auto" {
         if tokio::net::lookup_host(&clean).await.is_ok() {
             return Ok(clean);
         }
     }
 
+    // 2. Local Registry Check (Dynamic Port Discovery)
+    // If the cell is in our local workspace, we check its run directory for the port assigned by the OS.
+    if let Some(path) = registry.get(name) {
+        let port_file = path.join(".cell").join("run").join("axon_port");
+
+        // Attempt to read the port file for up to 2 seconds (20 * 100ms).
+        // The cell might be in the process of booting and hasn't written the file yet.
+        for _ in 0..20 {
+            if port_file.exists() {
+                if let Ok(content) = std::fs::read_to_string(&port_file) {
+                    if let Ok(port) = content.trim().parse::<u16>() {
+                        return Ok(format!("127.0.0.1:{}", port));
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    // 3. Network Discovery (Pheromones/UDP Multicast)
+    // Fallback for cells running on other machines or not found in the local registry.
     sys_log(
         "INFO",
         &format!("Searching network for '{}' (Pheromones)...", name),
@@ -460,14 +486,18 @@ fn inventory_cells(dir: &Path, registry: &mut CellRegistry) -> Result<()> {
     Ok(())
 }
 
-async fn snapshot_genomes(root: &Path, axons: &HashMap<String, String>) -> Result<()> {
-    let schema_dir = root.join(".cell").join("genomes");
+async fn snapshot_genomes(
+    root: &Path,
+    axons: &HashMap<String, String>,
+    registry: &CellRegistry,
+) -> Result<()> {
+    let schema_dir = get_schema_dir(root);
     std::fs::create_dir_all(&schema_dir)?;
     let temp_id_path = root.join("run/temp_builder_identity");
     let identity = antigens::Antigens::load_or_create(temp_id_path)?;
 
     for (name, raw_addr) in axons {
-        let addr = resolve_address(name, raw_addr).await?;
+        let addr = resolve_address(name, raw_addr, registry).await?;
         sys_log(
             "INFO",
             &format!("Snapshotting schema from {} ({})", name, addr),

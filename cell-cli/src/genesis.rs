@@ -55,13 +55,13 @@ pub fn scan_cell_dependencies(cell_root: &Path) -> Result<CellMeta> {
 }
 
 /// Recursively scans the project's `src` folder for `signal_receptor!` definitions
-/// and generates the `.cell-genomes/{name}.json` files required for compilation.
+/// and generates the `.cell/data/{name}.json` files required for compilation.
 pub fn run_genesis(root: &Path) -> Result<()> {
     let src_dir = root.join("src");
 
     // Unified directory structure
     let cell_dir = root.join(".cell");
-    let schema_dir = cell_dir.join("genomes");
+    let schema_dir = cell_dir.join("data");
 
     // If src doesn't exist (e.g. workspace root), we skip silently
     if !src_dir.exists() {
@@ -264,7 +264,7 @@ mod tests {
         // Run Genesis
         run_genesis(dir.path())?;
 
-        let schema_dir = dir.path().join(".cell").join("genomes");
+        let schema_dir = dir.path().join(".cell").join("data");
 
         // Assertions
         assert!(schema_dir.join("standard.json").exists());

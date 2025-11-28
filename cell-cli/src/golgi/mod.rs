@@ -70,8 +70,8 @@ impl Golgi {
     /// Loads identity and economy (Mitochondria) subsystems.
     pub fn new(
         name: String,
-        run_dir: &std::path::Path,  // Where sockets go (.cell/run)
-        data_dir: &std::path::Path, // Where persistent data goes (.cell/data)
+        run_dir: &std::path::Path,  // Where sockets go
+        data_dir: &std::path::Path, // Where persistent data goes
         axon_bind: Option<String>,
         routes_map: HashMap<String, Target>,
         is_donor: bool,
