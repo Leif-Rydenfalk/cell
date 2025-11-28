@@ -1,95 +1,146 @@
-This is **Cell**, a biological-inspired distributed supercomputing substrate written in Rust.  
-Think of it as a **peer-to-peer, secure, micro-service mesh** that lets you:
+# Cell – Biological Distributed Super-computing Substrate
 
-* Declare services (“cells”) with a single macro (`signal_receptor!`).  
-* Compile each cell to a native binary that speaks QUIC + Noise.  
-* Boot an entire application cluster with one CLI command (`cell mitosis`).  
-* Pay / get paid in “ATP” tokens for the CPU time you consume / provide.  
-* Discover peers automatically via UDP multicast “pheromones” or a lighthouse.  
-* Route traffic through Unix sockets locally and QUIC remotely with zero-copy serialization (rkyv).  
-* Observe everything through a built-in log rotator (“vacuole”) and cgroup-aware billing.
+Run millions of zero-copy messages per second between sandboxed micro-services that behave like living cells.
 
-Key components
---------------
+---
 
-| Folder/file | Purpose |
-|-------------|---------|
-| `cell-cli/` | The daemon / orchestrator binary (`membrane`).  Handles compilation, spawning, discovery, routing, crypto, billing. |
-| `cell-sdk/` | Library you link into every cell.  Gives the `signal_receptor!` macro, `Membrane::bind`, `Synapse::grow`, zero-copy `Vesicle` containers. |
-| `cell-macros/` | Procedural macros that generate the request/response types and the `call_as!` client code from a single declaration. |
-| `examples/cell-bench/` | A tiny load-test: a “worker” cell that burns CPU and a “coordinator” cell that floods it with jobs. |
-| `examples/cell-mesh/` | 50-replica chat-like mesh that measures 1-way latency at >10 kHz. |
-
-Biological names map to CS concepts
------------------------------------
-
-| Biology | Computing |
-|---------|-----------|
-| Genome | `Cell.toml` metadata (name, listen addr, replicas, dependencies). |
-| Cell | One Rust binary that implements a `signal_receptor!`. |
-| Nucleus | The `ChildGuard` that spawns the cell and tracks CPU / RSS via cgroups. |
-| Mitochondria | Ledger file (`mitochondria.json`) that mints or burns ATP for every millisecond of work. |
-| Golgi | QUIC + Unix-socket router that lives in every cell; does service discovery, load-balancing, crypto handshake, and billing. |
-| Synapse | Noise-encrypted QUIC stream between two Golgi instances. |
-| Vesicle | Aligned, zero-copy buffer used for messages. |
-| Vacuole | Background log writer that rotates 10 MB files and applies back-pressure. |
-| Pheromones | UDP multicast announcements (`239.255.0.1:9099`) containing cell name, public key, QUIC port, and donor flag. |
-| Axon | TCP QUIC listener exposed to the outside world. |
-| Gap junction | Unix-domain socket used for local IPC. |
-
-Quick start (single machine)
-----------------------------
+## 30-second Demo
 
 ```bash
-# 1. Clone
 git clone https://github.com/Leif-Rydenfalk/cell
-cd cell
-
-# 2. Build
-cargo build --release
-
-# 3. Run the bench cluster
-cd examples/cell-bench
-cargo run --bin membrane -- mitosis .               # boots 4 workers + coordinator
-# in another terminal
-cargo run --bin coordinator
+cd cell/examples/cell-market
+cargo run --release
 ```
 
-You’ll see the coordinator discovering the workers via pheromones, then printing >100 kReq/s with sub-millisecond RTT on a laptop.
+On a 2013 Intel i5 you should see ~9.5 M trades/sec processed by five auto-spawned trader cells talking to a consensus-backed exchange.
 
-Security
---------
+---
 
-* Every cell has an Ed25519 keypair (`~/.cell/identity` or `run/identity`).  
-* Handshake uses Noise `XX_25519_ChaChaPoly_BLAKE2s` and is **mutually authenticated**; the remote static key becomes the peer identity used for billing.  
-* Self-signed certificates are generated on the fly and rotated per run; the cert SAN contains the cell name so the lighthouse can verify it.
+## What is Cell?
 
-Billing / tokenomics
---------------------
+Cell is a **biologically-inspired** runtime for building **secure, high-throughput, distributed applications** in Rust.
 
-* 1 ATP = 100 ms of CPU time (wall-clock used as proxy in MVP).  
-* ATP is **minted** by the donor when it finishes a job for a client.  
-* ATP is **burned** by the client when it starts a job on a donor.  
-* Negative balance is allowed (credit), but you can’t download new cells from the network without ATP.  
-* Ledger is a simple JSON file; in a real deployment this would be a content-addressed chain.
+* **Cell**     – a sandboxed process (Linux namespace / bwrap / Podman)  
+* **Membrane** – the Unix-domain socket it listens on  
+* **Vesicle**  – a zero-copy message (rkyv-serialised, mem-mapped)  
+* **Synapse**  – a typed client that grows automatically  
+* **DNA**      – the source code that is compiled on first use (cached in `~/.cell/cache`)  
+* **Mycelium Root** – the host daemon that spawns cells on demand  
 
-Limitations / roadmap
----------------------
+---
 
-* MVP trusts the client’s measurement of CPU time; real version would read `/sys/fs/cgroup/.../cpu.stat`.  
-* No garbage-collection of dead peers yet; pheromone table grows forever.  
-* Lighthouse is a single UDP rendezvous server; replace with DHT.  
-* No NAT-hole-punching beyond simple “both sides connect to lighthouse”.  
-* ATP is not a real blockchain token (yet).  
+## Performance (single core, old hardware)
 
-But as a **zero-dependency, single-binary, <5 kLOC proof-of-concept**, Cell already shows:
+| Metric               | cell-market demo |
+|----------------------|------------------|
+| messages per second  | 9.5 M            |
+| median latency       | <1 µs (Unix sock) |
+| batch 100 messages   | 1 disk sync      |
+| memory copy count    | 0 (rkyv archived) |
 
-* 100 k+ RPC/s on localhost (Unix sockets).  
-* 10 k+ RPC/s between laptops over Wi-Fi (QUIC).  
-* End-to-end encryption, service discovery, load-balancing, logging, and billing in one `cargo run`.
+---
+
+## Project Layout
+
+```
+cell/
+├── cell-sdk/          # Runtime SDK (Membrane, Synapse, Vesicle, …)
+├── cell-consensus/    # Embeddable Raft + batched WAL
+├── cell-macros/       # `#[protein]` and `signal_receptor!` for codegen
+└── examples/          # Living demos
+    └── cell-market/   # 9 M TPS market simulation
+```
+
+---
+
+## Writing a Cell
+
+1. **Define the protocol**
+
+```rust
+use cell_sdk::protein;
+
+#[protein]
+pub enum PingMsg {
+    Ping(u64),
+    Pong(u64),
+}
+```
+
+2. **Implement the cell**
+
+```rust
+use cell_sdk::{Membrane, vesicle::Vesicle};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    Membrane::bind("pong", |v: Vesicle| async move {
+        let ping = rkyv::from_bytes::<PingMsg>(v.as_slice())?;
+        let pong = PingMsg::Pong(ping.0);
+        Ok(Vesicle::wrap(rkyv::to_bytes::<_,16>(&pong)?.into_vec()))
+    }).await
+}
+```
+
+3. **Call it from anywhere**
+
+```rust
+let mut syn = Synapse::grow("pong").await?;
+let reply = syn.fire(PingMsg::Ping(42)).await?;
+```
+
+---
+
+## Security Model
+
+* **No network by default** – cells share a Unix socket directory only  
+* **Read-only root-fs** – code cannot be modified at runtime  
+* **User-namespace mapping** – files created by the container belong to the host user  
+* **Resource limits** – CPU / memory cgroup quotas (Podman path)  
+* **Automatic sandbox escape prevention** – `bwrap --unshare-all --die-with-parent`
+
+---
+
+## How it Works
+
+1. **Mycelium Root** listens on `~/.cell/run/mitosis.sock`  
+2. `Synapse::grow("name")` asks Root to spawn the binary if the socket is absent  
+3. Root compiles the DNA (incremental, cached) and launches the cell inside Capsid (bwrap)  
+4. Cell binds its Membrane socket (`/tmp/cell/name.sock` inside the container, `~/.cell/run/name.sock` on host)  
+5. Messages are rkyv-serialised, sent over the Unix socket, and **zero-copy deserialised** on the receiver side  
+6. Optional: embed `cell-consensus` for disk-backed Raft consensus with **batch-append WAL** (single `fsync` per batch)
+
+---
+
+## Requirements
+
+* Linux 5.10+ (for `memfd`, `user-ns`, `cgroup v2`)  
+* Rust 1.75+  
+* bubblewrap (`bwrap`) installed (or Podman for rootless containers)  
+
+---
+
+## Environment Variables
+
+| Variable           | Purpose                                      |
+|--------------------|----------------------------------------------|
+| `CELL_SOCKET_DIR`  | Override socket directory (default `~/.cell/run`) |
+| `CELL_UMBILICAL`   | Override Mycelium Root socket                |
+| `CELL_GOLGI_SOCK`  | Used by QUIC transport (future)              |
+
+---
+
+## Road-map / Ideas
+
+* QUIC-based inter-host pheromone routing  
+* GPU vesicles (CUDA memory-mapped buffers)  
+* eBPF packet filtering inside Membrane  
+* Hot swap DNA without dropping connections  
+* Web-assembly ribosome (compile once, run anywhere)
+
+---
 
 ## License
-MIT OR Apache-2.0 – do what you want.
 
-## Author
-17 y/o, self-taught. 
+MIT OR Apache-2.0  
+Built with ❤️ and a touch of chlorophyll.
