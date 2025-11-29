@@ -1,31 +1,9 @@
 use anyhow::Result;
-use cell_sdk::*;
+use cell_sdk::cell_remote;
+use cell_sdk::synapse::Synapse;
 
-// SYNCED CONTRACT: Must match Renderer exactly to ensure correct serialization layout
-#[protein(class = "RetinaContract")]
-pub enum RenderCommand {
-    RegisterPass {
-        id: String,
-        shader_source: String,
-        topology: String,
-    },
-    UpdateResource {
-        id: String,
-        data: Vec<u8>,
-    },
-    SpawnEntity {
-        id: String,
-        pass_id: String,
-        resource_id: String,
-        vertex_count: u32,
-    },
-    SetCamera {
-        position: [f32; 3],
-        target: [f32; 3],
-        up: [f32; 3],
-    },
-    GetInputState,
-}
+// Generates 'RendererService' client struct from the renderer's source code
+cell_remote!(RendererService = "renderer");
 
 const SHADER: &str = r#"
 struct VertexOutput { @builtin(position) pos: vec4<f32>, @location(0) color: vec3<f32>, };
@@ -38,14 +16,18 @@ struct VertexOutput { @builtin(position) pos: vec4<f32>, @location(0) color: vec
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("[Atlas] Connecting...");
-    let mut retina = Synapse::grow("renderer").await?;
+    let mut retina = RendererService::connect().await?;
+    println!("[Atlas] Connected.");
 
     // 1. Send Shader
-    retina.fire(RenderCommand::RegisterPass {
-        id: "voxel".into(),
-        shader_source: SHADER.into(),
-        topology: "TriangleList".into(),
-    }).await?;
+    // Signature matches renderer: register_pass(id, shader_source, inputs, outputs, topology)
+    retina.register_pass(
+        "voxel".into(),
+        SHADER.into(),
+        vec![], // inputs
+        vec![], // outputs
+        "TriangleList".into()
+    ).await?;
 
     // 2. Send Geometry
     let vertices: &[f32] = &[
@@ -55,8 +37,11 @@ async fn main() -> Result<()> {
     ];
     let data = bytemuck::cast_slice(vertices).to_vec();
 
-    retina.fire(RenderCommand::UpdateResource { id: "tri".into(), data }).await?;
-    retina.fire(RenderCommand::SpawnEntity { id: "ent1".into(), pass_id: "voxel".into(), resource_id: "tri".into(), vertex_count: 3 }).await?;
+    // update_resource(id, data)
+    retina.update_resource("tri".into(), data).await?;
+    
+    // spawn_entity(id, pass_id, resource_id, vertex_count)
+    retina.spawn_entity("ent1".into(), "voxel".into(), "tri".into(), 3).await?;
 
     println!("[Atlas] Job done.");
     loop { tokio::time::sleep(std::time::Duration::from_secs(3600)).await; }

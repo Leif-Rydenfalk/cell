@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-// Auto-generate client from source
+// This macro reads ../exchange/src/main.rs, parses the #[cell::handler] block,
+// and generates a strictly typed 'ExchangeClient' struct.
 cell_remote!(ExchangeClient = "exchange");
 
 #[tokio::main]
@@ -42,8 +43,8 @@ async fn main() -> Result<()> {
     
     // Tight Loop
     loop {
-        // We verify the call succeeds, but don't parse the response to measure
-        // raw throughput of the Cell RPC system.
+        // ExchangeClient::submit_batch is auto-generated.
+        // It returns Result<u64> (the ID) which we ignore for pure throughput testing.
         match exchange.submit_batch(100).await {
             Ok(_) => {
                 req_count.fetch_add(1, Ordering::Relaxed);

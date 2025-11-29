@@ -1,6 +1,4 @@
 target/
 run/
-run
-.cell
-.cell-genomes
-trash
+.cell/
+trash/

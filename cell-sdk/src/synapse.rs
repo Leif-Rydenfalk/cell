@@ -84,6 +84,10 @@ impl Synapse {
             .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))?
             .into_vec();
 
+        self.fire_bytes(bytes).await
+    }
+
+    pub async fn fire_bytes(&mut self, bytes: Vec<u8>) -> Result<Vesicle> {
         self.stream
             .write_all(&(bytes.len() as u32).to_le_bytes())
             .await?;

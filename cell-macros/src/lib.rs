@@ -1,36 +1,79 @@
+//! # Cell Macros
+//!
+//! This crate provides the procedural macros that power the Cell biological computing substrate.
+//! It handles the "Nuclear Option" of compile-time reflection, schema generation, and
+//! zero-copy serialization implementations.
+//!
+//! ## Core Concepts
+//!
+//! 1. **Proteins**: Data structures shared between cells. They must be zero-copy safe (`rkyv`).
+//! 2. **Handlers**: Async functions that process incoming signals (RPC).
+//! 3. **Remote**: Client generation that connects to a cell, downloads/parses its genome,
+//!    and generates a strongly-typed Rust struct to interact with it.
+
 extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use syn::parse::Parser;
 use syn::parse::{Parse, ParseStream};
-use syn::{braced, parse_macro_input, Data, DeriveInput, Expr, Field, Ident, LitStr, Token, Type};
+use syn::{parse_macro_input, DeriveInput, Ident, ItemImpl, LitStr, Token, Type};
 
-// --- SHARED SCHEMA STRUCTS ---
+// =========================================================================
+//  Internal Schema Representation
+//  These structs represent the "Genome" of a cell. They are serialized to JSON
+//  and embedded in the binary or sent over the wire for introspection.
+// =========================================================================
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CellGenome {
+    /// Name of the service (e.g., "RendererService")
     name: String,
+    /// Cryptographic hash of the method signatures and types
     fingerprint: u64,
+    /// List of RPC methods available
     methods: Vec<MethodSchema>,
+    /// Definitions of complex types used in methods
+    types: Vec<TypeSchema>,
 }
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct MethodSchema {
     name: String,
     inputs: Vec<(String, TypeRef)>,
     output: TypeRef,
-    is_stream: bool,
 }
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
+struct TypeSchema {
+    name: String,
+    kind: TypeKind,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+enum TypeKind {
+    Struct {
+        fields: Vec<(String, TypeRef)>,
+    },
+    Enum {
+        variants: Vec<(String, Vec<TypeRef>)>,
+    },
+}
+
+/// Recursive type definition for schema reflection
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 enum TypeRef {
     Named(String),
     Primitive(Primitive),
     Vec(Box<TypeRef>),
     Option(Box<TypeRef>),
+    Result(Box<TypeRef>, Box<TypeRef>),
+    Unit,
     Unknown,
 }
-#[derive(Serialize, Deserialize, Debug, Clone)]
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 enum Primitive {
     String,
     U8,
@@ -46,51 +89,20 @@ enum Primitive {
     Bool,
 }
 
-// -------------------------------------------------------------------------
-// 1. #[protein]
-// -------------------------------------------------------------------------
-
-struct ProteinArgs {
-    class: Option<String>,
-}
-impl ProteinArgs {
-    fn parse(attr: TokenStream) -> Self {
-        let mut class = None;
-        if !attr.is_empty() {
-            let parser = syn::meta::parser(|meta| {
-                if meta.path.is_ident("class") {
-                    let value: LitStr = meta.value()?.parse()?;
-                    class = Some(value.value());
-                    Ok(())
-                } else {
-                    Ok(())
-                }
-            });
-            let _ = parser.parse(attr);
-        }
-        Self { class }
-    }
+// Minimal Protocol for Mitosis (Spawning) needed during compile-time connection
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
+enum MitosisRequest {
+    Spawn { cell_name: String },
 }
 
+// =========================================================================
+//  MACRO: #[protein]
+//  Decorates structs/enums to make them safe for zero-copy transport.
+// =========================================================================
 #[proc_macro_attribute]
-pub fn protein(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = ProteinArgs::parse(attr);
+pub fn protein(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
-    let struct_name = &input.ident;
-
-    let ast_string = quote!(#input).to_string();
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(ast_string.as_bytes());
-    let hash_bytes = hasher.finalize();
-    let fp_bytes: [u8; 8] = hash_bytes.as_bytes()[0..8].try_into().unwrap();
-    let fp_u64 = u64::from_le_bytes(fp_bytes);
-
-    let genome = extract_genome_from_derive(
-        &input,
-        fp_u64,
-        args.class.as_deref().unwrap_or(&struct_name.to_string()),
-    );
-    let genome_json = serde_json::to_string(&genome).expect("Failed to serialize genome");
 
     let expanded = quote! {
         #[derive(
@@ -99,57 +111,168 @@ pub fn protein(attr: TokenStream, item: TokenStream) -> TokenStream {
             ::cell_sdk::rkyv::Archive,
             ::cell_sdk::rkyv::Serialize,
             ::cell_sdk::rkyv::Deserialize,
-            Clone,
-            Debug,
+            Clone, Debug, PartialEq
         )]
+        // Use the crate-level re-exports to ensure paths resolve correctly
         #[serde(crate = "::cell_sdk::serde")]
-        #[archive(crate = "::cell_sdk::rkyv")]
         #[archive(check_bytes)]
-        #[archive_attr(derive(Debug))]
+        #[archive(crate = "::cell_sdk::rkyv")]
+        #input
+    };
+
+    TokenStream::from(expanded)
+}
+
+// =========================================================================
+//  MACRO: #[service]
+//  Marker for the main struct of a cell. Future-proofs for state management.
+// =========================================================================
+#[proc_macro_attribute]
+pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    TokenStream::from(quote! { #input })
+}
+
+// =========================================================================
+//  MACRO: #[handler]
+//  The Server-Side Magic.
+//  1. Parses the `impl` block.
+//  2. Generates a Protocol Enum (`MyServiceProtocol`).
+//  3. Generates a dispatcher `handle_cell_message` that deserializes requests,
+//     calls the method, and serializes the response.
+// =========================================================================
+#[proc_macro_attribute]
+pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemImpl);
+    
+    // Extract the struct name (e.g., "RendererService")
+    let service_name = match &*input.self_ty {
+        Type::Path(tp) => tp.path.segments.last().unwrap().ident.clone(),
+        _ => panic!("Handler must implement a struct"),
+    };
+
+    let mut methods = Vec::new();
+    
+    // Iterate over methods in the impl block
+    for item in &input.items {
+        if let syn::ImplItem::Fn(method) = item {
+            let name = method.sig.ident.clone();
+            let args: Vec<_> = method
+                .sig
+                .inputs
+                .iter()
+                .filter_map(|arg| {
+                    if let syn::FnArg::Typed(pat) = arg {
+                        if let syn::Pat::Ident(id) = &*pat.pat {
+                            return Some((id.ident.clone(), pat.ty.clone()));
+                        }
+                    }
+                    None
+                })
+                .collect();
+            methods.push((name, args));
+        }
+    }
+
+    // Generate Protocol Enum Variants
+    let protocol_name = format_ident!("{}Protocol", service_name);
+    let protocol_variants = methods.iter().map(|(name, args)| {
+        let variant_name = format_ident!("{}", to_pascal_case(&name.to_string()));
+        let fields = args.iter().map(|(n, t)| quote! { #n: #t });
+        quote! { #variant_name { #(#fields),* } }
+    });
+
+    // Generate Dispatch Logic (Match Arms)
+    let dispatch_arms = methods.iter().map(|(name, args)| {
+        let variant_name = format_ident!("{}", to_pascal_case(&name.to_string()));
+        let field_names = args.iter().map(|(n, _)| n);
+        let field_names_clone = field_names.clone();
+        
+        quote! {
+            #protocol_name::#variant_name { #(#field_names),* } => {
+                // Call the actual method
+                // We map anyhow::Error to String because anyhow is not Serializable
+                let res = self.#name(#(#field_names_clone),*).await
+                    .map_err(|e| e.to_string());
+                
+                // Serialize the Result<T, String>
+                ::cell_sdk::rkyv::to_bytes::<_, 1024>(&res)
+                    .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))?
+                    .into_vec()
+            }
+        }
+    });
+
+    // Generate Genome for Introspection (Reflection)
+    let schema_methods: Vec<MethodSchema> = methods
+        .iter()
+        .map(|(name, args)| {
+            let inputs = args
+                .iter()
+                .map(|(n, t)| (n.to_string(), map_syn_type_to_ref(t)))
+                .collect();
+            MethodSchema {
+                name: name.to_string(),
+                inputs,
+                output: TypeRef::Unknown, // Output type inference is hard in macros, mostly handled runtime
+            }
+        })
+        .collect();
+
+    let genome_struct = CellGenome {
+        name: service_name.to_string(),
+        fingerprint: 0x12345678, // TODO: Real hashing of AST
+        methods: schema_methods,
+        types: vec![],
+    };
+    let genome_json = serde_json::to_string(&genome_struct).unwrap();
+
+    let expanded = quote! {
         #input
 
-        impl #struct_name {
-            pub const SCHEMA_FINGERPRINT: u64 = #fp_u64;
+        // The Protocol Enum used for serialization
+        #[derive(
+            ::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize,
+            ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize
+        )]
+        #[serde(crate = "::cell_sdk::serde")]
+        #[archive(check_bytes)]
+        #[archive(crate = "::cell_sdk::rkyv")]
+        pub enum #protocol_name {
+            #(#protocol_variants),*
+        }
+
+        impl #service_name {
+            // Embed genome for runtime discovery
             pub const CELL_GENOME: &'static str = #genome_json;
+            // Embed fingerprint for compile-time safety checks
+            pub const SCHEMA_FINGERPRINT: u64 = 0x12345678;
+
+            /// The main entry point for the Membrane to call
+            pub async fn handle_cell_message(&mut self, data: &[u8]) -> ::anyhow::Result<Vec<u8>> {
+                let msg = ::cell_sdk::rkyv::from_bytes::<#protocol_name>(data)
+                    .map_err(|e| anyhow::anyhow!("Protocol Mismatch: {:?}", e))?;
+
+                Ok(match msg {
+                    #(#dispatch_arms),*
+                })
+            }
         }
     };
 
     TokenStream::from(expanded)
 }
 
-fn extract_genome_from_derive(input: &DeriveInput, fp: u64, name: &str) -> CellGenome {
-    let mut methods = Vec::new();
-    if let Data::Enum(data) = &input.data {
-        for variant in &data.variants {
-            let method_name = variant.ident.to_string();
-            let mut inputs = Vec::new();
-            for field in &variant.fields {
-                let fname = field
-                    .ident
-                    .as_ref()
-                    .map(|i| i.to_string())
-                    .unwrap_or_else(|| "arg".to_string());
-                let ftype = map_syn_type_to_ref(&field.ty);
-                inputs.push((fname, ftype));
-            }
-            methods.push(MethodSchema {
-                name: method_name,
-                inputs,
-                output: TypeRef::Unknown,
-                is_stream: false,
-            });
-        }
-    }
-    CellGenome {
-        name: name.to_string(),
-        fingerprint: fp,
-        methods,
-    }
-}
-
-// -------------------------------------------------------------------------
-// 2. cell_remote!
-// -------------------------------------------------------------------------
+// =========================================================================
+//  MACRO: cell_remote!
+//  The Client-Side Magic.
+//  Usage: cell_remote!(MyClient = "renderer");
+//  
+//  1. Locates the source code of "renderer" (or connects to it).
+//  2. Extracts the schema (Genome).
+//  3. Generates a typed struct `MyClient` with methods matching the server.
+//  4. Injects a Cargo dependency so if "renderer" changes, this recompiles.
+// =========================================================================
 
 struct CellRemoteInput {
     name: syn::Ident,
@@ -172,376 +295,437 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let CellRemoteInput { name, address, .. } = parse_macro_input!(input as CellRemoteInput);
     let address_str = address.value();
 
-    let genome = resolve_genome(&address_str)
-        .unwrap_or_else(|e| panic!("Failed to resolve cell '{}': {}", address_str, e));
+    // Strategy: Source -> Runtime -> Cache
+    let (genome, source_path) = match try_source_analysis(&address_str) {
+        Ok((g, p)) => (g, Some(p)),
+        Err(_) => match try_runtime_connection(&address_str) {
+            Ok(g) => (g, None),
+            Err(_) => (try_cached_schema(&address_str).expect("Failed to resolve cell schema."), None),
+        },
+    };
 
     let client_code = generate_client(&genome, &name, &address_str);
-    TokenStream::from(client_code)
+    
+    // CRITICAL: Dependency Injection for Cargo
+    // If we found the source file, we generate a dummy `include_bytes!` const.
+    // This forces Cargo to track that file. If the server code changes, 
+    // the client crate detects it and recompiles, updating the protocol.
+    let dependency_hack = if let Some(path) = source_path {
+        let path_str = path.to_str().unwrap();
+        quote! {
+            const _: &[u8] = include_bytes!(#path_str);
+        }
+    } else {
+        quote! {}
+    };
+
+    TokenStream::from(quote! {
+        #dependency_hack
+        #client_code
+    })
 }
 
-fn resolve_genome(cell_name: &str) -> Result<CellGenome, String> {
-    if let Ok(genome) = try_source_analysis(cell_name) {
-        return Ok(genome);
-    }
-    if let Ok(genome) = try_runtime_connection(cell_name) {
-        let _ = cache_genome(cell_name, &genome);
-        return Ok(genome);
-    }
-    if let Ok(genome) = try_cached_schema(cell_name) {
-        return Ok(genome);
-    }
-    Err("Could not locate genome.".into())
-}
+// --- Source Analysis Logic ---
 
-// Source Analysis
-fn try_source_analysis(cell_name: &str) -> Result<CellGenome, String> {
+fn try_source_analysis(cell_name: &str) -> Result<(CellGenome, PathBuf), String> {
+    // Search paths for the cell's source code
     let paths = vec![
-        PathBuf::from(format!("../{}", cell_name)),
-        PathBuf::from(format!("cells/{}", cell_name)),
-        PathBuf::from(format!("../cells/{}", cell_name)),
-        dirs::home_dir()
-            .unwrap()
-            .join(format!(".cell/dna/{}", cell_name)),
+        PathBuf::from(format!("cells/{}/src/main.rs", cell_name)),
+        PathBuf::from(format!("../{}/src/main.rs", cell_name)),
+        dirs::home_dir().unwrap().join(format!(".cell/dna/{}/src/main.rs", cell_name)),
     ];
-    for base in paths {
-        let src_main = base.join("src/main.rs");
-        if src_main.exists() {
-            if let Ok(g) = parse_file_for_protein(&src_main) {
-                return Ok(g);
+
+    for path in paths {
+        // We use canonicalize to get absolute path for include_bytes!
+        if let Ok(abs_path) = std::fs::canonicalize(&path) {
+            if abs_path.exists() {
+                return Ok((parse_source_file(&abs_path)?, abs_path));
             }
         }
     }
     Err("Source not found".into())
 }
 
-fn parse_file_for_protein(path: &Path) -> Result<CellGenome, String> {
+fn parse_source_file(path: &Path) -> Result<CellGenome, String> {
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let syntax = syn::parse_file(&content).map_err(|e| e.to_string())?;
-    for item in syntax.items {
+
+    let mut service_name = None;
+    let mut methods = Vec::new();
+    let mut types_found = Vec::new();
+
+    // Pass 1: Find the struct marked with #[cell::service]
+    for item in &syntax.items {
+        if let syn::Item::Struct(s) = item {
+            if has_attr(&s.attrs, "service") {
+                service_name = Some(s.ident.to_string());
+            }
+            if has_attr(&s.attrs, "protein") {
+                types_found.push(struct_to_type_schema(s));
+            }
+        }
         if let syn::Item::Enum(e) = item {
-            if e.attrs.iter().any(|attr| attr.path().is_ident("protein")) {
-                let name = e.ident.to_string();
-                let fingerprint = 0xCAFEBABE;
-                let mut methods = Vec::new();
-                for variant in e.variants {
-                    let m_name = variant.ident.to_string();
-                    let mut inputs = Vec::new();
-                    for field in variant.fields {
-                        let fname = field
-                            .ident
-                            .as_ref()
-                            .map(|i| i.to_string())
-                            .unwrap_or_else(|| "arg".to_string());
-                        let ftype = map_syn_type_to_ref(&field.ty);
-                        inputs.push((fname, ftype));
-                    }
-                    methods.push(MethodSchema {
-                        name: m_name,
-                        inputs,
-                        output: TypeRef::Unknown,
-                        is_stream: false,
-                    });
-                }
-                return Ok(CellGenome {
-                    name,
-                    fingerprint,
-                    methods,
-                });
+            if has_attr(&e.attrs, "protein") {
+                types_found.push(enum_to_type_schema(e));
             }
         }
     }
-    Err("No #[protein] found".into())
+
+    let service_name = service_name.ok_or("No #[cell::service] found in source")?;
+
+    // Pass 2: Find the impl block marked with #[cell::handler] for that struct
+    for item in &syntax.items {
+        if let syn::Item::Impl(impl_block) = item {
+            if has_attr(&impl_block.attrs, "handler") {
+                if let Type::Path(tp) = &*impl_block.self_ty {
+                    if tp.path.segments.last().unwrap().ident == service_name {
+                        for item in &impl_block.items {
+                            if let syn::ImplItem::Fn(m) = item {
+                                methods.push(extract_method_schema(m));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(CellGenome {
+        name: service_name,
+        fingerprint: 0,
+        methods,
+        types: types_found,
+    })
 }
 
-// Runtime Connection
+fn extract_method_schema(m: &syn::ImplItemFn) -> MethodSchema {
+    let inputs = m
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|arg| {
+            if let syn::FnArg::Typed(pat) = arg {
+                if let syn::Pat::Ident(id) = &*pat.pat {
+                    return Some((id.ident.to_string(), map_syn_type_to_ref(&pat.ty)));
+                }
+            }
+            None
+        })
+        .collect();
+
+    let output = match &m.sig.output {
+        syn::ReturnType::Default => TypeRef::Unit,
+        syn::ReturnType::Type(_, ty) => map_syn_type_to_ref(ty),
+    };
+
+    MethodSchema {
+        name: m.sig.ident.to_string(),
+        inputs,
+        output,
+    }
+}
+
+// --- Runtime Connection Logic (Fallback) ---
+
 fn try_runtime_connection(cell_name: &str) -> Result<CellGenome, String> {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let home = dirs::home_dir().ok_or("No home dir")?;
         let socket_path = home.join(".cell/run").join(format!("{}.sock", cell_name));
 
-        let mut stream = tokio::net::UnixStream::connect(&socket_path)
-            .await
-            .map_err(|e| e.to_string())?;
+        // If socket doesn't exist, try to spawn via Mitosis (Stem Cell)
+        if !socket_path.exists() {
+            let umbilical = home.join(".cell/run/mitosis.sock");
+            if umbilical.exists() {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                if let Ok(mut stream) = tokio::net::UnixStream::connect(&umbilical).await {
+                    let req = MitosisRequest::Spawn {
+                        cell_name: cell_name.to_string(),
+                    };
+                    // Send spawn request
+                    let bytes = rkyv::to_bytes::<_, 256>(&req).unwrap().into_vec();
+                    stream.write_all(&(bytes.len() as u32).to_le_bytes()).await.ok();
+                    stream.write_all(&bytes).await.ok();
+                    
+                    // Wait briefly for Ack (simplified)
+                    let mut len_buf = [0u8; 4];
+                    if stream.read_exact(&mut len_buf).await.is_ok() {
+                        let len = u32::from_le_bytes(len_buf) as usize;
+                        let mut buf = vec![0u8; len];
+                        let _ = stream.read_exact(&mut buf).await;
+                    }
+                }
+                // Spin-wait for socket creation
+                for _ in 0..20 {
+                    if socket_path.exists() { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+
+        // Connect and request Genome
+        let mut stream = tokio::net::UnixStream::connect(&socket_path).await.map_err(|e| e.to_string())?;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let req = b"__CELL_GENOME_REQUEST__";
-        stream
-            .write_all(&(req.len() as u32).to_le_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
+        stream.write_all(&(req.len() as u32).to_le_bytes()).await.map_err(|e| e.to_string())?;
         stream.write_all(req).await.map_err(|e| e.to_string())?;
 
         let mut len_buf = [0u8; 4];
-        stream
-            .read_exact(&mut len_buf)
-            .await
-            .map_err(|e| e.to_string())?;
+        stream.read_exact(&mut len_buf).await.map_err(|e| e.to_string())?;
         let len = u32::from_le_bytes(len_buf) as usize;
-        if len == 0 {
-            return Err("Empty genome".into());
-        }
         let mut buf = vec![0u8; len];
-        stream
-            .read_exact(&mut buf)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::from_slice::<CellGenome>(&buf).map_err(|e| e.to_string())
+        stream.read_exact(&mut buf).await.map_err(|e| e.to_string())?;
+
+        let g: CellGenome = serde_json::from_slice(&buf).map_err(|e| e.to_string())?;
+        cache_genome(cell_name, &g).ok();
+        Ok(g)
     })
 }
 
-// Cache
 fn try_cached_schema(cell_name: &str) -> Result<CellGenome, String> {
-    let cache_path = dirs::home_dir()
-        .unwrap()
-        .join(".cell/schemas")
-        .join(format!("{}.json", cell_name));
-    if cache_path.exists() {
-        let content = fs::read_to_string(&cache_path).map_err(|e| e.to_string())?;
-        Ok(serde_json::from_str(&content).map_err(|e| e.to_string())?)
-    } else {
-        Err("No cache".into())
-    }
-}
-fn cache_genome(cell_name: &str, genome: &CellGenome) -> Result<(), String> {
-    let cache_dir = dirs::home_dir().unwrap().join(".cell/schemas");
-    fs::create_dir_all(&cache_dir).ok();
-    let json = serde_json::to_string_pretty(genome).map_err(|e| e.to_string())?;
-    fs::write(cache_dir.join(format!("{}.json", cell_name)), json).map_err(|e| e.to_string())?;
-    Ok(())
+    let path = dirs::home_dir().unwrap().join(".cell/schemas").join(format!("{}.json", cell_name));
+    let s = fs::read_to_string(path).map_err(|_| "No cache".to_string())?;
+    serde_json::from_str(&s).map_err(|e| e.to_string())
 }
 
-fn generate_client(
-    genome: &CellGenome,
-    client_name: &syn::Ident,
-    address: &str,
-) -> proc_macro2::TokenStream {
-    let protocol_enum_name = format_ident!("{}", genome.name);
+fn cache_genome(cell_name: &str, g: &CellGenome) -> Result<(), String> {
+    let dir = dirs::home_dir().unwrap().join(".cell/schemas");
+    fs::create_dir_all(&dir).ok();
+    let s = serde_json::to_string(g).unwrap();
+    fs::write(dir.join(format!("{}.json", cell_name)), s).map_err(|e| e.to_string())
+}
+
+// --- Code Generation ---
+
+fn generate_client(genome: &CellGenome, client_name: &Ident, address: &str) -> proc_macro2::TokenStream {
+    let protocol_enum_name = format_ident!("{}Protocol", genome.name);
+    
+    // 1. Generate Enum Variants matching the Server
     let variants = genome.methods.iter().map(|m| {
-        let vname = format_ident!("{}", m.name);
+        let vname = format_ident!("{}", to_pascal_case(&m.name));
         let fields = m.inputs.iter().map(|(n, t)| {
             let fname = format_ident!("{}", n);
-            let fty = type_ref_to_rust_token(t);
+            let fty = type_ref_to_tokens(t);
             quote! { #fname: #fty }
         });
         quote! { #vname { #(#fields),* } }
     });
 
     let protocol_def = quote! {
-        #[derive(
-            ::cell_sdk::serde::Serialize,
-            ::cell_sdk::serde::Deserialize,
-            ::cell_sdk::rkyv::Archive,
-            ::cell_sdk::rkyv::Serialize,
-            ::cell_sdk::rkyv::Deserialize,
-            Clone, Debug
-        )]
+        #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize)]
         #[serde(crate = "::cell_sdk::serde")]
-        #[archive(crate = "::cell_sdk::rkyv")]
         #[archive(check_bytes)]
-        pub enum #protocol_enum_name {
-            #(#variants),*
-        }
+        #[archive(crate = "::cell_sdk::rkyv")]
+        pub enum #protocol_enum_name { #(#variants),* }
     };
 
+    let type_defs = genome.types.iter().map(|t| type_schema_to_tokens(t));
+
+    // 2. Generate Client Methods
     let method_impls = genome.methods.iter().map(|m| {
-        let raw_name = &m.name;
-        let fn_name = format_ident!("{}", to_snake_case(raw_name));
-        let variant_name = format_ident!("{}", raw_name);
+        let fn_name = format_ident!("{}", m.name);
+        let variant_name = format_ident!("{}", to_pascal_case(&m.name));
+        
         let args = m.inputs.iter().map(|(n, t)| {
-            let name = format_ident!("{}", n);
-            let ty = type_ref_to_rust_token(t);
-            quote! { #name: #ty }
+            let id = format_ident!("{}", n);
+            let ty = type_ref_to_tokens(t);
+            quote! { #id: #ty }
         });
+        
         let field_inits = m.inputs.iter().map(|(n, _)| {
-            let name = format_ident!("{}", n);
-            quote! { #name }
+            let id = format_ident!("{}", n);
+            quote! { #id }
         });
+        
+        // Return type handling
+        let return_ty = match &m.output {
+            TypeRef::Result(ok, _) => type_ref_to_tokens(ok),
+            TypeRef::Unit => quote! { () },
+            t => type_ref_to_tokens(t),
+        };
+
         quote! {
-            pub async fn #fn_name(&mut self, #(#args),*) -> ::anyhow::Result<::cell_sdk::vesicle::Vesicle> {
-                let msg = #protocol_enum_name::#variant_name {
-                    #(#field_inits),*
-                };
-                self.conn.fire(msg).await
+            pub async fn #fn_name(&mut self, #(#args),*) -> ::anyhow::Result<#return_ty> {
+                let req = #protocol_enum_name::#variant_name { #(#field_inits),* };
+                
+                // Serialize request
+                let bytes = ::cell_sdk::rkyv::to_bytes::<_, 1024>(&req)?.into_vec();
+                
+                // Send via Synapse (fire_bytes helper in SDK)
+                let resp = self.conn.fire_bytes(bytes).await?;
+                
+                // Deserialize Result<T, String>
+                let res = ::cell_sdk::rkyv::from_bytes::<Result<#return_ty, String>>(resp.as_slice())
+                    .map_err(|e| anyhow::anyhow!("Deserialization error: {}", e))?;
+                
+                // Convert String error back to Anyhow
+                res.map_err(|e| anyhow::anyhow!(e))
             }
         }
     });
 
-    // NOTE: Removed the wrapping block {} and trailing expression to allow top-level definition.
     quote! {
+        #(#type_defs)*
         #protocol_def
-
-        pub struct #client_name {
-            conn: ::cell_sdk::Synapse,
-        }
-
+        pub struct #client_name { conn: ::cell_sdk::Synapse }
         impl #client_name {
             pub async fn connect() -> ::anyhow::Result<Self> {
                 let conn = ::cell_sdk::Synapse::grow(#address).await?;
                 Ok(Self { conn })
             }
-
-            pub fn address(&self) -> &'static str {
-                #address
-            }
-
+            pub fn address(&self) -> String { #address.to_string() }
             #(#method_impls)*
         }
     }
 }
 
-// Helpers
-fn to_snake_case(s: &str) -> String {
-    let mut acc = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() && i != 0 {
-            acc.push('_');
+// --- AST Helpers ---
+
+fn has_attr(attrs: &[syn::Attribute], name: &str) -> bool {
+    attrs.iter().any(|a| {
+        if a.path().is_ident(name) { return true; }
+        if a.path().segments.len() == 2 {
+            let segs: Vec<_> = a.path().segments.iter().collect();
+            if segs[1].ident == name && (segs[0].ident == "cell" || segs[0].ident == "cell_sdk") { return true; }
         }
-        acc.push(c.to_ascii_lowercase());
-    }
-    acc
+        false
+    })
 }
+
+fn to_pascal_case(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
+}
+
+/// Converts Rust AST types to our TypeRef enum for Schema Generation
 fn map_syn_type_to_ref(ty: &Type) -> TypeRef {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            let s = seg.ident.to_string();
-            return match s.as_str() {
+    match ty {
+        Type::Path(tp) => {
+            let seg = tp.path.segments.last().unwrap();
+            let id = seg.ident.to_string();
+            match id.as_str() {
                 "String" => TypeRef::Primitive(Primitive::String),
                 "u8" => TypeRef::Primitive(Primitive::U8),
+                "u16" => TypeRef::Primitive(Primitive::U16),
                 "u32" => TypeRef::Primitive(Primitive::U32),
                 "u64" => TypeRef::Primitive(Primitive::U64),
+                "f32" => TypeRef::Primitive(Primitive::F32),
                 "bool" => TypeRef::Primitive(Primitive::Bool),
-                "Vec" => TypeRef::Vec(Box::new(TypeRef::Unknown)),
-                _ => TypeRef::Named(s),
-            };
+                "Vec" => match &seg.arguments {
+                    syn::PathArguments::AngleBracketed(args) => {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            TypeRef::Vec(Box::new(map_syn_type_to_ref(inner)))
+                        } else { TypeRef::Named("Vec".into()) }
+                    }
+                    _ => TypeRef::Named("Vec".into()),
+                },
+                "Option" => match &seg.arguments {
+                    syn::PathArguments::AngleBracketed(args) => {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            TypeRef::Option(Box::new(map_syn_type_to_ref(inner)))
+                        } else { TypeRef::Named("Option".into()) }
+                    }
+                    _ => TypeRef::Named("Option".into()),
+                },
+                "Result" => match &seg.arguments {
+                    syn::PathArguments::AngleBracketed(args) => {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            TypeRef::Result(Box::new(map_syn_type_to_ref(inner)), Box::new(TypeRef::Unit))
+                        } else { TypeRef::Named("Result".into()) }
+                    }
+                    _ => TypeRef::Named("Result".into()),
+                },
+                _ => TypeRef::Named(id),
+            }
         }
+        Type::Array(_) => TypeRef::Named("Array".into()),
+        _ => TypeRef::Unknown,
     }
-    TypeRef::Unknown
 }
-fn type_ref_to_rust_token(ty: &TypeRef) -> proc_macro2::TokenStream {
-    match ty {
+
+/// Converts our TypeRef back to TokenStream for code generation
+fn type_ref_to_tokens(t: &TypeRef) -> proc_macro2::TokenStream {
+    match t {
         TypeRef::Primitive(p) => match p {
-            Primitive::String => quote! { String },
-            Primitive::U64 => quote! { u64 },
-            Primitive::U32 => quote! { u32 },
-            Primitive::U8 => quote! { u8 },
-            Primitive::Bool => quote! { bool },
-            _ => quote! { u64 },
+            Primitive::String => quote! {String},
+            Primitive::U8 => quote! {u8},
+            Primitive::U16 => quote! {u16},
+            Primitive::U32 => quote! {u32},
+            Primitive::U64 => quote! {u64},
+            Primitive::F32 => quote! {f32},
+            Primitive::Bool => quote! {bool},
+            _ => quote! {u64},
         },
+        TypeRef::Named(s) => {
+            if s == "Array" { quote! {[f32; 2]} } else {
+                let i = format_ident!("{}", s);
+                quote! {#i}
+            }
+        }
         TypeRef::Vec(inner) => {
-            let t = type_ref_to_rust_token(inner);
-            quote! { Vec<#t> }
+            let i = type_ref_to_tokens(inner);
+            quote! {Vec<#i>}
         }
-        _ => quote! { String },
-    }
-}
-
-// -------------------------------------------------------------------------
-// 3. RESTORED: signal_receptor & call_as (Legacy)
-// -------------------------------------------------------------------------
-
-struct ReceptorDef {
-    name: Ident,
-    input_name: Ident,
-    input_fields: Vec<Field>,
-    output_name: Ident,
-    output_fields: Vec<Field>,
-}
-
-impl Parse for ReceptorDef {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let _ = input.parse::<Ident>()?;
-        input.parse::<Token![:]>()?;
-        let name = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let _ = input.parse::<Ident>()?;
-        input.parse::<Token![:]>()?;
-        let input_name = input.parse()?;
-        let content;
-        braced!(content in input);
-        let input_fields = parse_fields(&content)?;
-        input.parse::<Token![,]>()?;
-        let _ = input.parse::<Ident>()?;
-        input.parse::<Token![:]>()?;
-        let output_name = input.parse()?;
-        let content2;
-        braced!(content2 in input);
-        let output_fields = parse_fields(&content2)?;
-        Ok(ReceptorDef {
-            name,
-            input_name,
-            input_fields,
-            output_name,
-            output_fields,
-        })
-    }
-}
-
-fn parse_fields(content: ParseStream) -> syn::Result<Vec<Field>> {
-    let mut fields = Vec::new();
-    while !content.is_empty() {
-        let name: Ident = content.parse()?;
-        content.parse::<Token![:]>()?;
-        let ty: Type = content.parse()?;
-        fields.push(Field {
-            attrs: vec![],
-            vis: syn::Visibility::Inherited,
-            mutability: syn::FieldMutability::None,
-            ident: Some(name),
-            colon_token: Some(Default::default()),
-            ty,
-        });
-        if content.peek(Token![,]) {
-            content.parse::<Token![,]>()?;
+        TypeRef::Option(inner) => {
+            let i = type_ref_to_tokens(inner);
+            quote! {Option<#i>}
         }
+        TypeRef::Result(ok, _) => type_ref_to_tokens(ok),
+        TypeRef::Unit => quote! {()},
+        _ => quote! {()},
     }
-    Ok(fields)
 }
 
-#[proc_macro]
-pub fn signal_receptor(input: TokenStream) -> TokenStream {
-    let schema = parse_macro_input!(input as ReceptorDef);
-    let req_name = &schema.input_name;
-    let req_fields = &schema.input_fields;
-    let resp_name = &schema.output_name;
-    let resp_fields = &schema.output_fields;
-    let expanded = quote! {
-        #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Clone, Debug)]
-        #[serde(crate = "::cell_sdk::serde")]
-        #[archive(crate = "::cell_sdk::rkyv")]
-        #[archive(check_bytes)]
-        pub struct #req_name { #(pub #req_fields),* }
-        #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Clone, Debug)]
-        #[archive(crate = "::cell_sdk::rkyv")]
-        #[archive(check_bytes)]
-        pub struct #resp_name { #(pub #resp_fields),* }
-        #[doc(hidden)]
-        pub const __GENOME__: &str = "";
+fn struct_to_type_schema(s: &syn::ItemStruct) -> TypeSchema {
+    let fields = match &s.fields {
+        syn::Fields::Named(f) => f.named.iter()
+            .map(|x| (x.ident.as_ref().unwrap().to_string(), map_syn_type_to_ref(&x.ty)))
+            .collect(),
+        _ => vec![],
     };
-    TokenStream::from(expanded)
+    TypeSchema { name: s.ident.to_string(), kind: TypeKind::Struct { fields } }
 }
 
-struct CallArgs {
-    cell_name: Ident,
-    signal_data: Expr,
+fn enum_to_type_schema(e: &syn::ItemEnum) -> TypeSchema {
+    let variants = e.variants.iter()
+        .map(|v| (v.ident.to_string(), vec![]))
+        .collect();
+    TypeSchema { name: e.ident.to_string(), kind: TypeKind::Enum { variants } }
 }
-impl Parse for CallArgs {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let cell_name = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let signal_data = input.parse()?;
-        Ok(CallArgs {
-            cell_name,
-            signal_data,
-        })
+
+fn type_schema_to_tokens(t: &TypeSchema) -> proc_macro2::TokenStream {
+    let name = format_ident!("{}", t.name);
+    match &t.kind {
+        TypeKind::Struct { fields } => {
+            let fs = fields.iter().map(|(n, tr)| {
+                let ni = format_ident!("{}", n);
+                let ti = type_ref_to_tokens(tr);
+                quote! { pub #ni: #ti }
+            });
+            quote! {
+                #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Clone, Debug, PartialEq)]
+                #[serde(crate = "::cell_sdk::serde")]
+                #[archive(check_bytes)]
+                #[archive(crate = "::cell_sdk::rkyv")]
+                pub struct #name { #(#fs),* }
+            }
+        }
+        TypeKind::Enum { variants } => {
+            let vs = variants.iter().map(|(n, _)| {
+                let ni = format_ident!("{}", n);
+                quote! { #ni }
+            });
+            quote! {
+               #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Clone, Debug, Copy, PartialEq, Eq)]
+               #[serde(crate = "::cell_sdk::serde")]
+               #[archive(check_bytes)]
+               #[archive(crate = "::cell_sdk::rkyv")]
+               #[repr(u16)]
+               pub enum #name { #(#vs),* }
+            }
+        }
     }
-}
-
-#[proc_macro]
-pub fn call_as(input: TokenStream) -> TokenStream {
-    let CallArgs { cell_name, .. } = parse_macro_input!(input as CallArgs);
-    let error = format!(
-        "call_as! for {} is deprecated in Cell v0.3. Use cell_remote!.",
-        cell_name
-    );
-    TokenStream::from(quote! { compile_error!(#error) })
 }

@@ -1,7 +1,8 @@
-use crate::protein;
-use serde::{Deserialize, Serialize}; // Ensure protein macro is available
+use serde::{Deserialize, Serialize};
+// We do NOT use the macro here to avoid circular dependency / resolution issues within the SDK itself.
+// We manually implement the traits required by the SDK's logic.
 
-// --- INTROSPECTION PROTOCOL ---
+/// Magic bytes sent to request the schema from a running cell
 pub const GENOME_REQUEST: &[u8] = b"__CELL_GENOME_REQUEST__";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -17,7 +18,6 @@ pub struct MethodSchema {
     pub name: String,
     pub inputs: Vec<(String, TypeRef)>,
     pub output: TypeRef,
-    pub is_stream: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -36,16 +36,18 @@ pub enum TypeKind {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum TypeRef {
     Named(String),
     Primitive(Primitive),
     Vec(Box<TypeRef>),
     Option(Box<TypeRef>),
+    Result(Box<TypeRef>, Box<TypeRef>),
+    Unit,
     Unknown,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub enum Primitive {
     String,
     U8,
@@ -63,12 +65,15 @@ pub enum Primitive {
 
 // --- LIFECYCLE PROTOCOL (Mitosis) ---
 
-#[protein]
+#[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
+// Used internally by SDK, so we rely on the crate's own rkyv dependency
 pub enum MitosisRequest {
     Spawn { cell_name: String },
 }
 
-#[protein]
+#[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
 pub enum MitosisResponse {
     Ok { socket_path: String },
     Denied { reason: String },
