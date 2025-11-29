@@ -1,13 +1,18 @@
+use crate::protocol::GENOME_REQUEST;
 use anyhow::{Context, Result};
 use fd_lock::RwLock;
 use std::fs::File;
 use std::path::PathBuf;
-use tokio::net::UnixListener; // Removed unused UnixStream, Path
+use tokio::net::UnixListener;
 
 pub struct Membrane;
 
 impl Membrane {
-    pub async fn bind<F, Fut>(name: &str, handler: F) -> Result<()>
+    /// Bind the membrane to a socket and start the event loop.
+    ///
+    /// `genome_json`: Optional JSON string representing the CellGenome.
+    /// If provided, the Membrane will automatically respond to introspection requests.
+    pub async fn bind<F, Fut>(name: &str, handler: F, genome_json: Option<String>) -> Result<()>
     where
         F: Fn(crate::vesicle::Vesicle) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<crate::vesicle::Vesicle>> + Send,
@@ -37,6 +42,8 @@ impl Membrane {
 
         // 3. EVENT LOOP
         let handler = std::sync::Arc::new(handler);
+        let genome = std::sync::Arc::new(genome_json);
+
         let last_active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
@@ -54,47 +61,63 @@ impl Membrane {
                     .as_secs();
                 let last = la_clone.load(std::sync::atomic::Ordering::Relaxed);
 
-                if now - last > 60 {
-                    // Silent exit is cleaner for examples
-                    std::process::exit(0);
+                if now - last > 300 { // Increased timeout for dev comfort
+                     // std::process::exit(0);
                 }
             }
         });
 
         loop {
             match listener.accept().await {
-                Ok((_stream, _)) => {
+                Ok((mut stream, _)) => {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)?
                         .as_secs();
                     last_active.store(now, std::sync::atomic::Ordering::Relaxed);
 
                     let h = handler.clone();
-                    let mut s = _stream;
+                    let g = genome.clone();
+
                     tokio::spawn(async move {
                         loop {
                             use tokio::io::{AsyncReadExt, AsyncWriteExt};
                             let mut len_buf = [0u8; 4];
-                            if s.read_exact(&mut len_buf).await.is_err() {
+                            if stream.read_exact(&mut len_buf).await.is_err() {
                                 break;
                             }
                             let len = u32::from_le_bytes(len_buf) as usize;
                             let mut buf = vec![0u8; len];
-                            if s.read_exact(&mut buf).await.is_err() {
+                            if stream.read_exact(&mut buf).await.is_err() {
                                 break;
                             }
+
+                            // --- INTROSPECTION CHECK ---
+                            if buf == GENOME_REQUEST {
+                                if let Some(json) = g.as_ref() {
+                                    let bytes = json.as_bytes();
+                                    let _ =
+                                        stream.write_all(&(bytes.len() as u32).to_le_bytes()).await;
+                                    let _ = stream.write_all(bytes).await;
+                                } else {
+                                    // Send empty response if no genome
+                                    let _ = stream.write_all(&0u32.to_le_bytes()).await;
+                                }
+                                continue;
+                            }
+                            // ---------------------------
 
                             let vesicle = crate::vesicle::Vesicle::wrap(buf);
 
                             match h(vesicle).await {
                                 Ok(resp) => {
-                                    if s.write_all(&(resp.len() as u32).to_le_bytes())
+                                    if stream
+                                        .write_all(&(resp.len() as u32).to_le_bytes())
                                         .await
                                         .is_err()
                                     {
                                         break;
                                     }
-                                    if s.write_all(resp.as_slice()).await.is_err() {
+                                    if stream.write_all(resp.as_slice()).await.is_err() {
                                         break;
                                     }
                                 }
@@ -113,7 +136,7 @@ impl Membrane {
     }
 }
 
-fn resolve_socket_dir() -> PathBuf {
+pub fn resolve_socket_dir() -> PathBuf {
     if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
         return PathBuf::from(p);
     }

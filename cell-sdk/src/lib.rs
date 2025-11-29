@@ -11,7 +11,8 @@ pub mod synapse;
 pub mod vesicle;
 
 // Re-exports for ease of use
-pub use cell_macros::{call_as, protein, signal_receptor};
+// We add 'cell_remote' and 'service' (protein alias) here
+pub use cell_macros::{call_as, cell_remote, protein, signal_receptor};
 pub use membrane::Membrane;
 pub use root::MyceliumRoot;
 pub use shm::GapJunction;
@@ -21,3 +22,6 @@ pub use vesicle::Vesicle;
 // Re-export dependencies used by macros
 pub use rkyv;
 pub use serde;
+
+// Helper for macros
+pub use membrane::resolve_socket_dir;

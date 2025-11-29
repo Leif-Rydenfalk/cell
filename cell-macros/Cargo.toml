@@ -12,9 +12,12 @@ proc-macro = true
 
 [dependencies]
 quote = { workspace = true }
-syn = { workspace = true }
+syn = { workspace = true, features = ["full", "extra-traits", "parsing"] }
 proc-macro2 = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = { workspace = true }
 blake3 = { workspace = true }
 rkyv = { workspace = true }
 dirs = "5.0"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"

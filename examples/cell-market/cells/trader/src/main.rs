@@ -1,58 +1,57 @@
 use anyhow::Result;
-use cell_sdk::{Synapse, protein};
+use cell_sdk::cell_remote;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::task::yield_now;  
 
-// --- SCHEMA DEFINITION (Client) ---
-// This reads ~/.cell/schema/MarketV1.lock
-// If I change a field here, the compiler will panic!
-#[protein(class = "MarketV1")]
-pub enum MarketMsg {
-    PlaceOrder {
-        symbol: String,
-        amount: u64,
-        side: u8,
-    },
-    SubmitBatch {
-        count: u32,
-    },
-    OrderAck {
-        id: u64,
-    },
-    SnapshotRequest,
-    SnapshotResponse {
-        total_trades: u64,
-    },
-}
-// ----------------------------------
+// Auto-generate client from source
+cell_remote!(ExchangeClient = "exchange");
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut conn = loop {
-        match Synapse::grow("exchange").await {
-            Ok(c) => break c,
-            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+    println!("[Trader] Benchmark Tool v1.0");
+
+    let mut exchange = ExchangeClient::connect().await?;
+    println!("[Trader] Connected to {}", exchange.address());
+
+    // Metrics
+    let req_count = Arc::new(AtomicU64::new(0));
+    let report_counter = req_count.clone();
+
+    // Spawn Reporting Task
+    tokio::spawn(async move {
+        let mut last_count = 0;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let current = report_counter.load(Ordering::Relaxed);
+            let delta = current - last_count;
+            let orders_per_sec = delta * 100; // Batch size is 100
+            
+            println!(
+                "--> {:>8} Req/s | {:>10} Orders/s | Total: {}", 
+                delta, 
+                orders_per_sec,
+                current * 100
+            );
+            
+            last_count = current;
         }
-    };
+    });
 
-    println!("[Trader] Connected (FP: {:x}).", MarketMsg::SCHEMA_FINGERPRINT);
-
-    let mut count = 0;
+    println!("[Trader] Starting flood (Batch Size: 100)...");
+    
+    // Tight Loop
     loop {
-        let order = MarketMsg::SubmitBatch { count: 100 };
-        match conn.fire(order).await {
-            Ok(_) => {}
-            Err(_) => {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                break;
+        // We verify the call succeeds, but don't parse the response to measure
+        // raw throughput of the Cell RPC system.
+        match exchange.submit_batch(100).await {
+            Ok(_) => {
+                req_count.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(e) => {
+                eprintln!("[Trader] Error: {}", e);
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
-
-        // --- co-operative yielding ---
-        count += 1;
-        if count % 500 == 0 {          // tune this number
-            yield_now().await;
-        }
     }
-    Ok(())
 }

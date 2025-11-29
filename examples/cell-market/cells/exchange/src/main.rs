@@ -1,11 +1,10 @@
 use anyhow::Result;
-use cell_sdk::{Membrane, Synapse, protein};
-use cell_consensus::{RaftNode, RaftConfig, StateMachine};
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use cell_sdk::{Membrane, protein};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-// --- SCHEMA DEFINITION (Authority) ---
-#[protein(class = "MarketV1")]
-pub enum MarketMsg {
+#[protein]
+pub enum MarketProtocol {
     PlaceOrder {
         symbol: String,
         amount: u64,
@@ -14,87 +13,65 @@ pub enum MarketMsg {
     SubmitBatch {
         count: u32,
     },
+    SnapshotRequest,
     OrderAck {
         id: u64,
     },
-    SnapshotRequest,
     SnapshotResponse {
         total_trades: u64,
     },
 }
-// -------------------------------------
 
-struct MarketState {
+struct ExchangeState {
     trade_count: AtomicU64,
-}
-
-impl StateMachine for MarketState {
-    fn apply(&self, command: &[u8]) {
-        if command.len() == 4 {
-             let count = u32::from_le_bytes(command.try_into().unwrap());
-             self.trade_count.fetch_add(count as u64, Ordering::Relaxed);
-        } else {
-             self.trade_count.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    fn snapshot(&self) -> Vec<u8> { vec![] }
-    fn restore(&self, _snapshot: &[u8]) {}
+    batch_ops: AtomicU64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let state = Arc::new(MarketState { trade_count: AtomicU64::new(0) });
-    let wal_path = std::path::PathBuf::from("/tmp/market.wal");
-    let config = RaftConfig { id: 1, storage_path: wal_path };
-    let raft = RaftNode::new(config, state.clone()).await?;
+    let state = Arc::new(ExchangeState {
+        trade_count: AtomicU64::new(0),
+        batch_ops: AtomicU64::new(0),
+    });
 
-    println!("[Exchange] Consensus Active (FP: {:x}). Spawning Traders...", MarketMsg::SCHEMA_FINGERPRINT);
-
-    // --- RESTORED LOGIC START ---
-    for _ in 0..5 {
-        tokio::spawn(async move {
-            // The exchange recursively spawns traders.
-            // Because they share the same DNA folder, it finds the 'trader' binary.
-            if let Err(e) = Synapse::grow("trader").await {
-                // Ignore benign race conditions during startup
-                if !e.to_string().contains("failed to bind socket") {
-                    eprintln!("[Exchange] Error spawning trader: {}", e);
-                }
-            }
-        });
-    }
-    // --- RESTORED LOGIC END ---
+    println!("[Exchange] Online. Fingerprint: {:x}", MarketProtocol::SCHEMA_FINGERPRINT);
+    println!("[Exchange] Ready for benchmarking (Logs dampened).");
 
     Membrane::bind("exchange", move |vesicle| {
-        let raft = raft.clone();
         let state = state.clone();
-
         async move {
-            let msg = cell_sdk::rkyv::from_bytes::<MarketMsg>(vesicle.as_slice())
-                .map_err(|e| anyhow::anyhow!("Msg Error: {:?}", e))?;
+            let msg = cell_sdk::rkyv::from_bytes::<MarketProtocol>(vesicle.as_slice())
+                .map_err(|e| anyhow::anyhow!("Invalid Protein: {:?}", e))?;
 
             match msg {
-                MarketMsg::PlaceOrder { .. } => {
-                    let _ = raft.propose(vec![1]).await.unwrap();
-                    let ack = MarketMsg::OrderAck { id: 1 };
+                MarketProtocol::SubmitBatch { count } => {
+                    // Fast path logic
+                    let start = state.trade_count.fetch_add(count as u64, Ordering::Relaxed);
+                    let ops = state.batch_ops.fetch_add(1, Ordering::Relaxed);
+                    
+                    // Log only every 10,000 requests to avoid I/O bottleneck
+                    if ops % 10_000 == 0 {
+                         println!("[Exchange] Processed {} batches (Total trades: {})", ops, start + count as u64);
+                    }
+                    
+                    let ack = MarketProtocol::OrderAck { id: start + count as u64 };
                     let bytes = cell_sdk::rkyv::to_bytes::<_, 16>(&ack)?.into_vec();
                     Ok(cell_sdk::vesicle::Vesicle::wrap(bytes))
                 }
-                MarketMsg::SubmitBatch { count } => {
-                    let cmd = count.to_le_bytes().to_vec();
-                    let _ = raft.propose(cmd).await.unwrap();
-                    let ack = MarketMsg::OrderAck { id: count as u64 };
+                MarketProtocol::PlaceOrder { .. } => {
+                    let id = state.trade_count.fetch_add(1, Ordering::Relaxed);
+                    let ack = MarketProtocol::OrderAck { id };
                     let bytes = cell_sdk::rkyv::to_bytes::<_, 16>(&ack)?.into_vec();
                     Ok(cell_sdk::vesicle::Vesicle::wrap(bytes))
                 }
-                MarketMsg::SnapshotRequest => {
-                    let count = state.trade_count.load(Ordering::Relaxed);
-                    let resp = MarketMsg::SnapshotResponse { total_trades: count };
+                MarketProtocol::SnapshotRequest => {
+                    let total = state.trade_count.load(Ordering::Relaxed);
+                    let resp = MarketProtocol::SnapshotResponse { total_trades: total };
                     let bytes = cell_sdk::rkyv::to_bytes::<_, 16>(&resp)?.into_vec();
                     Ok(cell_sdk::vesicle::Vesicle::wrap(bytes))
                 }
-                _ => Ok(vesicle)
+                _ => Ok(vesicle),
             }
         }
-    }).await
+    }, Some(MarketProtocol::CELL_GENOME.to_string())).await
 }
