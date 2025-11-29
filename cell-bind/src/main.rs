@@ -65,7 +65,7 @@ fn main() -> Result<()> {
     if lock_path.exists() {
         let expected = fs::read_to_string(lock_path)?.trim().to_string();
         if expected != hash_hex {
-            anyhow::bail!("Schema Mismatch!\nLockfile: {}\nComputed: {}\nRun 'cell clean' or rebuild Rust cell.", expected, hash_hex);
+            anyhow::bail!("Schema Mismatch.\nLockfile: {}\nComputed: {}\nRun 'cell clean' or rebuild Rust cell.", expected, hash_hex);
         }
     }
 

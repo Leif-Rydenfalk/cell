@@ -10,12 +10,13 @@ pub mod shm;
 pub mod synapse;
 pub mod vesicle;
 
-// Re-exports
+// Re-exports for ease of use
 pub use cell_macros::{call_as, protein, signal_receptor};
 pub use membrane::Membrane;
 pub use root::MyceliumRoot;
 pub use shm::GapJunction;
 pub use synapse::Synapse;
+pub use vesicle::Vesicle;
 
 // Re-export dependencies used by macros
 pub use rkyv;

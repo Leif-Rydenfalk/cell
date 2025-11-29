@@ -1,0 +1,11 @@
+[package]
+name = "brain"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+cell-sdk = { path = "../../cell/cell-sdk" }
+cell-macros = { path = "../../cell/cell-macros" } # Needed for local definition
+bytemuck = "1.14"

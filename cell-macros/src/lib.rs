@@ -69,7 +69,7 @@ pub fn protein(attr: TokenStream, item: TokenStream) -> TokenStream {
                 return syn::Error::new_spanned(
                     struct_name,
                     format!(
-                        "SCHEMA MISMATCH! \n\
+                        "SCHEMA MISMATCH. \n\
                         Remote '{}' expects hash: {} \n\
                         Local struct produces:    {} \n\
                         Did the server update? Run 'cell clean' or update your struct definition.",
