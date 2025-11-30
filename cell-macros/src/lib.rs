@@ -1,15 +1,8 @@
 //! # Cell Macros
-//!
+//! 
 //! This crate provides the procedural macros that power the Cell biological computing substrate.
-//! It handles the "Nuclear Option" of compile-time reflection, schema generation, and
+//! It handles the "Nuclear Option" of compile-time reflection, schema generation, and 
 //! zero-copy serialization implementations.
-//!
-//! ## Core Concepts
-//!
-//! 1. **Proteins**: Data structures shared between cells. They must be zero-copy safe (`rkyv`).
-//! 2. **Handlers**: Async functions that process incoming signals (RPC).
-//! 3. **Remote**: Client generation that connects to a cell, downloads/parses its genome,
-//!    and generates a strongly-typed Rust struct to interact with it.
 
 extern crate proc_macro;
 use proc_macro::TokenStream;
@@ -18,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::parse::{Parse, ParseStream};
-use syn::{parse_macro_input, DeriveInput, Ident, ItemImpl, LitStr, Token, Type};
+use syn::{parse_macro_input, DeriveInput, ItemImpl, LitStr, Token, Type};
 
 // =========================================================================
 //  Internal Schema Representation
@@ -53,12 +46,8 @@ struct TypeSchema {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum TypeKind {
-    Struct {
-        fields: Vec<(String, TypeRef)>,
-    },
-    Enum {
-        variants: Vec<(String, Vec<TypeRef>)>,
-    },
+    Struct { fields: Vec<(String, TypeRef)> },
+    Enum { variants: Vec<(String, Vec<TypeRef>)> },
 }
 
 /// Recursive type definition for schema reflection
@@ -75,22 +64,11 @@ enum TypeRef {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 enum Primitive {
-    String,
-    U8,
-    U16,
-    U32,
-    U64,
-    I8,
-    I16,
-    I32,
-    I64,
-    F32,
-    F64,
-    Bool,
+    String, U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool,
 }
 
-// Minimal Protocol for Mitosis (Spawning) needed during compile-time connection
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+// Protocol used during Mitosis (Spawning) compile-time connection
+#[derive(::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
 #[archive(check_bytes)]
 enum MitosisRequest {
     Spawn { cell_name: String },
@@ -136,10 +114,12 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
 // =========================================================================
 //  MACRO: #[handler]
 //  The Server-Side Magic.
-//  1. Parses the `impl` block.
-//  2. Generates a Protocol Enum (`MyServiceProtocol`).
-//  3. Generates a dispatcher `handle_cell_message` that deserializes requests,
-//     calls the method, and serializes the response.
+//  1. Generates a Protocol Enum (`MyServiceProtocol`).
+//  2. Generates `handle_cell_message` dispatcher.
+//  3. Implements Zero-Copy Logic:
+//     - Deserializes inputs from the raw request slice.
+//     - Calls the user logic.
+//     - Serializes output DIRECTLY into the ResponseSlot (Ring Buffer).
 // =========================================================================
 #[proc_macro_attribute]
 pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -174,7 +154,7 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // Generate Protocol Enum Variants
+    // 1. Generate Protocol Enum Variants
     let protocol_name = format_ident!("{}Protocol", service_name);
     let protocol_variants = methods.iter().map(|(name, args)| {
         let variant_name = format_ident!("{}", to_pascal_case(&name.to_string()));
@@ -182,28 +162,44 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { #variant_name { #(#fields),* } }
     });
 
-    // Generate Dispatch Logic (Match Arms)
+    // 2. Determine Archived Protocol Name (rkyv convention)
+    let archived_proto_name = format_ident!("Archived{}", protocol_name);
+
+    // 3. Generate Dispatch Logic (Match Arms)
     let dispatch_arms = methods.iter().map(|(name, args)| {
         let variant_name = format_ident!("{}", to_pascal_case(&name.to_string()));
-        let field_names = args.iter().map(|(n, _)| n);
-        let field_names_clone = field_names.clone();
+        let field_names: Vec<_> = args.iter().map(|(n, _)| n).collect();
+        
+        let method_calls = field_names.iter().map(|n| {
+            // ARGUMENT DESERIALIZATION
+            // We have `&Archived<T>`. We need `T` to call the user function.
+            // This copies from SHM to Stack/Heap. 
+            // NOTE: Ideally user fns would accept &Archived<T>, but that requires 
+            // changing the user API. For now, we deserialize inputs.
+            quote! {
+                match ::cell_sdk::rkyv::Deserialize::deserialize(&#n, &mut ::cell_sdk::rkyv::Infallible) {
+                    Ok(v) => v,
+                    Err(_) => return Err(::anyhow::anyhow!("Arg deserialization failed")),
+                }
+            }
+        });
         
         quote! {
-            #protocol_name::#variant_name { #(#field_names),* } => {
+            // Match against the Archived variant
+            #archived_proto_name::#variant_name { #(#field_names),* } => {
                 // Call the actual method
-                // We map anyhow::Error to String because anyhow is not Serializable
-                let res = self.#name(#(#field_names_clone),*).await
+                let res = self.#name(#(#method_calls),*).await
                     .map_err(|e| e.to_string());
                 
-                // Serialize the Result<T, String>
-                ::cell_sdk::rkyv::to_bytes::<_, 1024>(&res)
-                    .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))?
-                    .into_vec()
+                // ZERO-COPY WRITE
+                // We serialize the result directly into the slot (Ring Buffer).
+                slot.serialize(&res)
+                    .map_err(|e| ::anyhow::anyhow!("Serialization error: {}", e))?;
             }
         }
     });
 
-    // Generate Genome for Introspection (Reflection)
+    // 4. Schema Generation (Reflection)
     let schema_methods: Vec<MethodSchema> = methods
         .iter()
         .map(|(name, args)| {
@@ -214,14 +210,14 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
             MethodSchema {
                 name: name.to_string(),
                 inputs,
-                output: TypeRef::Unknown, // Output type inference is hard in macros, mostly handled runtime
+                output: TypeRef::Unknown, 
             }
         })
         .collect();
 
     let genome_struct = CellGenome {
         name: service_name.to_string(),
-        fingerprint: 0x12345678, // TODO: Real hashing of AST
+        fingerprint: 0x12345678, // TODO: Implement AST hashing
         methods: schema_methods,
         types: vec![],
     };
@@ -248,14 +244,26 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
             // Embed fingerprint for compile-time safety checks
             pub const SCHEMA_FINGERPRINT: u64 = 0x12345678;
 
-            /// The main entry point for the Membrane to call
-            pub async fn handle_cell_message(&mut self, data: &[u8]) -> ::anyhow::Result<Vec<u8>> {
-                let msg = ::cell_sdk::rkyv::from_bytes::<#protocol_name>(data)
-                    .map_err(|e| anyhow::anyhow!("Protocol Mismatch: {:?}", e))?;
+            /// The main entry point for the Membrane to call.
+            /// 
+            /// Arguments:
+            /// - `data`: The raw zero-copy slice containing the request.
+            /// - `slot`: The output slot to write the response to (Zero-Copy).
+            pub async fn handle_cell_message(
+                &self, 
+                data: &[u8], 
+                slot: &mut ::cell_sdk::shm::ResponseSlot<'_>
+            ) -> ::anyhow::Result<()> {
+                
+                // Zero-Copy Validation (No Allocation)
+                let archived = ::cell_sdk::rkyv::check_archived_root::<#protocol_name>(data)
+                    .map_err(|e| ::anyhow::anyhow!("Protocol Mismatch: {:?}", e))?;
 
-                Ok(match msg {
+                match archived {
                     #(#dispatch_arms),*
-                })
+                }
+                
+                Ok(())
             }
         }
     };
@@ -266,12 +274,7 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 // =========================================================================
 //  MACRO: cell_remote!
 //  The Client-Side Magic.
-//  Usage: cell_remote!(MyClient = "renderer");
-//  
-//  1. Locates the source code of "renderer" (or connects to it).
-//  2. Extracts the schema (Genome).
-//  3. Generates a typed struct `MyClient` with methods matching the server.
-//  4. Injects a Cargo dependency so if "renderer" changes, this recompiles.
+//  Usage: cell_remote!(MyClient = "exchange");
 // =========================================================================
 
 struct CellRemoteInput {
@@ -306,15 +309,10 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
 
     let client_code = generate_client(&genome, &name, &address_str);
     
-    // CRITICAL: Dependency Injection for Cargo
-    // If we found the source file, we generate a dummy `include_bytes!` const.
-    // This forces Cargo to track that file. If the server code changes, 
-    // the client crate detects it and recompiles, updating the protocol.
+    // Dependency Injection: Force Cargo to recompile if server source changes
     let dependency_hack = if let Some(path) = source_path {
         let path_str = path.to_str().unwrap();
-        quote! {
-            const _: &[u8] = include_bytes!(#path_str);
-        }
+        quote! { const _: &[u8] = include_bytes!(#path_str); }
     } else {
         quote! {}
     };
@@ -328,7 +326,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
 // --- Source Analysis Logic ---
 
 fn try_source_analysis(cell_name: &str) -> Result<(CellGenome, PathBuf), String> {
-    // Search paths for the cell's source code
     let paths = vec![
         PathBuf::from(format!("cells/{}/src/main.rs", cell_name)),
         PathBuf::from(format!("../{}/src/main.rs", cell_name)),
@@ -336,7 +333,6 @@ fn try_source_analysis(cell_name: &str) -> Result<(CellGenome, PathBuf), String>
     ];
 
     for path in paths {
-        // We use canonicalize to get absolute path for include_bytes!
         if let Ok(abs_path) = std::fs::canonicalize(&path) {
             if abs_path.exists() {
                 return Ok((parse_source_file(&abs_path)?, abs_path));
@@ -354,7 +350,7 @@ fn parse_source_file(path: &Path) -> Result<CellGenome, String> {
     let mut methods = Vec::new();
     let mut types_found = Vec::new();
 
-    // Pass 1: Find the struct marked with #[cell::service]
+    // Pass 1: Find Service & Proteins
     for item in &syntax.items {
         if let syn::Item::Struct(s) = item {
             if has_attr(&s.attrs, "service") {
@@ -373,7 +369,7 @@ fn parse_source_file(path: &Path) -> Result<CellGenome, String> {
 
     let service_name = service_name.ok_or("No #[cell::service] found in source")?;
 
-    // Pass 2: Find the impl block marked with #[cell::handler] for that struct
+    // Pass 2: Find Handler methods
     for item in &syntax.items {
         if let syn::Item::Impl(impl_block) = item {
             if has_attr(&impl_block.attrs, "handler") {
@@ -425,7 +421,7 @@ fn extract_method_schema(m: &syn::ImplItemFn) -> MethodSchema {
     }
 }
 
-// --- Runtime Connection Logic (Fallback) ---
+// --- Runtime Connection Logic ---
 
 fn try_runtime_connection(cell_name: &str) -> Result<CellGenome, String> {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -433,21 +429,17 @@ fn try_runtime_connection(cell_name: &str) -> Result<CellGenome, String> {
         let home = dirs::home_dir().ok_or("No home dir")?;
         let socket_path = home.join(".cell/run").join(format!("{}.sock", cell_name));
 
-        // If socket doesn't exist, try to spawn via Mitosis (Stem Cell)
         if !socket_path.exists() {
+            // Mitosis Attempt
             let umbilical = home.join(".cell/run/mitosis.sock");
             if umbilical.exists() {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
                 if let Ok(mut stream) = tokio::net::UnixStream::connect(&umbilical).await {
-                    let req = MitosisRequest::Spawn {
-                        cell_name: cell_name.to_string(),
-                    };
-                    // Send spawn request
-                    let bytes = rkyv::to_bytes::<_, 256>(&req).unwrap().into_vec();
+                    let req = MitosisRequest::Spawn { cell_name: cell_name.to_string() };
+                    let bytes = ::rkyv::to_bytes::<_, 256>(&req).unwrap().into_vec();
                     stream.write_all(&(bytes.len() as u32).to_le_bytes()).await.ok();
                     stream.write_all(&bytes).await.ok();
                     
-                    // Wait briefly for Ack (simplified)
                     let mut len_buf = [0u8; 4];
                     if stream.read_exact(&mut len_buf).await.is_ok() {
                         let len = u32::from_le_bytes(len_buf) as usize;
@@ -455,7 +447,6 @@ fn try_runtime_connection(cell_name: &str) -> Result<CellGenome, String> {
                         let _ = stream.read_exact(&mut buf).await;
                     }
                 }
-                // Spin-wait for socket creation
                 for _ in 0..20 {
                     if socket_path.exists() { break; }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -463,7 +454,6 @@ fn try_runtime_connection(cell_name: &str) -> Result<CellGenome, String> {
             }
         }
 
-        // Connect and request Genome
         let mut stream = tokio::net::UnixStream::connect(&socket_path).await.map_err(|e| e.to_string())?;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let req = b"__CELL_GENOME_REQUEST__";
@@ -497,10 +487,10 @@ fn cache_genome(cell_name: &str, g: &CellGenome) -> Result<(), String> {
 
 // --- Code Generation ---
 
-fn generate_client(genome: &CellGenome, client_name: &Ident, address: &str) -> proc_macro2::TokenStream {
+fn generate_client(genome: &CellGenome, client_name: &syn::Ident, address: &str) -> proc_macro2::TokenStream {
     let protocol_enum_name = format_ident!("{}Protocol", genome.name);
     
-    // 1. Generate Enum Variants matching the Server
+    // 1. Enum Variants
     let variants = genome.methods.iter().map(|m| {
         let vname = format_ident!("{}", to_pascal_case(&m.name));
         let fields = m.inputs.iter().map(|(n, t)| {
@@ -521,7 +511,7 @@ fn generate_client(genome: &CellGenome, client_name: &Ident, address: &str) -> p
 
     let type_defs = genome.types.iter().map(|t| type_schema_to_tokens(t));
 
-    // 2. Generate Client Methods
+    // 2. Client Methods
     let method_impls = genome.methods.iter().map(|m| {
         let fn_name = format_ident!("{}", m.name);
         let variant_name = format_ident!("{}", to_pascal_case(&m.name));
@@ -537,7 +527,6 @@ fn generate_client(genome: &CellGenome, client_name: &Ident, address: &str) -> p
             quote! { #id }
         });
         
-        // Return type handling
         let return_ty = match &m.output {
             TypeRef::Result(ok, _) => type_ref_to_tokens(ok),
             TypeRef::Unit => quote! { () },
@@ -551,15 +540,14 @@ fn generate_client(genome: &CellGenome, client_name: &Ident, address: &str) -> p
                 // Serialize request
                 let bytes = ::cell_sdk::rkyv::to_bytes::<_, 1024>(&req)?.into_vec();
                 
-                // Send via Synapse (fire_bytes helper in SDK)
-                let resp = self.conn.fire_bytes(bytes).await?;
+                // Send via Synapse
+                let resp_vesicle = self.conn.fire_bytes(bytes).await?;
                 
                 // Deserialize Result<T, String>
-                let res = ::cell_sdk::rkyv::from_bytes::<Result<#return_ty, String>>(resp.as_slice())
-                    .map_err(|e| anyhow::anyhow!("Deserialization error: {}", e))?;
+                let res = ::cell_sdk::rkyv::from_bytes::<Result<#return_ty, String>>(resp_vesicle.as_slice())
+                    .map_err(|e| ::anyhow::anyhow!("Deserialization error: {}", e))?;
                 
-                // Convert String error back to Anyhow
-                res.map_err(|e| anyhow::anyhow!(e))
+                res.map_err(|e| ::anyhow::anyhow!(e))
             }
         }
     });
@@ -600,7 +588,6 @@ fn to_pascal_case(s: &str) -> String {
     }
 }
 
-/// Converts Rust AST types to our TypeRef enum for Schema Generation
 fn map_syn_type_to_ref(ty: &Type) -> TypeRef {
     match ty {
         Type::Path(tp) => {
@@ -646,7 +633,6 @@ fn map_syn_type_to_ref(ty: &Type) -> TypeRef {
     }
 }
 
-/// Converts our TypeRef back to TokenStream for code generation
 fn type_ref_to_tokens(t: &TypeRef) -> proc_macro2::TokenStream {
     match t {
         TypeRef::Primitive(p) => match p {

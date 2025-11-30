@@ -1,47 +1,66 @@
-use rkyv::AlignedVec;
+// cell-sdk/src/vesicle.rs
 
-/// A Vesicle is a membrane-bound container for data (Proteins).
-/// It ensures data is aligned for zero-copy processing.
-pub struct Vesicle {
-    inner: AlignedVec,
+use serde::{Deserialize, Serialize};
+
+#[cfg(target_os = "linux")]
+use crate::shm::ResponseGuard;
+
+/// A container for payload data.
+///
+/// It acts as a Zero-Copy abstraction over:
+/// 1. Owned Memory (Heap/Socket buffers)
+/// 2. Shared Memory (Ring Buffer Locks)
+///
+/// It implements `Deref<Target=[u8]>`, so you can use it like a slice.
+pub enum Vesicle<'a> {
+    /// Standard heap-allocated buffer (Socket transport)
+    Owned(Vec<u8>),
+
+    /// Zero-copy reference to the Shared Memory Ring Buffer.
+    /// Holding this variant keeps the consumer lock active via the RAII guard.
+    #[cfg(target_os = "linux")]
+    Borrowed(ResponseGuard<'a>),
+
+    /// Fallback for non-linux or empty states
+    Empty,
 }
 
-impl Vesicle {
-    pub fn new() -> Self {
-        Self {
-            inner: AlignedVec::new(),
-        }
-    }
-
-    pub fn with_capacity(cap: usize) -> Self {
-        let mut inner = AlignedVec::with_capacity(cap);
-        // Pre-expand logic to allow direct read
-        for _ in 0..cap {
-            inner.push(0);
-        }
-        Self { inner }
-    }
-
+impl<'a> Vesicle<'a> {
+    /// Wraps an owned vector.
     pub fn wrap(data: Vec<u8>) -> Self {
-        let mut inner = AlignedVec::with_capacity(data.len());
-        inner.extend_from_slice(&data);
-        Self { inner }
+        Self::Owned(data)
     }
 
+    /// Returns a slice to the underlying data.
     pub fn as_slice(&self) -> &[u8] {
-        self.inner.as_slice()
-    }
-
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        self.inner.as_mut_slice()
+        match self {
+            Self::Owned(vec) => vec.as_slice(),
+            #[cfg(target_os = "linux")]
+            // ResponseGuard implements Deref<Target=[u8]>, so we deref it once.
+            Self::Borrowed(guard) => &**guard,
+            Self::Empty => &[],
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.as_slice().len()
     }
 
-    /// Extract the inner AlignedVec
-    pub fn into_inner(self) -> AlignedVec {
-        self.inner
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+// Allow treating Vesicle directly as a byte slice
+impl<'a> std::ops::Deref for Vesicle<'a> {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<'a> std::fmt::Debug for Vesicle<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Vesicle(len={})", self.len())
     }
 }
