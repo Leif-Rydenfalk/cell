@@ -11,11 +11,11 @@ pub mod synapse;
 pub mod vesicle;
 
 // Re-exports for ease of use
-// We add 'cell_remote' and 'service' (protein alias) here
 pub use cell_macros::{cell_remote, handler, protein, service};
 pub use membrane::Membrane;
 pub use root::MyceliumRoot;
 pub use shm::GapJunction;
+pub use shm::ShmClient;
 pub use synapse::Synapse;
 pub use vesicle::Vesicle;
 

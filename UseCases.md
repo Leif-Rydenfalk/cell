@@ -92,3 +92,117 @@ With **6M ops/sec**, **zero-copy**, and **compile-time safety**, Cell is **ready
 - **VR/AR** (real-time 3D sync)  
 
 **What will you grow next?**
+
+---
+
+Yes—once you grok the **three-line recipe**, the API feels like **writing local Rust** that just **happens to run somewhere else**.  
+No `.proto`, no JSON, no HTTP, no `async-trait` boilerplate—just:
+
+```rust
+// 1. Declare the service
+#[cell::service]
+struct MySvc { ... }
+
+// 2. Tag the impl block
+#[cell::handler]
+impl MySvc {
+    async fn add(&self, a: u32, b: u32) -> Result<u32> { Ok(a + b) }
+}
+
+// 3. Auto-generate a client anywhere
+cell_remote!(MyClient = "mysvc");
+let mut c = MyClient::connect().await?;
+assert_eq!(c.add(2, 3).await?, 5);
+```
+
+That’s **literally it**.  
+Below are the **ergonomics highlights** and the **rough edges** we still sand down.
+
+--------------------------------------------------------
+1.  Zero-ceremony server
+--------------------------------------------------------
+tokio::main  
+async fn main() -> Result<()> {
+    let svc = MySvc::new();
+    Membrane::bind("mysvc", |v| async move {
+        svc.handle_cell_message(v.as_slice()).await
+    }, None).await
+}
+
+No hand-written `match`, no `serde`, no `dyn Trait`—the `#[handler]` macro
+emits the dispatcher and the `CELL_GENOME` schema for you.
+
+--------------------------------------------------------
+2.  Client = ordinary Rust struct
+--------------------------------------------------------
+The macro produces:
+
+pub struct MyClient { conn: Synapse }
+
+impl MyClient {
+    pub async fn connect() -> Result<Self> { ... }
+    pub async fn add(&mut self, a: u32, b: u32) -> Result<u32>;
+}
+
+Call-sites look **exactly** like local code, but underneath it’s:
+- Unix-socket handshake (1 RTT)  
+- `rkyv` zero-copy serialize (no copies, no alloc)  
+- 4-byte length prefix + framed message  
+- `Result<T, String>` automatically round-tripped
+
+--------------------------------------------------------
+3.  Type evolution without breakage
+--------------------------------------------------------
+Compile-time fingerprinting (`SCHEMA_FINGERPRINT`) refuses to link if
+client and server drift.  You get a **build error** instead of a runtime
+panic:
+
+error: Schema mismatch.  
+  Server 0x9a7f3b21…  
+  Client 0xe4d9a11c…  
+  Re-build the client.
+
+--------------------------------------------------------
+4.  Pipelined / batched calls
+--------------------------------------------------------
+`Synapse` keeps a **connection pool** and pipelines requests, so
+
+join!(
+    client.add(1, 2),
+    client.add(3, 4),
+    client.add(5, 6)
+)
+
+goes out **in parallel** on the same socket.  
+For fire-hose benchmarks we expose `submit_batch(vec![…])` which you saw
+doing 6 M ops/sec.
+
+--------------------------------------------------------
+5.  Cross-language bindings (almost free)
+--------------------------------------------------------
+`cell-bind` reads the **JSON genome** embedded in the binary and spits
+out Go / Python types + a tiny rkyv-like packer.  Example (Go):
+
+type AddReq struct { A uint32; B uint32 }
+func (c *Client) Add(a, b uint32) (uint32, error) { ... }
+
+No protobuf schema repo, no `protoc`, no grpc-gateway.
+
+--------------------------------------------------------
+6.  Rough edges (honest section)
+--------------------------------------------------------
+- **Errors are `String` today** – we’ll move to structured `thiserror`
+  types once the macro supports generics.  
+- **Streaming** – `fire()` is request-response; true streaming (pub-sub,
+  back-pressure) is coming via `GapJunction` ring-buffer channels.  
+- **Documentation** – still “read the examples”, but `cargo doc --open`
+  already gives you the generated client API.  
+- **Windows** – Unix-socket only; we’ll add TCP+QUIC for LAN clusters.
+
+--------------------------------------------------------
+7.  One-liner verdict
+--------------------------------------------------------
+If you like **Axum handlers** and **Tokio**, Cell feels like  
+“**Axum that compiles to a distributed system**”—same async Rust, but
+the callee can be **in another process, another container, or another
+machine**, and the compiler **guarantees they speak the same language**.
