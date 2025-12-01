@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+
 use crate::capsid::Capsid;
 use crate::protocol::{MitosisRequest, MitosisResponse};
 use crate::ribosome::Ribosome;

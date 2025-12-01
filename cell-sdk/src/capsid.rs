@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::{Child, Command};

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+
 //! # Cell Macros
 //!
 //! This crate provides the procedural macros that power the Cell biological computing substrate.
@@ -8,8 +11,6 @@ use quote::{format_ident, quote};
 use serde::{Deserialize, Serialize};
 use syn::parse::{Parse, ParseStream};
 use syn::{parse_macro_input, DeriveInput, ItemImpl, LitStr, Token, Type};
-
-// ... [Schema structs omitted for brevity, same as before] ...
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CellGenome {

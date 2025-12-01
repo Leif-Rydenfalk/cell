@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+
 use anyhow::Result; // Removed unused Context
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};

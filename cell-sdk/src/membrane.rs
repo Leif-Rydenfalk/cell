@@ -1,4 +1,5 @@
-// cell-sdk/src/membrane.rs
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use crate::protocol::{GENOME_REQUEST, SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
 use anyhow::{bail, Context, Result};

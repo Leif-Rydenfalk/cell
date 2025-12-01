@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+
 use memmap2::MmapMut;
 use rkyv::ser::serializers::AllocSerializer;
 use rkyv::ser::Serializer as _;

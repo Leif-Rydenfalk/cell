@@ -6,10 +6,17 @@ Run millions of zero-copy messages per second between sandboxed micro-services t
 
 ## 30-second Demo
 
+t1:
 ```bash
 git clone https://github.com/Leif-Rydenfalk/cell
-cd cell/examples/cell-market
+cd cell/examples/cell-market/cells/exchange
 cargo run --release
+```
+
+t2:
+```bash
+cd cell/examples/cell-market/cells/trader
+cargo run --release -- 1 ping
 ```
 
 On a 2013 Intel i5 you should see ~9.5 M trades/sec processed by five auto-spawned trader cells talking to a consensus-backed exchange.
@@ -29,14 +36,14 @@ Cell is a **biologically-inspired** runtime for building **secure, high-throughp
 
 ---
 
-## Performance (single core, old hardware)
+## Performance (single core, Intel i5-4300U @ 2.6 GHz, Linux 6.2)
 
 | Metric               | cell-market demo |
 |----------------------|------------------|
-| messages per second  | 9.5 M            |
-| median latency       | <1 µs (Unix sock) |
+| messages per second  | **1.48 M**       |
+| median RTT (ping)    | **677 ns**       |
 | batch 100 messages   | 1 disk sync      |
-| memory copy count    | 0 (rkyv archived) |
+| memory copy count    | 0 (rkyv archived)|
 
 ---
 
@@ -142,5 +149,12 @@ let reply = syn.fire(PingMsg::Ping(42)).await?;
 
 ## License
 
-MIT OR Apache-2.0  
-Built with ❤️ and a touch of chlorophyll.
+MIT + Attribution
+
+Copyright (c) 2025 Leif Rydenfalk  
+Attribution requirement: The above copyright notice shall be reproduced in  
+any binary, source or derivative distribution (including compiled artifacts,  
+container images, SaaS, or embedded firmware) in one of these forms:  
+  - A file named ATTRIBUTION in the root/top-level directory, or  
+  - A visible "About"/"Credits" page/UI element, or  
+  - A command-line flag --about that prints the notice.
