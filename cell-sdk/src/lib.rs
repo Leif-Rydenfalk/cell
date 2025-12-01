@@ -14,7 +14,6 @@ pub mod vesicle;
 pub use cell_macros::{cell_remote, handler, protein, service};
 pub use membrane::Membrane;
 pub use root::MyceliumRoot;
-pub use shm::GapJunction;
 pub use shm::ShmClient;
 pub use synapse::Synapse;
 pub use vesicle::Vesicle;

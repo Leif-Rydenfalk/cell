@@ -1,6 +1,6 @@
 use anyhow::Result;
 use cell_sdk as cell;
-use cell_sdk::membrane::Membrane;
+use cell_sdk::rkyv::Archived;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -18,6 +18,8 @@ struct ExchangeService {
 
 #[cell::handler]
 impl ExchangeService {
+    // Standard Handler (Deep Copy)
+    // The macro sees `String` (owned), so it deserializes arguments from SHM -> Heap.
     async fn place_order(&self, _symbol: String, _amount: u64, _side: u8) -> Result<u64> {
         let id = self.state.trade_count.fetch_add(1, Ordering::Relaxed);
         Ok(id)
@@ -29,8 +31,19 @@ impl ExchangeService {
         Ok(start + count as u64)
     }
 
-    async fn ingest_data(&self, data: Vec<u8>) -> Result<u64> {
+    // --- TRUE ZERO-COPY HANDLER ---
+    // The macro sees `&Archived<Vec<u8>>` (Reference).
+    // It passes the pointer from Shared Memory directly. No allocation!
+    async fn ingest_data(&self, data: &Archived<Vec<u8>>) -> Result<u64> {
+        // `data` is NOT a Vec<u8> on the heap. It is a view into the ring buffer.
+        // It behaves exactly like a slice.
         let len = data.len() as u64;
+        
+        // We can read bytes without copying
+        if len > 0 {
+            let _first_byte = data[0]; 
+        }
+
         self.state.bytes_received.fetch_add(len, Ordering::Relaxed);
         Ok(len)
     }
@@ -62,11 +75,8 @@ async fn main() -> Result<()> {
 
     println!("[Exchange] Online. Fingerprint: 0x{:x}", ExchangeService::SCHEMA_FINGERPRINT);
     
-    // Updated Bind: Takes `data` and `slot`
-    Membrane::bind("exchange", move |data, slot| {
-        let s = service.clone();
-        async move {
-            s.handle_cell_message(data, slot).await
-        }
-    }, Some(ExchangeService::CELL_GENOME.to_string())).await
+    // The macro generated a strictly typed `serve` method for you
+    service.serve("exchange").await?;
+    
+    Ok(())
 }

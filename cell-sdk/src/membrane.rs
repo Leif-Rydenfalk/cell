@@ -7,6 +7,7 @@
 use crate::protocol::{GENOME_REQUEST, SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
 use anyhow::{bail, Context, Result};
 use fd_lock::RwLock;
+use rkyv::ser::Serializer;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::fs::File;
 use std::marker::PhantomData;
