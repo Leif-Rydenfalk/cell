@@ -19,7 +19,7 @@ cd cell/examples/cell-market/cells/trader
 cargo run --release -- 1 ping
 ```
 
-On a 2013 Intel i5 you should see ~9.5 M trades/sec processed by five auto-spawned trader cells talking to a consensus-backed exchange.
+On a 2013 Intel i5 you should see ~681 ns and  ~1,407,409 QPS processed.
 
 ---
 
