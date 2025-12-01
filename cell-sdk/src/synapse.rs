@@ -54,9 +54,13 @@ impl Synapse {
         #[cfg(target_os = "linux")]
         if !self.upgrade_attempted {
             self.upgrade_attempted = true;
-            if let Err(e) = self.try_upgrade_to_shm().await {
-                // Log but continue
-                // eprintln!("SHM upgrade failed: {}", e);
+
+            // Check if SHM is disabled via environment variable
+            if std::env::var("CELL_DISABLE_SHM").is_err() {
+                if let Err(e) = self.try_upgrade_to_shm().await {
+                    // Log but continue (fallback to socket)
+                    eprintln!("SHM upgrade failed: {}", e);
+                }
             }
         }
 

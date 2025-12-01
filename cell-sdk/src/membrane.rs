@@ -139,6 +139,13 @@ where
         if buf == SHM_UPGRADE_REQUEST {
             #[cfg(target_os = "linux")]
             {
+                // Respect disable flag on server side too
+                if std::env::var("CELL_DISABLE_SHM").is_ok() {
+                    // Send 0 length packet to signal rejection/no-ack
+                    stream.write_all(&0u32.to_le_bytes()).await?;
+                    continue;
+                }
+
                 return handle_shm_upgrade::<F, Req, Resp>(stream, handler, cell_name).await;
             }
             #[cfg(not(target_os = "linux"))]
