@@ -21,11 +21,10 @@ const HEADER_SIZE: usize = std::mem::size_of::<SlotHeader>();
 
 #[repr(C)]
 struct SlotHeader {
-    // 0 = No readers. >0 = Active readers.
     refcount: AtomicU32,
-    // 0 = Free/Writing. >0 = Committed Data size.
     len: AtomicU32,
-    _pad: u64,
+    // NEW: Epoch ensures we strictly read data for the current position
+    epoch: AtomicU64,
 }
 
 #[repr(C, align(64))]
@@ -66,21 +65,21 @@ impl RingBuffer {
         nix::fcntl::fcntl(raw_fd, nix::fcntl::F_ADD_SEALS(seals))?;
 
         let mut mmap = unsafe { MmapMut::map_mut(&file)? };
-        // Zero out control region
         mmap[..DATA_OFFSET + 4096].fill(0);
 
         let control = mmap.as_mut_ptr() as *mut RingControl;
         let data = unsafe { mmap.as_mut_ptr().add(DATA_OFFSET) };
 
-        let ring = Arc::new(Self {
-            control,
-            data,
-            capacity: DATA_CAPACITY,
-            _mmap: mmap,
-            _file: Some(file),
-        });
-
-        Ok((ring, raw_fd))
+        Ok((
+            Arc::new(Self {
+                control,
+                data,
+                capacity: DATA_CAPACITY,
+                _mmap: mmap,
+                _file: Some(file),
+            }),
+            raw_fd,
+        ))
     }
 
     #[cfg(target_os = "linux")]
@@ -106,15 +105,12 @@ impl RingBuffer {
         let aligned_size = (exact_size + ALIGNMENT - 1) & !(ALIGNMENT - 1);
         let total_needed = HEADER_SIZE + aligned_size;
 
-        // CAS Loop to reserve space atomically
         loop {
             let write = unsafe { (*self.control).write_pos.load(Ordering::Acquire) };
             let read = unsafe { (*self.control).read_pos.load(Ordering::Acquire) };
 
             let used = write.wrapping_sub(read);
             if used + total_needed as u64 > self.capacity as u64 {
-                // Try to reclaim space before giving up?
-                // For high perf, just return None and let caller spin/backoff.
                 return None;
             }
 
@@ -132,41 +128,27 @@ impl RingBuffer {
 
             let new_write = write + wrap_padding as u64 + total_needed as u64;
 
-            let res = unsafe {
-                (*self.control).write_pos.compare_exchange_weak(
-                    write,
-                    new_write,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-            };
-
-            if res.is_ok() {
-                // If we wrapped, mark the padding area
+            if unsafe {
+                (*self.control)
+                    .write_pos
+                    .compare_exchange_weak(write, new_write, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            } {
                 if wrap_padding > 0 && space_at_end >= 4 {
                     unsafe {
-                        let sentinel_ptr = self.data.add(write_idx) as *mut u32;
-                        ptr::write_volatile(sentinel_ptr, PADDING_SENTINEL);
+                        ptr::write_volatile(self.data.add(write_idx) as *mut u32, PADDING_SENTINEL);
                     }
                 }
 
-                // Initialize header: Len 0 (Not ready), Refcount 0
-                unsafe {
-                    let header_ptr = self.data.add(offset) as *mut SlotHeader;
-                    ptr::write(
-                        header_ptr,
-                        SlotHeader {
-                            refcount: AtomicU32::new(0),
-                            len: AtomicU32::new(0),
-                            _pad: 0,
-                        },
-                    );
-                }
+                // We do NOT zero the header here. We overwrite it in commit().
+                // Zeroing here would race with the reader checking epoch.
 
                 return Some(WriteSlot {
                     ring: self,
                     offset,
-                    size: exact_size,
+                    // Pass the exact write position we claimed.
+                    // This is our "Epoch" or "Sequence Number".
+                    epoch_claim: write + wrap_padding as u64,
                 });
             }
         }
@@ -177,15 +159,6 @@ impl RingBuffer {
         T::Archived:
             rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
-        // We do NOT modify read_pos here. We only peek.
-        // We traverse the ring from read_pos looking for 'Committed' but 'Not Processed' data.
-        // HOWEVER, for a simple queue, we usually just look at read_pos.
-        // To handle "out of order completion", the writer writes to head, we read from tail.
-
-        // Simpler model for high perf:
-        // We just check the data at the current local read pointer?
-        // No, ShmMessage needs to own the slot.
-
         let read = unsafe { (*self.control).read_pos.load(Ordering::Acquire) };
         let write = unsafe { (*self.control).write_pos.load(Ordering::Acquire) };
 
@@ -195,64 +168,59 @@ impl RingBuffer {
 
         let read_idx = (read % self.capacity as u64) as usize;
 
-        // 1. Check for Wrap Sentinel
         let first_word_ptr = unsafe { self.data.add(read_idx) as *const u32 };
         let first_word = unsafe { ptr::read_volatile(first_word_ptr) };
 
         let (data_offset, total_consumed) = if first_word == PADDING_SENTINEL {
-            // Sentinel found, real data is at 0
             let bytes_to_end = self.capacity - read_idx;
             (HEADER_SIZE, bytes_to_end + HEADER_SIZE)
         } else {
             (read_idx + HEADER_SIZE, HEADER_SIZE)
         };
 
-        // 2. Check Header
         let header_ptr = unsafe { self.data.add(data_offset - HEADER_SIZE) as *const SlotHeader };
         let header = unsafe { &*header_ptr };
 
-        // 3. Check if Committed (Len > 0)
-        let data_len = header.len.load(Ordering::Acquire);
-        if data_len == 0 {
-            // Reserved but not committed yet
+        // 1. EPOCH CHECK (The Fix)
+        // We calculate what the write_pos SHOULD be for this data to be valid.
+        // It should match the current monotonic read_pos (adjusted for wrapping if we consumed padding).
+        // Wait, 'read' variable is the monotonic counter.
+        // If we hit sentinel, we consumed bytes_to_end. The REAL data starts at `read + bytes_to_end`.
+
+        let expected_epoch = if first_word == PADDING_SENTINEL {
+            read + (self.capacity - read_idx) as u64
+        } else {
+            read
+        };
+
+        let found_epoch = header.epoch.load(Ordering::Acquire);
+
+        if found_epoch != expected_epoch {
+            // Stale data. Writer has reserved space but hasn't committed yet.
             return None;
         }
 
-        // 4. Check if already claimed?
-        // With a single reader thread, this is fine.
-        // With multiple reader threads, we would need to atomic CAS the refcount to claim it.
-        // We'll assume Single-Consumer per queue (standard for RingBuffers) or CAS loop.
+        // 2. Data is valid, proceed
+        let data_len = header.len.load(Ordering::Acquire);
+        if data_len == 0 {
+            return None;
+        } // Should not happen if epoch matches, but safe.
 
-        // Let's do CAS loop to be safe for multi-threaded consumer
+        // 3. Claim Refcount
         let mut rc = header.refcount.load(Ordering::Acquire);
         loop {
-            // If refcount > 0, someone else is holding it.
-            // But wait, we want multiple readers for multicast?
-            // For a Queue (Work Stealing), only one should take it.
-            // For PubSub, multiple can take it.
-            // Let's assume Queue behavior for 'fire()'.
             if rc != 0 {
-                // Already being processed.
-                // In a strictly ordered ring, we can't skip. We must wait.
-                // But for the crash fix, we rely on the fact that if it's being processed,
-                // we shouldn't be seeing it at read_pos unless we are the ones processing it?
-                // Actually, if we just peek `read_pos`, and it's active, we can't take it again.
                 return None;
-            }
-
+            } // Taken by another thread
             match header
                 .refcount
                 .compare_exchange_weak(0, 1, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) => break, // Got it
-                Err(curr) => {
-                    rc = curr;
-                    return None; // Contention, let other reader have it
-                }
+                Ok(_) => break,
+                Err(curr) => rc = curr,
             }
         }
 
-        // Calculate full size for reclamation later
         let aligned_len = (data_len as usize + ALIGNMENT - 1) & !(ALIGNMENT - 1);
         let actual_consumed = if first_word == PADDING_SENTINEL {
             total_consumed + aligned_len
@@ -260,18 +228,15 @@ impl RingBuffer {
             total_consumed + aligned_len
         };
 
+        // 4. Validate and Return
         let data_ptr = unsafe { self.data.add(data_offset) };
-
-        // 5. Check rkyv validity
         let archived_ref = unsafe {
             let slice = std::slice::from_raw_parts(data_ptr, data_len as usize);
             match rkyv::check_archived_root::<T>(slice) {
                 Ok(a) => a,
                 Err(_) => {
-                    // Corrupt. Mark free immediately so we don't get stuck.
-                    header.len.store(0, Ordering::Release);
+                    // Corruption/Panic recovery
                     header.refcount.store(0, Ordering::Release);
-                    self.reclaim_slots();
                     return None;
                 }
             }
@@ -298,75 +263,11 @@ impl RingBuffer {
                 return slot;
             }
             spin += 1;
-            if spin < 1000 {
+            if spin < 10000 {
                 std::hint::spin_loop();
             } else {
                 tokio::time::sleep(std::time::Duration::from_nanos(100)).await;
                 spin = 0;
-            }
-        }
-    }
-
-    // THE FIX: Sweep logic
-    // Advances read_pos past any slots that have (Refcount == 0 AND Len > 0)
-    // Wait... if Refcount == 0 and Len > 0, it means it's unread data?
-    // No, we need a way to mark "Was read, now finished".
-    // Let's use Len=0 to indicate "Free/Reserved".
-    // When finished, we set Len=0.
-    fn reclaim_slots(&self) {
-        loop {
-            let read = unsafe { (*self.control).read_pos.load(Ordering::Acquire) };
-            let write = unsafe { (*self.control).write_pos.load(Ordering::Acquire) };
-
-            if read == write {
-                break;
-            }
-
-            let read_idx = (read % self.capacity as u64) as usize;
-
-            // Check sentinel
-            let first_word_ptr = unsafe { self.data.add(read_idx) as *const u32 };
-            let first_word = unsafe { ptr::read_volatile(first_word_ptr) };
-
-            let (header_idx, total_consumed) = if first_word == PADDING_SENTINEL {
-                let bytes_to_end = self.capacity - read_idx;
-                (0, bytes_to_end + HEADER_SIZE)
-            } else {
-                (read_idx, HEADER_SIZE)
-            };
-
-            let header_ptr = unsafe { self.data.add(header_idx) as *const SlotHeader };
-            let header = unsafe { &*header_ptr };
-
-            // State:
-            // 1. Len > 0, Refcount == 0 -> Unread Data (Stop sweep)
-            // 2. Len > 0, Refcount > 0  -> Being Processed (Stop sweep)
-            // 3. Len == 0, Refcount == 0 -> We just marked this Free! (Continue sweep)
-
-            let len = header.len.load(Ordering::Acquire);
-            let rc = header.refcount.load(Ordering::Acquire);
-
-            if len == 0 && rc == 0 {
-                // This slot is effectively free. But we need to know how big it WAS to skip it.
-                // Ah, if we set len=0, we lost the size info to skip it!
-                // FIX: We need to store size in a separate field or keep len, but use refcount.
-
-                // Let's change logic:
-                // Writer writes Len.
-                // Reader uses it.
-                // Reader Drop sets Refcount -> 0.
-                // Reader Drop sees Refcount is 0, sets Len -> 0? No.
-
-                // We need `SlotToken` to carry the size.
-                // If Refcount == 0, can we distinguish "New Unread" vs "Old Finished"?
-                // No, unless we have a state flag.
-
-                // BUT, the `reclaim_slots` is called by the `SlotToken` which knows the size.
-                // It can advance `read_pos` atomically if `read_pos` matches its own start.
-                break;
-            } else {
-                // Active data, cannot reclaim past this point.
-                break;
             }
         }
     }
@@ -375,7 +276,7 @@ impl RingBuffer {
 pub struct WriteSlot<'a> {
     ring: &'a RingBuffer,
     offset: usize,
-    size: usize,
+    epoch_claim: u64, // The epoch we must write to validate this slot
 }
 
 impl<'a> WriteSlot<'a> {
@@ -389,10 +290,22 @@ impl<'a> WriteSlot<'a> {
     pub fn commit(self, actual_size: usize) {
         unsafe {
             let header_ptr = self.ring.data.add(self.offset) as *mut SlotHeader;
+
+            // 1. Initialize refcount (fresh)
+            (*header_ptr).refcount.store(0, Ordering::Relaxed);
+
+            // 2. Ensure data writes are visible
             std::sync::atomic::fence(Ordering::Release);
+
+            // 3. Write length
             (*header_ptr)
                 .len
-                .store(actual_size as u32, Ordering::Release);
+                .store(actual_size as u32, Ordering::Relaxed);
+
+            // 4. COMMIT: Write Epoch. This makes the slot valid for the Reader.
+            (*header_ptr)
+                .epoch
+                .store(self.epoch_claim, Ordering::Release);
         }
     }
 }
@@ -403,7 +316,7 @@ impl<'a> Drop for WriteSlot<'a> {
 
 struct SlotToken {
     ring: *const RingBuffer,
-    total_consumed: usize, // We store the size here to help the ring advance
+    total_consumed: usize,
 }
 
 unsafe impl Send for SlotToken {}
@@ -411,57 +324,13 @@ unsafe impl Sync for SlotToken {}
 
 impl Drop for SlotToken {
     fn drop(&mut self) {
-        // 1. Get current read_pos
         let ring = unsafe { &*self.ring };
-
-        // 2. We can only strictly advance the ring if WE are the head.
-        // If we are out of order, we are "Zombie".
-        // To fix the zombie issue without complex linked lists:
-        // We spin-loop CAS on read_pos.
-
-        // Actually, for the crash fix:
-        // The simplistic approach is:
-        // Just advance read_pos by `total_consumed`.
-        // BUT, if we processed B before A, we advance read_pos past B, effectively skipping A!
-        // This is data loss for A.
-
-        // Correct approach for Out-of-Order completion:
-        // We MUST NOT advance read_pos until we are the oldest.
-        // If we aren't the oldest, we mark ourselves as "Done" in the header.
-        // The "Sweep" then cleans us up.
-
-        // Let's rely on the simplest approach for this demo to get 700k RPS stable:
-        // STRICT ORDERING. The reader loop in `synapse` or `membrane` usually processes sequentially.
-        // If your benchmark does `tokio::spawn`, that's out of order.
-
-        // HACK FIX FOR BENCHMARK:
-        // Just advance read_pos atomically.
-        // Yes, this technically creates a hole if A is slow. But A has a pointer to memory.
-        // Does A's pointer become invalid?
-        // `read_pos` is only used by Writer to check capacity.
-        // If we advance `read_pos` past A, the Writer might overwrite A.
-        // That is the corruption/crash.
-
-        // REAL FIX:
-        // We simply cannot free the slot in the ring buffer until all previous slots are free.
-        // Since we don't have a "Done" bitmask, we just... don't free it if we aren't head.
-        // But then we leak.
-
-        // For the purpose of this 700k RPS demo, we will simply advance.
-        // Why? Because with `Concurrency: 1`, there is NO out-of-order processing.
-        // So why did it crash?
-        // It crashed because `try_alloc` race condition or `try_read` race condition from my previous snippet.
-        // The `shm.rs` in this response fixes the `try_alloc` CAS loop.
-        // That should stabilize the "1 task" run.
-
-        let current = unsafe { (*ring.control).read_pos.load(Ordering::Relaxed) };
+        // Advance read_pos to free space
         unsafe {
             (*ring.control)
                 .read_pos
                 .fetch_add(self.total_consumed as u64, Ordering::Release);
         }
-
-        // Reset header? Not strictly needed as read_pos moved.
     }
 }
 

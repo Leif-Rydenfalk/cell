@@ -16,7 +16,7 @@ enum ExchangeServiceProtocol {
     PlaceOrder { symbol: String, amount: u64, side: u8 },
     SubmitBatch { count: u32 },
     IngestData { data: Vec<u8> },
-    Ping { seq: u64 }, // <--- NEW: Honest Ping
+    Ping { seq: u64 },
 }
 
 #[derive(cell_sdk::serde::Serialize, cell_sdk::serde::Deserialize, cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize, cell_sdk::rkyv::Deserialize)]
@@ -27,7 +27,7 @@ enum ExchangeServiceResponse {
     PlaceOrder(Result<u64, String>),
     SubmitBatch(Result<u64, String>),
     IngestData(Result<u64, String>),
-    Ping(Result<u64, String>), // <--- NEW: Honest Pong
+    Ping(Result<u64, String>),
 }
 
 // --- Client Implementation ---
@@ -52,7 +52,6 @@ impl ExchangeClient {
         }
     }
 
-    // ✅ Honest Ping-Pong: Send seq, wait for echo, return.
     pub async fn ping(&mut self, seq: u64) -> Result<u64> {
         let req = ExchangeServiceProtocol::Ping { seq };
         let resp = self.connection().fire::<ExchangeServiceProtocol, ExchangeServiceResponse>(&req).await?;
@@ -80,7 +79,7 @@ fn format_num(n: f64) -> String {
 enum Mode {
     Batch(u32),
     Bytes(usize),
-    Ping, // <--- NEW
+    Ping,
 }
 
 #[tokio::main]
@@ -115,7 +114,7 @@ async fn main() -> Result<()> {
     match mode {
         Mode::Batch(s) => println!(" Mode        : Batch Orders (Size: {})", s),
         Mode::Bytes(s) => println!(" Mode        : Bandwidth (Payload: {} bytes)", s),
-        Mode::Ping     => println!(" Mode        : Honest Ping-Pong (Latency Focus)"),
+        Mode::Ping     => println!(" Mode        : Honest Ping-Pong (Integrity Verified)"),
     }
     println!("--------------------------------------------------");
 
@@ -126,6 +125,7 @@ async fn main() -> Result<()> {
     let r_lat = latency_sum_ns.clone();
     let r_mode = mode.clone();
 
+    // Reporter Task
     tokio::spawn(async move {
         let mut last_req = 0;
         let mut last_lat = 0;
@@ -144,8 +144,6 @@ async fn main() -> Result<()> {
             let delta_lat = curr_lat - last_lat;
 
             let rps = delta_req as f64 / elapsed;
-            
-            // Raw RTT average
             let avg_ns = if delta_req > 0 { delta_lat as f64 / delta_req as f64 } else { 0.0 };
             
             let latency_str = if avg_ns < 1000.0 {
@@ -157,7 +155,7 @@ async fn main() -> Result<()> {
             match r_mode {
                 Mode::Ping => {
                      println!(
-                        "Ping RTT: {:>10} | QPS: {:>10}",
+                        "Ping RTT: {:>10} | QPS: {:>10} | Verified",
                         latency_str, format_num(rps)
                     );
                 },
@@ -195,12 +193,7 @@ async fn main() -> Result<()> {
             };
             
             let mut seq = 0u64;
-            
-            let payload = if let Mode::Bytes(size) = task_mode {
-                Some(vec![0u8; size])
-            } else {
-                None
-            };
+            let payload = if let Mode::Bytes(size) = task_mode { Some(vec![0u8; size]) } else { None };
 
             loop {
                 let start = Instant::now();
@@ -208,10 +201,24 @@ async fn main() -> Result<()> {
                 let res = match task_mode {
                     Mode::Ping => {
                         seq = seq.wrapping_add(1);
-                        client.ping(seq).await
+                        let ret = client.ping(seq).await;
+                        
+                        // INTEGRITY CHECK
+                        if let Ok(val) = ret {
+                            if val != seq {
+                                panic!("FATAL: Data corruption! Sent {} but got {}", seq, val);
+                            }
+                            // Optional log to prove it's running
+                            if seq % 1_000_000 == 0 {
+                                // eprintln!("[Task {}] Verified {} pings OK", i, seq);
+                            }
+                            Ok(0)
+                        } else {
+                            ret.map(|_| 0)
+                        }
                     },
                     Mode::Batch(batch_size) => {
-                        client.submit_batch(batch_size).await
+                        client.submit_batch(batch_size).await.map(|_| 0)
                     },
                     Mode::Bytes(_) => {
                         client.ingest_data(payload.clone().unwrap()).await
