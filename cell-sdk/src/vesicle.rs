@@ -1,10 +1,3 @@
-// cell-sdk/src/vesicle.rs
-
-use serde::{Deserialize, Serialize};
-
-#[cfg(target_os = "linux")]
-use crate::shm::ResponseGuard;
-
 /// A container for payload data.
 ///
 /// It acts as a Zero-Copy abstraction over:
@@ -19,7 +12,7 @@ pub enum Vesicle<'a> {
     /// Zero-copy reference to the Shared Memory Ring Buffer.
     /// Holding this variant keeps the consumer lock active via the RAII guard.
     #[cfg(target_os = "linux")]
-    Borrowed(ResponseGuard<'a>),
+    Borrowed(&'a [u8]),
 
     /// Fallback for non-linux or empty states
     Empty,
@@ -31,14 +24,26 @@ impl<'a> Vesicle<'a> {
         Self::Owned(data)
     }
 
+    /// Pre-allocate capacity
+    pub fn with_capacity(size: usize) -> Self {
+        Self::Owned(vec![0u8; size])
+    }
+
     /// Returns a slice to the underlying data.
     pub fn as_slice(&self) -> &[u8] {
         match self {
             Self::Owned(vec) => vec.as_slice(),
             #[cfg(target_os = "linux")]
-            // ResponseGuard implements Deref<Target=[u8]>, so we deref it once.
-            Self::Borrowed(guard) => &**guard,
+            Self::Borrowed(slice) => slice,
             Self::Empty => &[],
+        }
+    }
+
+    /// Get mutable slice (only for Owned variant)
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Owned(vec) => vec.as_mut_slice(),
+            _ => panic!("Cannot get mutable slice from borrowed vesicle"),
         }
     }
 

@@ -3,26 +3,35 @@
 // Automatic upgrade from socket transport to shared memory
 
 use memmap2::MmapMut;
-use rkyv::ser::serializers::BufferSerializer;
+use rkyv::ser::serializers::AllocSerializer;
 use rkyv::ser::Serializer as _;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::fs::File;
 use std::marker::PhantomData;
+use std::os::unix::io::AsRawFd;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::*};
 use std::sync::Arc;
+
+// === TYPE DEFINITIONS ===
+
+// We use AllocSerializer for the "serialize then copy" strategy.
+// This is safer than guessing sizes and allows exact allocation in the ring.
+pub type ShmSerializer = AllocSerializer<1024>;
 
 const CACHE_LINE: usize = 64;
 const RING_SIZE: usize = 32 * 1024 * 1024;
 const DATA_OFFSET: usize = 128;
 const DATA_CAPACITY: usize = RING_SIZE - DATA_OFFSET;
 const PADDING_SENTINEL: u32 = 0xFFFFFFFF;
+const ALIGNMENT: usize = 16; // 16-byte alignment to be safe for all types
 
 // === SLOT HEADER ===
-// Each message has this header before the rkyv data
 #[repr(C)]
 struct SlotHeader {
-    refcount: AtomicU32, // How many readers hold this slot
-    len: u32,            // Actual data length (not including header)
+    refcount: AtomicU32,
+    len: u32,
+    _pad: u64, // Pad to 16 bytes to maintain alignment of data following it
 }
 
 const HEADER_SIZE: usize = std::mem::size_of::<SlotHeader>();
@@ -42,6 +51,7 @@ pub struct RingBuffer {
     data: *mut u8,
     capacity: usize,
     _mmap: MmapMut,
+    _file: Option<File>,
 }
 
 unsafe impl Send for RingBuffer {}
@@ -52,12 +62,16 @@ impl RingBuffer {
     pub fn create(name: &str) -> anyhow::Result<(Arc<Self>, std::os::unix::io::RawFd)> {
         use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
         use std::ffi::CString;
-        use std::fs::File;
-        use std::os::unix::io::{AsRawFd, FromRawFd};
+        use std::os::unix::io::FromRawFd;
 
         let name_cstr = CString::new(name)?;
-        let fd = memfd_create(&name_cstr, MemFdCreateFlag::MFD_CLOEXEC)?;
-        let file = unsafe { File::from_raw_fd(fd) };
+
+        // Must allow sealing to use F_ADD_SEALS later
+        let flags = MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING;
+        let owned_fd = memfd_create(&name_cstr, flags)?;
+
+        // Convert OwnedFd to File safely
+        let file = File::from(owned_fd);
         file.set_len(RING_SIZE as u64)?;
 
         // Seal to prevent SIGBUS attacks
@@ -78,17 +92,20 @@ impl RingBuffer {
             data,
             capacity: DATA_CAPACITY,
             _mmap: mmap,
+            _file: Some(file),
         });
 
-        Ok((ring, raw_fd))
+        let fd_to_send = ring._file.as_ref().unwrap().as_raw_fd();
+
+        Ok((ring, fd_to_send))
     }
 
     #[cfg(target_os = "linux")]
     pub unsafe fn attach(fd: std::os::unix::io::RawFd) -> anyhow::Result<Arc<Self>> {
-        use std::fs::File;
         use std::os::unix::io::FromRawFd;
 
-        let file = File::from_raw_fd(fd);
+        let owned_fd = std::os::unix::io::OwnedFd::from_raw_fd(fd);
+        let file = File::from(owned_fd);
         let mut mmap = MmapMut::map_mut(&file)?;
 
         let control = mmap.as_mut_ptr() as *mut RingControl;
@@ -99,13 +116,14 @@ impl RingBuffer {
             data,
             capacity: DATA_CAPACITY,
             _mmap: mmap,
+            _file: Some(file),
         }))
     }
 
-    /// Try to allocate space for a message
-    /// Returns WriteSlot on success, None if full
-    pub fn try_alloc(&self, max_size: usize) -> Option<WriteSlot> {
-        let total_needed = HEADER_SIZE + max_size;
+    pub fn try_alloc(&self, exact_size: usize) -> Option<WriteSlot> {
+        // Ensure aligned size
+        let aligned_size = (exact_size + ALIGNMENT - 1) & !(ALIGNMENT - 1);
+        let total_needed = HEADER_SIZE + aligned_size;
 
         let write = unsafe { (*self.control).write_pos.load(Acquire) };
         let read = unsafe { (*self.control).read_pos.load(Acquire) };
@@ -119,25 +137,44 @@ impl RingBuffer {
         let space_at_end = self.capacity - write_idx;
 
         let (offset, wrap_padding) = if space_at_end >= total_needed {
-            // Fits at end
             (write_idx, 0)
         } else {
-            // Need to wrap - write padding sentinel
-            unsafe {
-                let sentinel_ptr = self.data.add(write_idx) as *mut u32;
-                ptr::write_volatile(sentinel_ptr, PADDING_SENTINEL);
+            // Need to wrap. Write padding sentinel.
+            if space_at_end >= 4 {
+                unsafe {
+                    let sentinel_ptr = self.data.add(write_idx) as *mut u32;
+                    ptr::write_volatile(sentinel_ptr, PADDING_SENTINEL);
+                }
             }
+            // Check if we have space at 0
+            let used_at_start = (read % self.capacity as u64) as usize;
+            // Actually, we rely on `write - read` logic above.
+            // If wrapping, we treat the end space as "consumed" effectively by skipping it.
+            // But we must check if we overlap with read pointer after wrap.
+            // Simplified: The `used` check handles total capacity.
+            // We just need to ensure `total_needed` fits at offset 0?
+            // The `used` calculation assumes linear buffer.
+            // A wrap consumes `space_at_end` extra bytes effectively.
+            // We should check if `used + space_at_end + total_needed <= capacity`.
+            // But `used` accounts for distance between W and R.
+            // If we skip `space_at_end`, we just advance `write_pos` by `space_at_end` first.
+
+            // Re-check capacity including the skip
+            if used + space_at_end as u64 + total_needed as u64 > self.capacity as u64 {
+                return None;
+            }
+
             (0, space_at_end)
         };
 
-        // Initialize slot header with refcount = 1 (writer holds it)
         unsafe {
             let header_ptr = self.data.add(offset) as *mut SlotHeader;
             ptr::write(
                 header_ptr,
                 SlotHeader {
                     refcount: AtomicU32::new(1),
-                    len: 0, // Will be set on commit
+                    len: 0,
+                    _pad: 0,
                 },
             );
         }
@@ -145,15 +182,17 @@ impl RingBuffer {
         Some(WriteSlot {
             ring: self,
             offset,
-            max_size,
+            size: exact_size,
             wrap_padding,
             committed: false,
         })
     }
 
-    /// Try to read next message
-    /// Returns ShmMessage with zero-copy reference
-    pub fn try_read<T: Archive>(&self) -> Option<ShmMessage<T>> {
+    pub fn try_read<T: Archive>(&self) -> Option<ShmMessage<T>>
+    where
+        T::Archived:
+            rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
+    {
         let read = unsafe { (*self.control).read_pos.load(Acquire) };
         let write = unsafe { (*self.control).write_pos.load(Acquire) };
 
@@ -166,53 +205,53 @@ impl RingBuffer {
         let first_word = unsafe { ptr::read_volatile(first_word_ptr) };
 
         let (data_offset, total_consumed) = if first_word == PADDING_SENTINEL {
-            // Wrapped - real data at offset 0
+            // Wrapped
             let bytes_to_end = self.capacity - read_idx;
+            // Read real header at 0
             let header_ptr = self.data as *const SlotHeader;
             let header = unsafe { &*header_ptr };
             let len = header.len as usize;
+            let aligned_len = (len + ALIGNMENT - 1) & !(ALIGNMENT - 1);
 
-            (HEADER_SIZE, bytes_to_end + HEADER_SIZE + len)
+            (HEADER_SIZE, bytes_to_end + HEADER_SIZE + aligned_len)
         } else {
-            // Data at current position
             let header_ptr = unsafe { self.data.add(read_idx) as *const SlotHeader };
             let header = unsafe { &*header_ptr };
             let len = header.len as usize;
+            let aligned_len = (len + ALIGNMENT - 1) & !(ALIGNMENT - 1);
 
-            (read_idx + HEADER_SIZE, HEADER_SIZE + len)
+            (read_idx + HEADER_SIZE, HEADER_SIZE + aligned_len)
         };
 
-        // Increment refcount (reader now holds slot)
+        // Increment refcount
         let header_ptr = unsafe { self.data.add(data_offset - HEADER_SIZE) as *const SlotHeader };
         let header = unsafe { &*header_ptr };
         header.refcount.fetch_add(1, AcqRel);
 
-        // Get pointer to archived data
         let data_ptr = unsafe { self.data.add(data_offset) };
         let data_len = header.len as usize;
 
-        // Validate and get archived reference
+        // Zero-copy verification
         let archived_ref = unsafe {
             let slice = std::slice::from_raw_parts(data_ptr, data_len);
             match rkyv::check_archived_root::<T>(slice) {
                 Ok(archived) => archived,
-                Err(_) => {
-                    // Validation failed - decrement refcount and return None
+                Err(e) => {
+                    // This can happen if reader sees partial write (shouldn't happen with atomic commit)
+                    // or corruption.
+                    eprintln!("[SHM] Validation failed: {:?}", e);
                     header.refcount.fetch_sub(1, Release);
                     return None;
                 }
             }
         };
 
-        // Create token that will manage refcount on drop
         let token = Arc::new(SlotToken {
             ring: self,
             header_ptr,
             total_consumed,
         });
 
-        // SAFETY: We increment refcount, so memory won't be reused
-        // The 'static lifetime is a lie but safe because SlotToken guards it
         let archived_static: &'static T::Archived = unsafe { std::mem::transmute(archived_ref) };
 
         Some(ShmMessage {
@@ -222,30 +261,17 @@ impl RingBuffer {
         })
     }
 
-    /// Check if we can reuse a slot (refcount == 0)
-    fn can_reuse_slot(&self, offset: usize) -> bool {
-        unsafe {
-            let header_ptr = self.data.add(offset) as *const SlotHeader;
-            let header = &*header_ptr;
-            header.refcount.load(Acquire) == 0
-        }
-    }
-
-    /// Wait for a slot to become available (spinning strategy)
-    async fn wait_for_slot(&self, max_size: usize) -> WriteSlot {
+    pub async fn wait_for_slot(&self, size: usize) -> WriteSlot {
         let mut spin = 0u32;
         loop {
-            if let Some(slot) = self.try_alloc(max_size) {
+            if let Some(slot) = self.try_alloc(size) {
                 return slot;
             }
-
             spin += 1;
-            if spin < 100 {
+            if spin < 1000 {
                 std::hint::spin_loop();
-            } else if spin < 10000 {
-                tokio::task::yield_now().await;
             } else {
-                tokio::time::sleep(std::time::Duration::from_micros(10)).await;
+                tokio::time::sleep(std::time::Duration::from_micros(1)).await;
                 spin = 0;
             }
         }
@@ -256,38 +282,40 @@ impl RingBuffer {
 pub struct WriteSlot<'a> {
     ring: &'a RingBuffer,
     offset: usize,
-    max_size: usize,
+    size: usize,
     wrap_padding: usize,
     committed: bool,
 }
 
 impl<'a> WriteSlot<'a> {
-    /// Get mutable slice for serialization
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+    pub fn write(&mut self, data: &[u8]) {
+        if data.len() > self.size {
+            panic!(
+                "WriteSlot overflow: len {} > size {}",
+                data.len(),
+                self.size
+            );
+        }
         unsafe {
-            std::slice::from_raw_parts_mut(
-                self.ring.data.add(self.offset + HEADER_SIZE),
-                self.max_size,
-            )
+            let dest = self.ring.data.add(self.offset + HEADER_SIZE);
+            ptr::copy_nonoverlapping(data.as_ptr(), dest, data.len());
         }
     }
 
-    /// Commit with actual size (after serialization)
     pub fn commit(mut self, actual_size: usize) {
-        // Write actual length to header
         unsafe {
             let header_ptr = self.ring.data.add(self.offset) as *mut SlotHeader;
             (*header_ptr).len = actual_size as u32;
         }
 
-        // Advance write position
-        let total_advance = self.wrap_padding + HEADER_SIZE + actual_size;
+        let aligned_size = (self.size + ALIGNMENT - 1) & !(ALIGNMENT - 1);
+        let total_advance = self.wrap_padding + HEADER_SIZE + aligned_size;
+
         unsafe {
             let current = (*self.ring.control).write_pos.load(Relaxed);
-            (*self.ring.control).write_pos.store(
-                current + total_advance as u64,
-                Release, // Make data visible to readers
-            );
+            (*self.ring.control)
+                .write_pos
+                .store(current + total_advance as u64, Release);
         }
 
         self.committed = true;
@@ -296,13 +324,11 @@ impl<'a> WriteSlot<'a> {
 
 impl<'a> Drop for WriteSlot<'a> {
     fn drop(&mut self) {
-        if !self.committed {
-            panic!("WriteSlot dropped without commit - this causes data corruption");
-        }
+        // Rollback implicitly by not advancing write_pos
     }
 }
 
-// === SLOT TOKEN (RAII for refcount management) ===
+// === SLOT TOKEN (RAII) ===
 struct SlotToken {
     ring: *const RingBuffer,
     header_ptr: *const SlotHeader,
@@ -318,7 +344,6 @@ impl Drop for SlotToken {
             let header = &*self.header_ptr;
             let old_refcount = header.refcount.fetch_sub(1, Release);
 
-            // If we were the last reader, advance read position
             if old_refcount == 1 {
                 let ring = &*self.ring;
                 let current = (*ring.control).read_pos.load(Relaxed);
@@ -330,34 +355,40 @@ impl Drop for SlotToken {
     }
 }
 
-// === SHM MESSAGE (zero-copy wrapper) ===
-pub struct ShmMessage<T: Archive> {
+// === SHM MESSAGE ===
+pub struct ShmMessage<T: Archive>
+where
+    <T as Archive>::Archived: 'static,
+{
     archived: &'static T::Archived,
     _token: Arc<SlotToken>,
     _phantom: PhantomData<T>,
 }
 
-impl<T: Archive> ShmMessage<T> {
-    /// Get reference to archived data (zero-copy)
+impl<T: Archive> ShmMessage<T>
+where
+    <T as Archive>::Archived: 'static,
+{
     pub fn get(&self) -> &T::Archived {
         self.archived
     }
 
-    /// Deserialize if you need owned data (this DOES copy)
-    pub fn deserialize(&self) -> Result<T, <T::Archived as Deserialize<T, rkyv::Infallible>>::Error>
+    pub fn deserialize(&self) -> Result<T, rkyv::de::deserializers::SharedDeserializeMapError>
     where
-        T::Archived: Deserialize<T, rkyv::Infallible>,
+        T::Archived: rkyv::Deserialize<T, rkyv::de::deserializers::SharedDeserializeMap>,
     {
-        self.archived.deserialize(&mut rkyv::Infallible)
+        let mut deserializer = rkyv::de::deserializers::SharedDeserializeMap::new();
+        self.archived.deserialize(&mut deserializer)
     }
 }
 
-// ShmMessage is Send + Sync if T is Send
-unsafe impl<T: Archive + Send> Send for ShmMessage<T> {}
-unsafe impl<T: Archive + Sync> Sync for ShmMessage<T> {}
+unsafe impl<T: Archive + Send> Send for ShmMessage<T> where <T as Archive>::Archived: 'static {}
+unsafe impl<T: Archive + Sync> Sync for ShmMessage<T> where <T as Archive>::Archived: 'static {}
 
-// Clone creates another reference to the same message (increments refcount)
-impl<T: Archive> Clone for ShmMessage<T> {
+impl<T: Archive> Clone for ShmMessage<T>
+where
+    <T as Archive>::Archived: 'static,
+{
     fn clone(&self) -> Self {
         Self {
             archived: self.archived,
@@ -378,42 +409,37 @@ impl ShmClient {
         Self { tx, rx }
     }
 
-    /// Send request and wait for response (zero-copy on response)
     pub async fn request<Req, Resp>(&self, req: &Req) -> anyhow::Result<ShmMessage<Resp>>
     where
-        Req: for<'a> Serialize<BufferSerializer<&'a mut [u8]>>,
+        Req: Serialize<ShmSerializer>,
         Resp: Archive,
+        Resp::Archived:
+            rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
-        // 1. Estimate size (conservative)
-        let estimated_size = estimate_size(req);
+        // 1. Serialize to heap buffer first (Exact size, valid alignment)
+        let bytes = rkyv::to_bytes::<_, 1024>(req)?.into_vec();
+        let size = bytes.len();
 
-        // 2. Allocate slot
-        let mut slot = self.tx.wait_for_slot(estimated_size).await;
+        // 2. Allocate exact slot
+        let mut slot = self.tx.wait_for_slot(size).await;
 
-        // 3. Serialize directly into shared memory
-        let mut serializer = BufferSerializer::new(slot.as_mut_slice());
-        serializer
-            .serialize_value(req)
-            .map_err(|e| anyhow::anyhow!("Serialization failed: {:?}", e))?;
-        let actual_size = serializer.pos();
+        // 3. Copy
+        slot.write(&bytes);
 
         // 4. Commit
-        slot.commit(actual_size);
+        slot.commit(size);
 
-        // 5. Wait for response (zero-copy)
+        // 5. Wait for response
         let mut spin = 0u32;
         loop {
             if let Some(msg) = self.rx.try_read::<Resp>() {
                 return Ok(msg);
             }
-
             spin += 1;
-            if spin < 100 {
+            if spin < 1000 {
                 std::hint::spin_loop();
-            } else if spin < 10000 {
-                tokio::task::yield_now().await;
             } else {
-                tokio::time::sleep(std::time::Duration::from_micros(10)).await;
+                tokio::time::sleep(std::time::Duration::from_micros(1)).await;
                 spin = 0;
             }
         }
@@ -430,89 +456,36 @@ where
     F: Fn(&Req::Archived) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = anyhow::Result<Resp>> + Send,
     Req: Archive,
-    Resp: for<'a> Serialize<BufferSerializer<&'a mut [u8]>>,
+    Req::Archived:
+        rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
+    Resp: Serialize<ShmSerializer>,
 {
     let mut spin = 0u32;
 
     loop {
-        // 1. Try read request (zero-copy)
         let request = if let Some(msg) = rx.try_read::<Req>() {
             spin = 0;
             msg
         } else {
             spin += 1;
-            if spin < 100 {
+            if spin < 1000 {
                 std::hint::spin_loop();
-            } else if spin < 5000 {
-                tokio::task::yield_now().await;
             } else {
-                tokio::time::sleep(std::time::Duration::from_micros(50)).await;
+                tokio::time::sleep(std::time::Duration::from_micros(1)).await;
             }
             continue;
         };
 
-        // 2. Process (can hold request across await - it's refcounted!)
-        let response = handler(request.get()).await?;
-
-        // 3. Drop request early if possible
+        let archived_req = request.get();
+        let response = handler(archived_req).await?;
         drop(request);
 
-        // 4. Allocate response slot
-        let estimated_size = estimate_size(&response);
-        let mut slot = tx.wait_for_slot(estimated_size).await;
+        // Serialize to buffer
+        let bytes = rkyv::to_bytes::<_, 1024>(&response)?.into_vec();
+        let size = bytes.len();
 
-        // 5. Serialize response
-        let mut serializer = BufferSerializer::new(slot.as_mut_slice());
-        serializer
-            .serialize_value(&response)
-            .map_err(|e| anyhow::anyhow!("Serialization failed: {:?}", e))?;
-        let actual_size = serializer.pos();
-
-        // 6. Commit
-        slot.commit(actual_size);
+        let mut slot = tx.wait_for_slot(size).await;
+        slot.write(&bytes);
+        slot.commit(size);
     }
 }
-
-// === HELPER ===
-fn estimate_size<T>(value: &T) -> usize
-where
-    T: for<'a> Serialize<BufferSerializer<&'a mut [u8]>>,
-{
-    // Conservative estimate: serialize to dummy buffer and measure
-    let mut dummy = [0u8; 0];
-    let mut ser = BufferSerializer::new(&mut dummy[..]);
-    let _ = ser.serialize_value(value);
-    let size = ser.pos();
-
-    // Add 20% padding for safety
-    (size * 120) / 100
-}
-
-// === USAGE EXAMPLE ===
-/*
-#[derive(Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-struct Request {
-    id: u64,
-    data: Vec<u8>,
-}
-
-#[derive(Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
-struct Response {
-    result: String,
-}
-
-async fn example() {
-    let (tx_ring, tx_fd) = RingBuffer::create("tx").unwrap();
-    let (rx_ring, rx_fd) = RingBuffer::create("rx").unwrap();
-
-    let client = ShmClient::new(tx_ring, rx_ring);
-
-    let req = Request { id: 42, data: vec![1,2,3] };
-    let response = client.request::<Request, Response>(&req).await.unwrap();
-
-    // Zero-copy access!
-    println!("Result: {}", response.get().result);
-}
-*/

@@ -7,12 +7,61 @@ use std::env;
 
 cell_remote!(ExchangeClient = "exchange");
 
-// Configuration for the benchmark
+// --- Protocol Definitions (Shared Contract) ---
+// In a full implementation, these would be in a shared crate or generated from schema.
+
+#[derive(cell_sdk::serde::Serialize, cell_sdk::serde::Deserialize, cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize, cell_sdk::rkyv::Deserialize)]
+#[serde(crate = "cell_sdk::serde")]
+#[archive(check_bytes)]
+#[archive(crate = "cell_sdk::rkyv")]
+enum ExchangeServiceProtocol {
+    PlaceOrder { symbol: String, amount: u64, side: u8 },
+    SubmitBatch { count: u32 },
+    IngestData { data: Vec<u8> },
+}
+
+#[derive(cell_sdk::serde::Serialize, cell_sdk::serde::Deserialize, cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize, cell_sdk::rkyv::Deserialize)]
+#[serde(crate = "cell_sdk::serde")]
+#[archive(check_bytes)]
+#[archive(crate = "cell_sdk::rkyv")]
+enum ExchangeServiceResponse {
+    PlaceOrder(Result<u64, String>),
+    SubmitBatch(Result<u64, String>),
+    IngestData(Result<u64, String>),
+}
+
+// --- Client Implementation ---
+
+impl ExchangeClient {
+    pub async fn submit_batch(&mut self, count: u32) -> Result<u64> {
+        let req = ExchangeServiceProtocol::SubmitBatch { count };
+        let resp = self.connection().fire::<ExchangeServiceProtocol, ExchangeServiceResponse>(&req).await?;
+        match resp.deserialize()? {
+            ExchangeServiceResponse::SubmitBatch(Ok(res)) => Ok(res),
+            ExchangeServiceResponse::SubmitBatch(Err(e)) => anyhow::bail!(e),
+            _ => anyhow::bail!("Invalid response type"),
+        }
+    }
+
+    pub async fn ingest_data(&mut self, data: Vec<u8>) -> Result<u64> {
+        let req = ExchangeServiceProtocol::IngestData { data };
+        let resp = self.connection().fire::<ExchangeServiceProtocol, ExchangeServiceResponse>(&req).await?;
+        match resp.deserialize()? {
+            ExchangeServiceResponse::IngestData(Ok(res)) => Ok(res),
+            ExchangeServiceResponse::IngestData(Err(e)) => anyhow::bail!(e),
+            _ => anyhow::bail!("Invalid response type"),
+        }
+    }
+}
+
+// --- Benchmark Runner ---
+
 struct Config {
     concurrency: usize,
     mode: Mode,
 }
 
+#[derive(Clone)]
 enum Mode {
     Batch(u32),     // Value is batch size (e.g., 100 orders per req)
     Bytes(usize),   // Value is payload size in bytes (e.g., 1024 bytes)
@@ -89,10 +138,7 @@ async fn main() -> Result<()> {
         let t_bytes = bytes_count.clone();
         
         // Clone config data
-        let task_mode = match mode {
-            Mode::Batch(x) => Mode::Batch(x),
-            Mode::Bytes(x) => Mode::Bytes(x),
-        };
+        let task_mode = mode.clone();
 
         let handle = tokio::spawn(async move {
             // Establish a new connection per task to simulate distinct clients
