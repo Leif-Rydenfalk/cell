@@ -7,6 +7,10 @@ license = { workspace = true }
 description = "Zero-copy RPC framework and runtime SDK."
 repository = { workspace = true }
 
+[features]
+default = ["axon"]
+# Feature flag for LAN/WAN capabilities (QUIC, TLS, Discovery)
+axon = ["dep:quinn", "dep:rustls", "dep:rcgen", "dep:local-ip-address"]
 
 [dependencies]
 anyhow = "1.0"
@@ -30,3 +34,10 @@ dirs = "5.0"
 users = "0.11"
 cell-macros = { path = "../cell-macros" }
 blake3 = "1.5"
+
+# Networking
+quinn = { version = "0.10", optional = true }
+rustls = { version = "0.21", features = ["dangerous_configuration", "quic"], optional = true }
+rcgen = { version = "0.11", optional = true }
+local-ip-address = { version = "0.5", optional = true }
+lazy_static = "1.4"

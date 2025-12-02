@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use crate::protocol::{MitosisRequest, MitosisResponse, SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
-use crate::shm::ShmSerializer;
-use anyhow::{bail, Context, Result};
+#[cfg(feature = "axon")]
+use crate::axon::AxonClient;
+use crate::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
+use anyhow::{bail, Result};
 use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use crate::shm::ShmSerializer;
 
 #[cfg(target_os = "linux")]
 use crate::shm::{RingBuffer, ShmClient, ShmMessage};
@@ -23,6 +25,8 @@ enum Transport {
         client: ShmClient,
         _socket: UnixStream,
     },
+    #[cfg(feature = "axon")]
+    Quic(quinn::Connection),
     Empty,
 }
 
@@ -33,6 +37,7 @@ pub struct Synapse {
 
 impl Synapse {
     pub async fn grow(cell_name: &str) -> Result<Self> {
+        // 1. Try Local Socket (Fast Path)
         let socket_dir = resolve_socket_dir();
         let socket_path = socket_dir.join(format!("{}.sock", cell_name));
 
@@ -43,8 +48,16 @@ impl Synapse {
             });
         }
 
-        // Spawn logic omitted for brevity as it's not the issue, but standard logic applies
-        bail!("Cell not found (spawning unimplemented in this snippet)");
+        // 2. Try Axon (LAN Discovery & Connect) - If Feature Enabled
+        #[cfg(feature = "axon")]
+        if let Some(conn) = AxonClient::connect(cell_name).await? {
+            return Ok(Self {
+                transport: Transport::Quic(conn),
+                upgrade_attempted: false,
+            });
+        }
+
+        bail!("Cell '{}' not found locally or on LAN", cell_name);
     }
 
     pub async fn fire<Req, Resp>(&mut self, request: &Req) -> Result<Response<Resp>>
@@ -57,12 +70,12 @@ impl Synapse {
         #[cfg(target_os = "linux")]
         if !self.upgrade_attempted {
             self.upgrade_attempted = true;
-
-            // Check if SHM is disabled via environment variable
-            if std::env::var("CELL_DISABLE_SHM").is_err() {
-                if let Err(e) = self.try_upgrade_to_shm().await {
-                    // Log but continue (fallback to socket)
-                    eprintln!("SHM upgrade failed: {}", e);
+            // Only upgrade if we are on Socket transport (Local)
+            if let Transport::Socket(_) = self.transport {
+                 if std::env::var("CELL_DISABLE_SHM").is_err() {
+                    if let Err(e) = self.try_upgrade_to_shm().await {
+                        eprintln!("SHM upgrade failed: {}", e);
+                    }
                 }
             }
         }
@@ -71,6 +84,8 @@ impl Synapse {
             Transport::Socket(ref mut stream) => Self::fire_via_socket(stream, request).await,
             #[cfg(target_os = "linux")]
             Transport::SharedMemory { ref client, .. } => Self::fire_via_shm(client, request).await,
+            #[cfg(feature = "axon")]
+            Transport::Quic(ref mut conn) => AxonClient::fire(conn, request).await,
             Transport::Empty => bail!("Connection unusable"),
         }
     }
@@ -98,7 +113,6 @@ impl Synapse {
         let mut resp_bytes = vec![0u8; len];
         stream.read_exact(&mut resp_bytes).await?;
 
-        // Explicitly typed construction to satisfy inference
         Ok(Response::<Resp>::Owned(resp_bytes))
     }
 
@@ -174,8 +188,6 @@ where
     Owned(Vec<u8>),
     #[cfg(target_os = "linux")]
     ZeroCopy(ShmMessage<T>),
-
-    // Fix: Ensure T is used on non-Linux systems
     #[cfg(not(target_os = "linux"))]
     _Phantom(PhantomData<T>),
 }
@@ -203,7 +215,6 @@ where
         T::Archived: Deserialize<T, rkyv::de::deserializers::SharedDeserializeMap>
             + for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>>,
     {
-        // Explicitly annotate type to fix compiler inference error
         let archived: &T::Archived = self.get()?;
         let mut deserializer = rkyv::de::deserializers::SharedDeserializeMap::new();
         Ok(archived.deserialize(&mut deserializer)?)
@@ -242,18 +253,4 @@ fn resolve_socket_dir() -> PathBuf {
         return home.join(".cell/run");
     }
     PathBuf::from("/tmp/cell")
-}
-
-fn resolve_umbilical_path() -> PathBuf {
-    if let Ok(p) = std::env::var("CELL_UMBILICAL") {
-        return PathBuf::from(p);
-    }
-    let container_cord = std::path::Path::new("/tmp/mitosis.sock");
-    if container_cord.exists() {
-        return container_cord.to_path_buf();
-    }
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".cell/run/mitosis.sock");
-    }
-    PathBuf::from("/tmp/mitosis.sock")
 }

@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
+#[cfg(feature = "axon")]
+use crate::axon::AxonServer;
 use crate::protocol::{GENOME_REQUEST, SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
+use crate::shm::{RingBuffer, ShmMessage, ShmSerializer};
 use anyhow::{bail, Context, Result};
 use fd_lock::RwLock;
 use rkyv::ser::Serializer;
@@ -18,8 +21,6 @@ use tokio::net::{UnixListener, UnixStream};
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
-
-use crate::shm::{RingBuffer, ShmMessage, ShmSerializer};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -45,58 +46,104 @@ impl Membrane {
             + Send
             + 'static,
     {
-        let socket_dir = resolve_socket_dir();
-        tokio::fs::create_dir_all(&socket_dir).await?;
+        // Only check/enable LAN mode if the feature is compiled in
+        #[cfg(feature = "lan")]
+        if std::env::var("CELL_LAN").is_ok() {
+            // --- LAN MODE (Delegated to Axon) ---
+            let axon = AxonServer::ignite(name).await?;
 
-        let lock_path = socket_dir.join(format!("{}.lock", name));
-        let lock_file = File::create(&lock_path).context("Failed to create lock file")?;
-        let mut _guard = RwLock::new(lock_file);
-
-        if _guard.try_write().is_err() {
-            println!("[{}] Instance already running. Exiting.", name);
+            while let Some(conn) = axon.accept().await {
+                let h = handler.clone();
+                let g = Arc::new(genome_json.clone());
+                
+                tokio::spawn(async move {
+                    if let Ok(connection) = conn.await {
+                        while let Ok((send, recv)) = connection.accept_bi().await {
+                            let h_inner = h.clone();
+                            let g_inner = g.clone();
+                            
+                            // Axon handles the QUIC stream mechanics
+                            if let Err(e) = AxonServer::handle_rpc_stream::<F, Req, Resp>(send, recv, h_inner, g_inner).await {
+                                eprintln!("Axon RPC Error: {}", e);
+                            }
+                        }
+                    }
+                });
+            }
             return Ok(());
         }
 
-        let socket_path = socket_dir.join(format!("{}.sock", name));
-        if socket_path.exists() {
-            tokio::fs::remove_file(&socket_path).await?;
-        }
-
-        let listener = UnixListener::bind(&socket_path)
-            .with_context(|| format!("Failed to bind socket at {:?}", socket_path))?;
-
-        #[cfg(target_os = "linux")]
-        {
-            let perm = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&socket_path, perm)?;
-        }
-
-        println!("[{}] Membrane Active at {:?}", name, socket_path);
-
-        let genome = Arc::new(genome_json);
-
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let h = handler.clone();
-                    let g = genome.clone();
-                    let cell_name = name.to_string();
-
-                    tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection::<F, Req, Resp>(stream, h, g, &cell_name).await
-                        {
-                            if e.to_string() != "early eof" {
-                                eprintln!("[{}] Connection Error: {}", cell_name, e);
-                            }
-                        }
-                    });
-                }
-                Err(_) => break,
-            }
-        }
-        Ok(())
+        // --- LOCAL MODE (Unix Sockets / SHM) ---
+        // Fallback or Default
+        // Fix: Explicit type annotations needed for bind_local
+        bind_local::<F, Req, Resp>(name, handler, Arc::new(genome_json)).await
     }
+}
+
+async fn bind_local<F, Req, Resp>(
+    name: &str,
+    handler: F,
+    genome: Arc<Option<String>>,
+) -> Result<()>
+where
+    F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>> + Send + Sync + 'static + Clone,
+    Req: Archive + Send,
+    Req::Archived:
+        for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>> + 'static,
+    Resp: rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
+        + rkyv::Serialize<ShmSerializer>
+        + Send
+        + 'static,
+{
+    let socket_dir = resolve_socket_dir();
+    tokio::fs::create_dir_all(&socket_dir).await?;
+
+    let lock_path = socket_dir.join(format!("{}.lock", name));
+    let lock_file = File::create(&lock_path).context("Failed to create lock file")?;
+    let mut _guard = RwLock::new(lock_file);
+
+    if _guard.try_write().is_err() {
+        println!("[{}] Instance already running. Exiting.", name);
+        return Ok(());
+    }
+
+    let socket_path = socket_dir.join(format!("{}.sock", name));
+    if socket_path.exists() {
+        tokio::fs::remove_file(&socket_path).await?;
+    }
+
+    let listener = UnixListener::bind(&socket_path)
+        .with_context(|| format!("Failed to bind socket at {:?}", socket_path))?;
+
+    #[cfg(target_os = "linux")]
+    {
+        let perm = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&socket_path, perm)?;
+    }
+
+    println!("[{}] Membrane Active at {:?}", name, socket_path);
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let h = handler.clone();
+                let g = genome.clone();
+                let cell_name = name.to_string();
+
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        handle_connection::<F, Req, Resp>(stream, h, g, &cell_name).await
+                    {
+                        if e.to_string() != "early eof" {
+                            eprintln!("[{}] Connection Error: {}", cell_name, e);
+                        }
+                    }
+                });
+            }
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }
 
 async fn handle_connection<F, Req, Resp>(
@@ -140,13 +187,10 @@ where
         if buf == SHM_UPGRADE_REQUEST {
             #[cfg(target_os = "linux")]
             {
-                // Respect disable flag on server side too
                 if std::env::var("CELL_DISABLE_SHM").is_ok() {
-                    // Send 0 length packet to signal rejection/no-ack
                     stream.write_all(&0u32.to_le_bytes()).await?;
                     continue;
                 }
-
                 return handle_shm_upgrade::<F, Req, Resp>(stream, handler, cell_name).await;
             }
             #[cfg(not(target_os = "linux"))]

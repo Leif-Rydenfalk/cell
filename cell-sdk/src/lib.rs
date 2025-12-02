@@ -3,8 +3,12 @@
 
 extern crate self as cell_sdk;
 
+#[cfg(feature = "axon")]
+pub mod axon;
 pub mod capsid;
+pub mod container;
 pub mod membrane;
+#[cfg(feature = "axon")]
 pub mod pheromones;
 pub mod protocol;
 pub mod ribosome;
