@@ -1,9 +1,11 @@
 use anyhow::Result;
 use cell_sdk::cell_remote;
+use std::collections::hash_map::DefaultHasher;
+use std::env;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::env;
 
 cell_remote!(ExchangeClient = "exchange");
 
@@ -82,6 +84,44 @@ enum Mode {
     Ping,
 }
 
+// --- Sharded Counters ---
+const SHARDS: usize = 64; // Power of two for fast masking
+
+struct ShardedCounter {
+    shards: [AtomicU64; SHARDS],
+}
+
+impl ShardedCounter {
+    fn new() -> Self {
+        const NEW_SHARD: AtomicU64 = AtomicU64::new(0);
+        Self {
+            shards: [NEW_SHARD; SHARDS],
+        }
+    }
+
+    #[inline]
+    fn inc(&self, n: u64) {
+        let idx = shard_idx();
+        self.shards[idx].fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn load(&self) -> u64 {
+        self.shards.iter().map(|s| s.load(Ordering::Relaxed)).sum()
+    }
+}
+
+fn shard_idx() -> usize {
+    std::thread_local! {
+        static IDX: usize = {
+            let mut hasher = DefaultHasher::new();
+            std::thread::current().id().hash(&mut hasher);
+            (hasher.finish() as usize) & (SHARDS - 1)
+        };
+    }
+    IDX.with(|i| *i)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -118,8 +158,9 @@ async fn main() -> Result<()> {
     }
     println!("--------------------------------------------------");
 
-    let req_count = Arc::new(AtomicU64::new(0));
-    let latency_sum_ns = Arc::new(AtomicU64::new(0));
+    // Replace global AtomicU64 with Arc<ShardedCounter>
+    let req_count = Arc::new(ShardedCounter::new());
+    let latency_sum_ns = Arc::new(ShardedCounter::new());
 
     let r_req = req_count.clone();
     let r_lat = latency_sum_ns.clone();
@@ -137,8 +178,9 @@ async fn main() -> Result<()> {
             let elapsed = now.duration_since(start_time).as_secs_f64();
             start_time = now;
 
-            let curr_req = r_req.load(Ordering::Relaxed);
-            let curr_lat = r_lat.load(Ordering::Relaxed);
+            // Load summed values from shards
+            let curr_req = r_req.load();
+            let curr_lat = r_lat.load();
 
             let delta_req = curr_req - last_req;
             let delta_lat = curr_lat - last_lat;
@@ -208,10 +250,6 @@ async fn main() -> Result<()> {
                             if val != seq {
                                 panic!("FATAL: Data corruption! Sent {} but got {}", seq, val);
                             }
-                            // Optional log to prove it's running
-                            if seq % 1_000_000 == 0 {
-                                // eprintln!("[Task {}] Verified {} pings OK", i, seq);
-                            }
                             Ok(0)
                         } else {
                             ret.map(|_| 0)
@@ -229,8 +267,9 @@ async fn main() -> Result<()> {
 
                 match res {
                     Ok(_) => {
-                        t_req.fetch_add(1, Ordering::Relaxed);
-                        t_lat.fetch_add(duration, Ordering::Relaxed);
+                        // Use sharded inc
+                        t_req.inc(1);
+                        t_lat.inc(duration);
                     }
                     Err(_) => break, 
                 }
