@@ -44,12 +44,12 @@ impl AxonServer {
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
         transport_config.max_concurrent_uni_streams(0_u8.into()); // We only use Bi-streams
 
-        // 3. Try to bind to 40000, let OS fallback if busy
-        let addr = "[::]:40000".parse().or_else(|_| "[::]:0".parse())?;
-        let endpoint = quinn::Endpoint::server(server_config, addr)?;
+        // // 3. Try to bind to 40000, let OS fallback if busy
+        // let addr = "[::]:40000".parse().or_else(|_| "[::]:0".parse())?;
+        // let endpoint = quinn::Endpoint::server(server_config, addr)?;
 
-        // // 3. Bind to Random Port
-        // let endpoint = quinn::Endpoint::server(server_config, "[::]:0".parse()?)?;
+        // 3. Bind to Random Port
+        let endpoint = quinn::Endpoint::server(server_config, "[::]:0".parse()?)?;
         let port = endpoint.local_addr()?.port();
 
         // 4. Secrete Pheromones (Announce Presence)
