@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-#[cfg(feature = "lan")]
+#[cfg(feature = "axon")]
 use crate::axon::AxonClient;
 use crate::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
 use anyhow::{bail, Result};
@@ -24,7 +24,7 @@ enum Transport {
         client: ShmClient,
         _socket: UnixStream,
     },
-    #[cfg(feature = "lan")]
+    #[cfg(feature = "axon")]
     Quic(quinn::Connection),
     Empty,
 }
@@ -48,7 +48,7 @@ impl Synapse {
         }
 
         // 2. Manual Override (Bypass Discovery)
-        #[cfg(feature = "lan")]
+        #[cfg(feature = "axon")]
         if let Ok(peer_addr) = std::env::var("CELL_PEER") {
              println!("[Synapse] 🔗 Manual override to {}", peer_addr);
              let client = crate::axon::AxonClient::make_endpoint()?;
@@ -61,7 +61,7 @@ impl Synapse {
         }
 
         // 3. Try Axon (LAN Discovery & Connect)
-        #[cfg(feature = "lan")]
+        #[cfg(feature = "axon")]
         if let Some(conn) = AxonClient::connect(cell_name).await? {
             return Ok(Self {
                 transport: Transport::Quic(conn),
@@ -97,7 +97,7 @@ impl Synapse {
             Transport::Socket(ref mut stream) => Self::fire_via_socket(stream, request).await,
             #[cfg(target_os = "linux")]
             Transport::SharedMemory { ref client, .. } => Self::fire_via_shm(client, request).await,
-            #[cfg(feature = "lan")]
+            #[cfg(feature = "axon")]
             Transport::Quic(ref mut conn) => AxonClient::fire(conn, request).await,
             Transport::Empty => bail!("Connection unusable"),
         }

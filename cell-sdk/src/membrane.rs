@@ -47,7 +47,7 @@ impl Membrane {
             + 'static,
     {
         // Only check/enable LAN mode if the feature is compiled in
-        #[cfg(feature = "lan")]
+        #[cfg(feature = "axon")]
         if std::env::var("CELL_LAN").is_ok() {
             // --- LAN MODE (Delegated to Axon) ---
             let axon = AxonServer::ignite(name).await?;
