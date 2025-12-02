@@ -59,3 +59,5 @@ Else → build error: “exchange too far and local spawn disabled”.
 
 
 can we use cell in the cell sdk? If we want to implement say github implementation into cell sdk can we let cell sdk communicate to the cell-git instances which are running?
+
+sudo ufw allow 40000/udp
