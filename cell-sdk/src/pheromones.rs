@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-#![cfg(feature = "axon")]
+#![cfg(feature = "lan")]
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,6 @@ pub struct Signal {
     pub cell_name: String,
     pub ip: String,
     pub port: u16,
-    // Future: Add PubKey for Noise/Snow handshake
 }
 
 pub struct PheromoneSystem {
@@ -43,6 +42,10 @@ impl PheromoneSystem {
             eprintln!("Warning: SO_REUSEPORT failed: {}", e);
         }
 
+        // Essential for Router Traversal
+        socket.set_multicast_loop_v4(true)?;
+        socket.set_multicast_ttl_v4(2)?; 
+
         socket.set_nonblocking(true)?;
         socket.bind(&format!("0.0.0.0:{}", PORT).parse::<SocketAddr>()?.into())?;
         socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED)?;
@@ -53,14 +56,12 @@ impl PheromoneSystem {
             socket: Arc::new(udp),
         });
 
-        // Background Listener
         let sys_clone = sys.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 1024];
             loop {
                 if let Ok((len, _)) = sys_clone.socket.recv_from(&mut buf).await {
                     if let Ok(sig) = serde_json::from_slice::<Signal>(&buf[..len]) {
-                        // Update Cache
                         sys_clone.cache.write().await.insert(sig.cell_name.clone(), sig);
                     }
                 }
@@ -70,14 +71,16 @@ impl PheromoneSystem {
         Ok(sys)
     }
 
-    /// Automatically resolves local LAN IP
+    /// Resolves local LAN IP, or uses override from env var
     pub fn local_ip() -> String {
+        if let Ok(ip) = std::env::var("CELL_IP") {
+            return ip;
+        }
         local_ip_address::local_ip()
             .map(|ip| ip.to_string())
             .unwrap_or_else(|_| "127.0.0.1".to_string())
     }
 
-    /// One-off broadcast
     pub async fn secrete(&self, cell_name: &str, port: u16) -> Result<()> {
         let sig = Signal {
             cell_name: cell_name.into(),
@@ -90,7 +93,6 @@ impl PheromoneSystem {
         Ok(())
     }
 
-    /// Starts a background task that broadcasts presence every 5 seconds
     pub fn start_secreting(self: &Arc<Self>, cell_name: String, port: u16) {
         let sys = self.clone();
         tokio::spawn(async move {

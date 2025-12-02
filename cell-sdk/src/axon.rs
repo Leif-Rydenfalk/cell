@@ -184,7 +184,7 @@ impl AxonClient {
         Ok(Response::Owned(resp_bytes))
     }
 
-    fn make_endpoint() -> Result<quinn::Endpoint> {
+    pub fn make_endpoint() -> Result<quinn::Endpoint> {
         struct SkipServerVerification;
         impl rustls::client::ServerCertVerifier for SkipServerVerification {
             fn verify_server_cert(
