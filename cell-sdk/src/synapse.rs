@@ -5,9 +5,11 @@ use crate::protocol::{MitosisRequest, MitosisResponse, SHM_UPGRADE_ACK, SHM_UPGR
 use anyhow::{bail, Context, Result};
 use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::marker::PhantomData;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use crate::shm::ShmSerializer;
 
 #[cfg(target_os = "linux")]
 use crate::shm::{RingBuffer, ShmClient, ShmMessage, ShmSerializer};
@@ -96,7 +98,8 @@ impl Synapse {
         let mut resp_bytes = vec![0u8; len];
         stream.read_exact(&mut resp_bytes).await?;
 
-        Ok(Response::Owned(resp_bytes))
+        // Explicitly typed construction to satisfy inference
+        Ok(Response::<Resp>::Owned(resp_bytes))
     }
 
     #[cfg(target_os = "linux")]
@@ -171,6 +174,10 @@ where
     Owned(Vec<u8>),
     #[cfg(target_os = "linux")]
     ZeroCopy(ShmMessage<T>),
+    
+    // Fix: Ensure T is used on non-Linux systems
+    #[cfg(not(target_os = "linux"))]
+    _Phantom(PhantomData<T>),
 }
 
 impl<T: Archive> Response<T>
@@ -186,6 +193,8 @@ where
                 .map_err(|e| anyhow::anyhow!("Validation failed: {:?}", e)),
             #[cfg(target_os = "linux")]
             Response::ZeroCopy(msg) => Ok(msg.get()),
+            #[cfg(not(target_os = "linux"))]
+            Response::_Phantom(_) => anyhow::bail!("Invalid state"),
         }
     }
 
@@ -194,7 +203,8 @@ where
         T::Archived: Deserialize<T, rkyv::de::deserializers::SharedDeserializeMap>
             + for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>>,
     {
-        let archived = self.get()?;
+        // Explicitly annotate type to fix compiler inference error
+        let archived: &T::Archived = self.get()?;
         let mut deserializer = rkyv::de::deserializers::SharedDeserializeMap::new();
         Ok(archived.deserialize(&mut deserializer)?)
     }

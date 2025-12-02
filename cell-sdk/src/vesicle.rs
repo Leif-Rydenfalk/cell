@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
+use std::marker::PhantomData;
+
 /// A container for payload data.
 ///
 /// It acts as a Zero-Copy abstraction over:
@@ -19,6 +21,10 @@ pub enum Vesicle<'a> {
 
     /// Fallback for non-linux or empty states
     Empty,
+
+    /// Ensures the lifetime parameter is used on non-Linux platforms
+    #[cfg(not(target_os = "linux"))]
+    _Phantom(PhantomData<&'a ()>),
 }
 
 impl<'a> Vesicle<'a> {
@@ -39,6 +45,8 @@ impl<'a> Vesicle<'a> {
             #[cfg(target_os = "linux")]
             Self::Borrowed(slice) => slice,
             Self::Empty => &[],
+            #[cfg(not(target_os = "linux"))]
+            Self::_Phantom(_) => &[],
         }
     }
 
