@@ -2,6 +2,7 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use crate::protocol::{MitosisRequest, MitosisResponse, SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
+use crate::shm::ShmSerializer;
 use anyhow::{bail, Context, Result};
 use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -9,10 +10,9 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use crate::shm::ShmSerializer;
 
 #[cfg(target_os = "linux")]
-use crate::shm::{RingBuffer, ShmClient, ShmMessage, ShmSerializer};
+use crate::shm::{RingBuffer, ShmClient, ShmMessage};
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
@@ -174,7 +174,7 @@ where
     Owned(Vec<u8>),
     #[cfg(target_os = "linux")]
     ZeroCopy(ShmMessage<T>),
-    
+
     // Fix: Ensure T is used on non-Linux systems
     #[cfg(not(target_os = "linux"))]
     _Phantom(PhantomData<T>),
