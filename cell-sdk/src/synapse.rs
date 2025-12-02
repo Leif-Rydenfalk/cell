@@ -11,9 +11,10 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use crate::shm::ShmSerializer;
 
 #[cfg(target_os = "linux")]
-use crate::shm::{RingBuffer, ShmClient, ShmMessage, ShmSerializer};
+use crate::shm::{RingBuffer, ShmClient, ShmMessage};
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
