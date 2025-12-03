@@ -50,7 +50,7 @@ impl AxonServer {
 
         // 4. Secrete Pheromones (Announce Presence)
         // println!(
-        //     "[{}] 🌐 Axon Active. Listening on {}:{}",
+        //     "[{}]  Axon Active. Listening on {}:{}",
         //     cell_name,
         //     PheromoneSystem::local_ip(),
         //     port
@@ -145,7 +145,7 @@ impl AxonClient {
         while start.elapsed() < std::time::Duration::from_secs(1) {
             if let Some(signal) = pheromones.lookup(cell_name).await {
                 let addr_str = format!("{}:{}", signal.ip, signal.port);
-                // println!("[Axon] 🔭 Discovered {} at {} via LAN", cell_name, addr_str);
+                // println!("[Axon]  Discovered {} at {} via LAN", cell_name, addr_str);
 
                 let endpoint = Self::make_endpoint()?;
                 let addr = addr_str.parse().context("Invalid IP from discovery")?;

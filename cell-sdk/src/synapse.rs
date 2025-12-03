@@ -56,7 +56,7 @@ impl Synapse {
         {
             let addr = format!("{}:{}", signal.ip, signal.port);
             println!(
-                "[Synapse] 🔭 Auto-discovered {} at {} via LAN",
+                "[Synapse]  Auto-discovered {} at {} via LAN",
                 cell_name, addr
             );
 
@@ -71,7 +71,7 @@ impl Synapse {
         // 3. Manual Override (Bypass Discovery)
         #[cfg(feature = "axon")]
         if let Ok(peer_addr) = std::env::var("CELL_PEER") {
-            println!("[Synapse] 🔗 Manual override to {}", peer_addr);
+            println!("[Synapse]  Manual override to {}", peer_addr);
             let client = crate::axon::AxonClient::make_endpoint()?;
             let addr = peer_addr.parse()?;
             let conn = client.connect(addr, "localhost")?.await?;

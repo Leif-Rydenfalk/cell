@@ -39,7 +39,7 @@ impl PheromoneSystem {
         // --- 1. Setup IPv4 Socket ---
         match setup_socket_v4(&iface_str) {
             Ok(s) => {
-                // println!("[Pheromones] 🔥 IPv4 Active on interface: {}", iface_str);
+                // println!("[Pheromones]  IPv4 Active on interface: {}", iface_str);
                 sockets.push(Arc::new(s));
             }
             Err(e) => eprintln!("[Pheromones] Warning: Failed to bind IPv4: {}", e),
@@ -49,7 +49,7 @@ impl PheromoneSystem {
         if iface_str == "0.0.0.0" {
             match setup_socket_v6() {
                 Ok(s) => {
-                    // println!("[Pheromones] 🔥 IPv6 Active");
+                    // println!("[Pheromones]  IPv6 Active");
                     sockets.push(Arc::new(s));
                 }
                 Err(_) => {}

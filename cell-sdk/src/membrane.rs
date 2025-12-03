@@ -257,7 +257,7 @@ where
         );
     }
 
-    // println!("[{}] ⚡ Upgrading to zero-copy shared memory...", cell_name);
+    // println!("[{}]  Upgrading to zero-copy shared memory...", cell_name);
 
     let (rx_ring, rx_fd) = RingBuffer::create(&format!("{}_server_rx", cell_name))?;
     let (tx_ring, tx_fd) = RingBuffer::create(&format!("{}_server_tx", cell_name))?;
@@ -270,7 +270,7 @@ where
     let raw_fd = stream.as_raw_fd();
     send_fds(raw_fd, &[rx_fd, tx_fd])?;
 
-    // println!("[{}] ✓ Zero-copy shared memory active", cell_name);
+    // println!("[{}]  Zero-copy shared memory active", cell_name);
 
     serve_zero_copy::<F, Req, Resp>(rx_ring, tx_ring, handler).await
 }
