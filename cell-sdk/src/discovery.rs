@@ -6,10 +6,13 @@
 #![cfg(feature = "axon")]
 
 use crate::pheromones::Signal;
+use crate::protocol::GENOME_REQUEST;
 use crate::resolve_socket_dir;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 
 // --- Data Structures ---
@@ -19,15 +22,76 @@ pub struct CellNode {
     pub name: String,
     pub lan_address: Option<String>, // ip:port
     pub local_socket: Option<PathBuf>,
+    pub status: CellStatus,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CellStatus {
+    pub local_latency: Option<Duration>,
+    pub lan_latency: Option<Duration>,
+    pub is_alive: bool,
 }
 
 impl CellNode {
-    pub fn is_hybrid(&self) -> bool {
-        self.lan_address.is_some() && self.local_socket.is_some()
+    pub async fn probe(&mut self) {
+        // Probe Local Socket
+        if let Some(path) = &self.local_socket {
+            self.status.local_latency = probe_unix_socket(path).await;
+        }
+
+        // Probe LAN
+        if let Some(addr) = &self.lan_address {
+            self.status.lan_latency = probe_lan_address(addr).await;
+        }
+
+        self.status.is_alive =
+            self.status.local_latency.is_some() || self.status.lan_latency.is_some();
     }
 }
 
-// --- LAN Cache (Passive UDP) ---
+async fn probe_unix_socket(path: &PathBuf) -> Option<Duration> {
+    let start = Instant::now();
+    let mut stream = tokio::net::UnixStream::connect(path).await.ok()?;
+
+    // Send GENOME_REQUEST
+    let req_len = GENOME_REQUEST.len() as u32;
+    stream.write_all(&req_len.to_le_bytes()).await.ok()?;
+    stream.write_all(GENOME_REQUEST).await.ok()?;
+
+    // Read Response Header
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await.ok()?;
+
+    // We don't strictly need to read the body for a ping check, getting the header is proof of life.
+    // But protocol says server sends data. We should probably drain it or close.
+    // Closing is fine.
+
+    Some(start.elapsed())
+}
+
+async fn probe_lan_address(addr: &str) -> Option<Duration> {
+    let start = Instant::now();
+
+    // Connect
+    let conn = crate::axon::AxonClient::connect_exact(addr).await.ok()??;
+
+    // Open stream
+    let (mut send, mut recv) = conn.open_bi().await.ok()?;
+
+    // Send GENOME_REQUEST
+    let req_len = GENOME_REQUEST.len() as u32;
+    send.write_all(&req_len.to_le_bytes()).await.ok()?;
+    send.write_all(GENOME_REQUEST).await.ok()?;
+    send.finish().await.ok()?;
+
+    // Read Response Header
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await.ok()?;
+
+    Some(start.elapsed())
+}
+
+// --- LAN Cache ---
 
 pub struct LanDiscovery {
     cache: Arc<RwLock<HashMap<String, Signal>>>,
@@ -53,7 +117,6 @@ impl LanDiscovery {
         self.cache.read().await.get(name).cloned()
     }
 
-    /// Start background task to prune stale entries
     pub fn start_pruning(max_age_secs: u64) {
         tokio::spawn(async move {
             loop {
@@ -68,18 +131,16 @@ impl LanDiscovery {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-
         let mut cache = self.cache.write().await;
         cache.retain(|_, sig| now - sig.timestamp < max_age_secs);
     }
 }
 
-// --- Unified Discovery (FS + LAN) ---
+// --- Unified Discovery ---
 
 pub struct Discovery;
 
 impl Discovery {
-    /// Scans both the LAN cache and the local filesystem for Cells
     pub async fn scan() -> Vec<CellNode> {
         // 1. Snapshot LAN Cache
         let lan_map = LanDiscovery::global().cache.read().await.clone();
@@ -87,10 +148,9 @@ impl Discovery {
         // 2. Scan Local Sockets
         let local_names = scan_local_sockets().await;
 
-        // 3. Merge results
+        // 3. Merge (Name is the unique identity)
         let mut map: HashMap<String, CellNode> = HashMap::new();
 
-        // Populate from LAN
         for (name, sig) in lan_map {
             map.insert(
                 name.clone(),
@@ -98,21 +158,21 @@ impl Discovery {
                     name,
                     lan_address: Some(format!("{}:{}", sig.ip, sig.port)),
                     local_socket: None,
+                    status: CellStatus::default(),
                 },
             );
         }
 
-        // Merge Local Sockets
         let socket_dir = resolve_socket_dir();
         for name in local_names {
             let path = socket_dir.join(format!("{}.sock", name));
-
             map.entry(name.clone())
                 .and_modify(|node| node.local_socket = Some(path.clone()))
                 .or_insert(CellNode {
                     name,
                     lan_address: None,
                     local_socket: Some(path),
+                    status: CellStatus::default(),
                 });
         }
 
@@ -125,8 +185,6 @@ impl Discovery {
 async fn scan_local_sockets() -> Vec<String> {
     let mut names = vec![];
     let path = resolve_socket_dir();
-
-    // It's possible the dir doesn't exist if no local cells ever ran
     if !path.exists() {
         return names;
     }
@@ -134,11 +192,8 @@ async fn scan_local_sockets() -> Vec<String> {
     if let Ok(mut entries) = tokio::fs::read_dir(path).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            // Look for .sock files
             if let Some(ext) = path.extension() {
                 if ext == "sock" {
-                    // But ignore .lock files or other artifacts,
-                    // though .sock usually implies the socket itself.
                     if let Some(stem) = path.file_stem() {
                         names.push(stem.to_string_lossy().to_string());
                     }

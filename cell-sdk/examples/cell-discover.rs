@@ -1,95 +1,81 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-//! CLI tool to discover and list all Cells (LAN + Local)
-
 use anyhow::Result;
 use cell_sdk::{discovery::Discovery, pheromones::PheromoneSystem};
 use clap::Parser;
+use std::collections::HashSet;
+use std::time::Duration;
+use tokio::time::interval;
 
 #[derive(Parser)]
 #[command(name = "cell-discover")]
-#[command(about = "Discover Cells on LAN and Localhost", long_about = None)]
 struct Cli {
-    /// Wait time in seconds for LAN packets (default: 1)
-    #[arg(short, long, default_value_t = 1)]
-    wait: u64,
+    /// Skip latency probing
+    #[arg(short = 'n', long)]
+    no_probe: bool,
 
-    /// Watch mode - continuously update the list
-    #[arg(short = 'w', long)]
-    watch: bool,
+    /// Scan interval in ms
+    #[arg(short, long, default_value_t = 500)]
+    interval: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Start passive discovery (listens for LAN broadcasts)
+    // Start background listener
     let _pheromones = PheromoneSystem::ignite().await?;
 
-    if cli.watch {
-        println!("Watch mode - Press Ctrl+C to exit\n");
-        loop {
-            // In watch mode, we clear screen and refresh
-            print!("\x1B[2J\x1B[1;1H");
-            println!("🔍 Cell Discovery (Live)\n");
-            display_cells().await;
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-    } else {
-        // One-shot mode: Wait briefly to populate LAN cache
-        if cli.wait > 0 {
-            // println!("Listening for network broadcasts for {}s...", cli.wait);
-            tokio::time::sleep(std::time::Duration::from_secs(cli.wait)).await;
-        }
-        display_cells().await;
-    }
+    println!("Scanning network for cells... (Ctrl+C to quit)");
 
-    Ok(())
-}
+    let mut seen = HashSet::new();
+    let mut ticker = interval(Duration::from_millis(cli.interval));
 
-async fn display_cells() {
-    let nodes = Discovery::scan().await;
+    loop {
+        ticker.tick().await;
 
-    if nodes.is_empty() {
-        println!("No Cells found (neither on LAN nor Local Sockets).");
-        return;
-    }
+        let nodes = Discovery::scan().await;
 
-    println!("┌─────────────────────┬──────────────────────┬──────────────────────┐");
-    println!("│ Cell Name           │ Network (LAN)        │ Local Socket         │");
-    println!("├─────────────────────┼──────────────────────┼──────────────────────┤");
-
-    for node in nodes {
-        let lan_str = node.lan_address.unwrap_or_else(|| "---".into());
-
-        let sock_str = if let Some(path) = node.local_socket {
-            // Show only filename for brevity if in default dir, or full path?
-            // Let's show "Yes" or "Active" or just the path stem if overly long
-            if path.to_string_lossy().len() > 20 {
-                "Present".to_string()
-            } else {
-                path.file_name().unwrap().to_string_lossy().to_string()
+        for mut node in nodes {
+            if seen.contains(&node.name) {
+                continue;
             }
-        } else {
-            "---".into()
-        };
+            seen.insert(node.name.clone());
 
-        println!(
-            "│ {:<19} │ {:<20} │ {:<20} │",
-            truncate(&node.name, 19),
-            truncate(&lan_str, 20),
-            sock_str
-        );
+            let do_probe = !cli.no_probe;
+
+            tokio::spawn(async move {
+                if do_probe {
+                    node.probe().await;
+                }
+
+                let (addr, lat) = get_details(&node);
+                println!("{:<24} {:<24} {}", node.name, addr, lat);
+            });
+        }
     }
-
-    println!("└─────────────────────┴──────────────────────┴──────────────────────┘");
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len - 3])
+fn get_details(node: &cell_sdk::discovery::CellNode) -> (String, String) {
+    let addr = if let Some(a) = &node.lan_address {
+        a.clone()
+    } else if node.local_socket.is_some() {
+        "local".to_string()
     } else {
-        s.to_string()
-    }
+        "unknown".to_string()
+    };
+
+    let lat = if let Some(d) = node.status.local_latency.or(node.status.lan_latency) {
+        let micros = d.as_micros();
+        if micros < 1000 {
+            format!("{}µs", micros)
+        } else {
+            format!("{:.1}ms", d.as_secs_f64() * 1000.0)
+        }
+    } else {
+        "-".to_string()
+    };
+
+    (addr, lat)
 }
