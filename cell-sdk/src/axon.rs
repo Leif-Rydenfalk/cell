@@ -49,12 +49,12 @@ impl AxonServer {
         let port = endpoint.local_addr()?.port();
 
         // 4. Secrete Pheromones (Announce Presence)
-        println!(
-            "[{}] 🌐 Axon Active. Listening on {}:{}",
-            cell_name,
-            PheromoneSystem::local_ip(),
-            port
-        );
+        // println!(
+        //     "[{}] 🌐 Axon Active. Listening on {}:{}",
+        //     cell_name,
+        //     PheromoneSystem::local_ip(),
+        //     port
+        // );
         pheromones.start_secreting(cell_name.to_string(), port);
 
         Ok(Self {
@@ -135,27 +135,35 @@ impl AxonClient {
         // 1. Ignite Discovery
         let pheromones = PheromoneSystem::ignite().await?;
 
-        // Short wait for multicast response
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // 2. ACTIVE DISCOVERY: Send a query packet
+        // This forces the server to reply immediately, solving the startup race condition.
+        let _ = pheromones.query(cell_name).await;
 
-        // 2. Lookup
-        if let Some(signal) = pheromones.lookup(cell_name).await {
-            let addr_str = format!("{}:{}", signal.ip, signal.port);
-            println!("[Axon] 🔭 Discovered {} at {} via LAN", cell_name, addr_str);
+        // 3. Polling Loop
+        // Wait up to 1 second for a response (or passive beacon)
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(1) {
+            if let Some(signal) = pheromones.lookup(cell_name).await {
+                let addr_str = format!("{}:{}", signal.ip, signal.port);
+                // println!("[Axon] 🔭 Discovered {} at {} via LAN", cell_name, addr_str);
 
-            // 3. Configure TLS (Trust-on-first-use / Skip Verify for Demo)
-            let endpoint = Self::make_endpoint()?;
-            let addr = addr_str.parse().context("Invalid IP from discovery")?;
+                let endpoint = Self::make_endpoint()?;
+                let addr = addr_str.parse().context("Invalid IP from discovery")?;
 
-            // 4. Connect
-            let connection = endpoint.connect(addr, "localhost")?.await?;
-            Ok(Some(connection))
-        } else {
-            Ok(None)
+                match endpoint.connect(addr, "localhost")?.await {
+                    Ok(conn) => return Ok(Some(conn)),
+                    Err(_) => {
+                        // If connection fails (e.g. firewall), ignore and keep trying/waiting
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+
+        Ok(None)
     }
 
-    /// Connect to an exact address (used by auto-discovery)
+    /// Connect to an exact address (used by auto-discovery / tools)
     pub async fn connect_exact(addr: &str) -> Result<Option<quinn::Connection>> {
         let endpoint = Self::make_endpoint()?;
         let addr = addr.parse()?;

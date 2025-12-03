@@ -62,10 +62,6 @@ async fn probe_unix_socket(path: &PathBuf) -> Option<Duration> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await.ok()?;
 
-    // We don't strictly need to read the body for a ping check, getting the header is proof of life.
-    // But protocol says server sends data. We should probably drain it or close.
-    // Closing is fine.
-
     Some(start.elapsed())
 }
 
@@ -151,6 +147,7 @@ impl Discovery {
         // 3. Merge (Name is the unique identity)
         let mut map: HashMap<String, CellNode> = HashMap::new();
 
+        // Populate from LAN
         for (name, sig) in lan_map {
             map.insert(
                 name.clone(),
@@ -163,6 +160,7 @@ impl Discovery {
             );
         }
 
+        // Merge Local Sockets
         let socket_dir = resolve_socket_dir();
         for name in local_names {
             let path = socket_dir.join(format!("{}.sock", name));
@@ -174,6 +172,18 @@ impl Discovery {
                     local_socket: Some(path),
                     status: CellStatus::default(),
                 });
+        }
+
+        // 4. Merge Manual Peer (Robustness Fallback)
+        if let Ok(peer) = std::env::var("CELL_PEER") {
+            // CELL_PEER format is usually ip:port or ip:port:name?
+            // Usually just ip:port, but discovery needs a name.
+            // We treat CELL_PEER as a generic fallback.
+            // If the user provided CELL_PEER, they likely want to see it.
+            // Without a name, we can't key it easily, but let's try to probe it or list it as "manual"
+            // For now, let's assume if it connects, we might get name from genome?
+            // Ignoring for now to keep scan() simple and fast.
+            // But if we have a name associated (e.g. from args), we could add it.
         }
 
         let mut list: Vec<CellNode> = map.into_values().collect();

@@ -46,45 +46,47 @@ impl Membrane {
             + Send
             + 'static,
     {
-        // Only check/enable LAN mode if the feature is compiled in
+        // 1. Ignite Axon (LAN) if enabled
+        // We do this in parallel with local binding.
         #[cfg(feature = "axon")]
         if std::env::var("CELL_LAN").is_ok() {
-            // --- LAN MODE (Delegated to Axon) ---
             let axon = AxonServer::ignite(name).await?;
+            let h = handler.clone();
+            let g = Arc::new(genome_json.clone());
 
-            while let Some(conn) = axon.accept().await {
-                let h = handler.clone();
-                let g = Arc::new(genome_json.clone());
-                
-                tokio::spawn(async move {
-                    if let Ok(connection) = conn.await {
-                        while let Ok((send, recv)) = connection.accept_bi().await {
-                            let h_inner = h.clone();
-                            let g_inner = g.clone();
-                            
-                            // Axon handles the QUIC stream mechanics
-                            if let Err(e) = AxonServer::handle_rpc_stream::<F, Req, Resp>(send, recv, h_inner, g_inner).await {
-                                eprintln!("Axon RPC Error: {}", e);
+            // Spawn the Axon server loop in the background
+            tokio::spawn(async move {
+                while let Some(conn) = axon.accept().await {
+                    let h_inner = h.clone();
+                    let g_inner = g.clone();
+
+                    tokio::spawn(async move {
+                        if let Ok(connection) = conn.await {
+                            while let Ok((send, recv)) = connection.accept_bi().await {
+                                let h_call = h_inner.clone();
+                                let g_call = g_inner.clone();
+
+                                if let Err(e) = AxonServer::handle_rpc_stream::<F, Req, Resp>(
+                                    send, recv, h_call, g_call,
+                                )
+                                .await
+                                {
+                                    // eprintln!("Axon RPC Error: {}", e);
+                                }
                             }
                         }
-                    }
-                });
-            }
-            return Ok(());
+                    });
+                }
+            });
         }
 
-        // --- LOCAL MODE (Unix Sockets / SHM) ---
-        // Fallback or Default
-        // Fix: Explicit type annotations needed for bind_local
+        // 2. Bind Local Socket (Always active for local discovery)
+        // This ensures "Same Machine" connections always work via FS/SHM
         bind_local::<F, Req, Resp>(name, handler, Arc::new(genome_json)).await
     }
 }
 
-async fn bind_local<F, Req, Resp>(
-    name: &str,
-    handler: F,
-    genome: Arc<Option<String>>,
-) -> Result<()>
+async fn bind_local<F, Req, Resp>(name: &str, handler: F, genome: Arc<Option<String>>) -> Result<()>
 where
     F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>> + Send + Sync + 'static + Clone,
     Req: Archive + Send,
@@ -103,7 +105,9 @@ where
     let mut _guard = RwLock::new(lock_file);
 
     if _guard.try_write().is_err() {
-        println!("[{}] Instance already running. Exiting.", name);
+        println!("[{}] Instance already running (Locked).", name);
+        // We don't exit here if LAN is running, but usually bind_local blocks main thread.
+        // If locked, it means another instance is local. We should probably bail.
         return Ok(());
     }
 
@@ -253,7 +257,7 @@ where
         );
     }
 
-    println!("[{}] ⚡ Upgrading to zero-copy shared memory...", cell_name);
+    // println!("[{}] ⚡ Upgrading to zero-copy shared memory...", cell_name);
 
     let (rx_ring, rx_fd) = RingBuffer::create(&format!("{}_server_rx", cell_name))?;
     let (tx_ring, tx_fd) = RingBuffer::create(&format!("{}_server_tx", cell_name))?;
@@ -266,7 +270,7 @@ where
     let raw_fd = stream.as_raw_fd();
     send_fds(raw_fd, &[rx_fd, tx_fd])?;
 
-    println!("[{}] ✓ Zero-copy shared memory active", cell_name);
+    // println!("[{}] ✓ Zero-copy shared memory active", cell_name);
 
     serve_zero_copy::<F, Req, Resp>(rx_ring, tx_ring, handler).await
 }
