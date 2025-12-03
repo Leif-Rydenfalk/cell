@@ -3,7 +3,6 @@ use cell_sdk as cell;
 use cell_sdk::rkyv::Archived;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 struct ExchangeState {
     trade_count: AtomicU64,
@@ -24,33 +23,26 @@ impl ExchangeService {
     }
 
     async fn submit_batch(&self, count: u32) -> Result<u64> {
-        // OLD (Cheating):
-        // let start = self.state.trade_count.fetch_add(count as u64, Ordering::Relaxed);
-        
-        // NEW (Honest Work):
-        // We simulate processing the batch item-by-item.
-        // In a real engine, this is where the matching loop would be.
+        // Process batch item-by-item
         let mut executed = 0;
         for _ in 0..count {
-            // "Processing" one order
             self.state.trade_count.fetch_add(1, Ordering::Relaxed);
             executed += 1;
         }
 
         self.state.batch_ops.fetch_add(1, Ordering::Relaxed);
-        
-        // Return total count (just reading the atomic once at the end)
         Ok(self.state.trade_count.load(Ordering::Relaxed))
     }
 
     async fn ingest_data(&self, data: &Archived<Vec<u8>>) -> Result<u64> {
         let len = data.len() as u64;
-        if len > 0 { let _ = data[0]; }
+        if len > 0 { 
+            let _ = data[0]; 
+        }
         self.state.bytes_received.fetch_add(len, Ordering::Relaxed);
         Ok(len)
     }
     
-    //  Honest Ping Handler
     async fn ping(&self, seq: u64) -> Result<u64> {
         Ok(seq)
     }
@@ -62,6 +54,9 @@ impl ExchangeService {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Enable LAN mode automatically
+    std::env::set_var("CELL_LAN", "1");
+    
     let state = Arc::new(ExchangeState {
         trade_count: AtomicU64::new(0),
         batch_ops: AtomicU64::new(0),
@@ -70,13 +65,14 @@ async fn main() -> Result<()> {
 
     let service = ExchangeService { state: state.clone() };
 
-    // --- Metrics ---
-    let s = state.clone();
-    tokio::spawn(async move {
-        // Metrics logging (simplified/omitted for brevity as per previous context)
-    });
-
-    println!("[Exchange] Online. Fingerprint: 0x{:x}", ExchangeService::SCHEMA_FINGERPRINT);
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║           CELL EXCHANGE - MULTI-INTERFACE MODE           ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
+    println!();
+    println!("[Exchange] Fingerprint: 0x{:x}", ExchangeService::SCHEMA_FINGERPRINT);
+    println!("[Exchange] Starting server with automatic LAN discovery...");
+    println!();
+    
     service.serve("exchange").await?;
     
     Ok(())

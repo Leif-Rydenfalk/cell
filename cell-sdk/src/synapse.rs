@@ -36,31 +36,41 @@ pub struct Synapse {
 }
 
 impl Synapse {
+    /// Automatic discovery with fallback chain: Local → LAN → Manual Override
     pub async fn grow(cell_name: &str) -> Result<Self> {
-        // 1. Try Local Socket (Fast Path)
+        println!("[Synapse] Connecting to '{}'...", cell_name);
+
+        // 1. Try Local Socket (Fastest - same machine)
         let socket_dir = resolve_socket_dir();
         let socket_path = socket_dir.join(format!("{}.sock", cell_name));
 
         if let Ok(stream) = UnixStream::connect(&socket_path).await {
+            println!("[Synapse] ✓ Local connection established");
             return Ok(Self {
                 transport: Transport::Socket(stream),
                 upgrade_attempted: false,
             });
         }
 
-        // 2. Try LAN Discovery (Auto)
+        // 2. Try LAN Discovery (Automatic - no manual config needed)
         #[cfg(feature = "axon")]
-        if let Some(signal) = crate::discovery::LanDiscovery::global()
-            .find(cell_name)
-            .await
         {
-            let addr = format!("{}:{}", signal.ip, signal.port);
-            println!(
-                "[Synapse]  Auto-discovered {} at {} via LAN",
-                cell_name, addr
-            );
+            println!("[Synapse] Local socket not found, trying LAN discovery...");
 
-            if let Some(conn) = AxonClient::connect_exact(&addr).await? {
+            // Manual override check (last resort)
+            if let Ok(peer_addr) = std::env::var("CELL_PEER") {
+                println!("[Synapse] Using manual override: {}", peer_addr);
+                let client = crate::axon::AxonClient::make_endpoint()?;
+                let addr = peer_addr.parse()?;
+                let conn = client.connect(addr, "localhost")?.await?;
+                return Ok(Self {
+                    transport: Transport::Quic(conn),
+                    upgrade_attempted: false,
+                });
+            }
+
+            // Automatic LAN discovery
+            if let Some(conn) = AxonClient::connect(cell_name).await? {
                 return Ok(Self {
                     transport: Transport::Quic(conn),
                     upgrade_attempted: false,
@@ -68,29 +78,18 @@ impl Synapse {
             }
         }
 
-        // 3. Manual Override (Bypass Discovery)
-        #[cfg(feature = "axon")]
-        if let Ok(peer_addr) = std::env::var("CELL_PEER") {
-            println!("[Synapse]  Manual override to {}", peer_addr);
-            let client = crate::axon::AxonClient::make_endpoint()?;
-            let addr = peer_addr.parse()?;
-            let conn = client.connect(addr, "localhost")?.await?;
-            return Ok(Self {
-                transport: Transport::Quic(conn),
-                upgrade_attempted: false,
-            });
-        }
-
-        // 4. Try Axon (LAN Discovery & Connect)
-        #[cfg(feature = "axon")]
-        if let Some(conn) = AxonClient::connect(cell_name).await? {
-            return Ok(Self {
-                transport: Transport::Quic(conn),
-                upgrade_attempted: false,
-            });
-        }
-
-        bail!("Cell '{}' not found locally or on LAN", cell_name);
+        bail!(
+            "Cell '{}' not found.\n\
+            \n\
+            Tried:\n\
+            1. Local socket: {:?}\n\
+            2. LAN discovery (automatic)\n\
+            3. Manual override (CELL_PEER env var)\n\
+            \n\
+            Make sure the cell is running and accessible.",
+            cell_name,
+            socket_path
+        );
     }
 
     pub async fn fire<Req, Resp>(&mut self, request: &Req) -> Result<Response<Resp>>
@@ -105,8 +104,8 @@ impl Synapse {
             self.upgrade_attempted = true;
             if let Transport::Socket(_) = self.transport {
                 if std::env::var("CELL_DISABLE_SHM").is_err() {
-                    if let Err(e) = self.try_upgrade_to_shm().await {
-                        eprintln!("SHM upgrade failed: {}", e);
+                    if let Err(_e) = self.try_upgrade_to_shm().await {
+                        // Silent failure - continue with socket
                     }
                 }
             }

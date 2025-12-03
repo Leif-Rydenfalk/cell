@@ -6,7 +6,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
@@ -23,9 +23,9 @@ pub struct Signal {
 }
 
 pub struct PheromoneSystem {
-    cache: Arc<RwLock<HashMap<String, Signal>>>,
+    cache: Arc<RwLock<HashMap<String, Vec<Signal>>>>, // Changed to Vec to store multiple addresses
     socket: Arc<UdpSocket>,
-    local_signal: Arc<RwLock<Option<Signal>>>,
+    local_signals: Arc<RwLock<Vec<Signal>>>, // Changed to Vec for multi-address support
 }
 
 impl PheromoneSystem {
@@ -34,17 +34,13 @@ impl PheromoneSystem {
         let socket = UdpSocket::bind(format!("0.0.0.0:{}", PORT)).await?;
         socket.set_broadcast(true)?;
 
-        // Attempt to reuse port so multiple cells can run on one machine
-        // Note: In a real prod setup we'd build the socket with socket2 fully
-        // to ensure SO_REUSEPORT is set before bind. This default impl relies on OS behavior.
-
         let sys = Arc::new(Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
             socket: Arc::new(socket),
-            local_signal: Arc::new(RwLock::new(None)),
+            local_signals: Arc::new(RwLock::new(Vec::new())),
         });
 
-        // --- Receiver Loop ---
+        // Receiver Loop
         let sys_clone = sys.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 1024];
@@ -53,15 +49,15 @@ impl PheromoneSystem {
                     if let Ok(sig) = serde_json::from_slice::<Signal>(&buf[..len]) {
                         // Ignore our own echoes
                         if let Ok(my_ip) = sys_clone.socket.local_addr() {
-                            if addr.ip() == my_ip.ip() && addr.port() == my_ip.port() {
+                            if addr.ip() == my_ip.ip() {
                                 continue;
                             }
                         }
 
                         // ACTIVE DISCOVERY: Check if it's a query (port == 0)
                         if sig.port == 0 {
-                            let local = sys_clone.local_signal.read().await;
-                            if let Some(my_sig) = local.as_ref() {
+                            let local = sys_clone.local_signals.read().await;
+                            for my_sig in local.iter() {
                                 if my_sig.cell_name != sig.cell_name {
                                     let mut reply = my_sig.clone();
                                     reply.timestamp = SystemTime::now()
@@ -75,7 +71,7 @@ impl PheromoneSystem {
                                 }
                             }
                         } else {
-                            // Standard Advertisement
+                            // Standard Advertisement - store in cache
                             crate::discovery::LanDiscovery::global()
                                 .update(sig.clone())
                                 .await;
@@ -84,7 +80,9 @@ impl PheromoneSystem {
                                 .cache
                                 .write()
                                 .await
-                                .insert(sig.cell_name.clone(), sig);
+                                .entry(sig.cell_name.clone())
+                                .or_insert_with(Vec::new)
+                                .push(sig);
                         }
                     }
                 }
@@ -94,100 +92,148 @@ impl PheromoneSystem {
         Ok(sys)
     }
 
+    /// Query for a specific cell (active discovery)
     pub async fn query(&self, target_cell_name: &str) -> Result<()> {
         let sig = Signal {
             cell_name: target_cell_name.into(),
-            ip: Self::resolve_best_ip(),
+            ip: get_best_local_ip(),
             port: 0,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         };
         let bytes = serde_json::to_vec(&sig)?;
-        self.shotgun_broadcast(&bytes).await
+        self.broadcast_to_all_interfaces(&bytes).await
     }
 
-    pub async fn secrete(&self, cell_name: &str, port: u16) -> Result<()> {
+    /// Secrete pheromone for a specific IP:port combination
+    pub async fn secrete_specific(&self, cell_name: &str, ip: &str, port: u16) -> Result<()> {
         let sig = Signal {
             cell_name: cell_name.into(),
-            ip: Self::resolve_best_ip(),
+            ip: ip.to_string(),
             port,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         };
 
+        // Add to local signals
         {
-            let mut local = self.local_signal.write().await;
-            *local = Some(sig.clone());
+            let mut local = self.local_signals.write().await;
+            // Remove old entry for this specific IP:port combo
+            local.retain(|s| !(s.cell_name == cell_name && s.ip == ip && s.port == port));
+            local.push(sig.clone());
         }
 
         let bytes = serde_json::to_vec(&sig)?;
-        self.shotgun_broadcast(&bytes).await
+        self.broadcast_to_all_interfaces(&bytes).await
     }
 
-    /// The "Shotgun": Sends packets to the broadcast address of EVERY interface.
-    /// This bypasses Docker bridge isolation and routing issues.
-    async fn shotgun_broadcast(&self, bytes: &[u8]) -> Result<()> {
+    /// Legacy method for compatibility
+    pub async fn secrete(&self, cell_name: &str, port: u16) -> Result<()> {
+        let ip = get_best_local_ip();
+        self.secrete_specific(cell_name, &ip, port).await
+    }
+
+    /// Broadcast to EVERY interface's broadcast address
+    async fn broadcast_to_all_interfaces(&self, bytes: &[u8]) -> Result<()> {
         let interfaces = if_addrs::get_if_addrs()?;
 
         for iface in interfaces {
-            // Filter out loopback
             if iface.is_loopback() {
                 continue;
             }
 
-            // Match if_addrs::IfAddr enum
-            if let if_addrs::IfAddr::V4(v4_addr) = iface.addr {
-                // Use the specific broadcast address for this interface if available
-                let broadcast = v4_addr
-                    .broadcast
-                    .unwrap_or_else(|| Ipv4Addr::new(255, 255, 255, 255));
+            match iface.addr {
+                if_addrs::IfAddr::V4(v4_addr) => {
+                    // Use specific broadcast address for this interface
+                    let broadcast = v4_addr
+                        .broadcast
+                        .unwrap_or_else(|| Ipv4Addr::new(255, 255, 255, 255));
 
-                let target = format!("{}:{}", broadcast, PORT);
-                let _ = self.socket.send_to(bytes, &target).await;
+                    let target = SocketAddr::new(IpAddr::V4(broadcast), PORT);
+                    let _ = self.socket.send_to(bytes, target).await;
+                }
+                if_addrs::IfAddr::V6(v6_addr) => {
+                    // IPv6 multicast
+                    let multicast = std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+                    let target = SocketAddr::new(IpAddr::V6(multicast), PORT);
+                    let _ = self.socket.send_to(bytes, target).await;
+                }
             }
         }
         Ok(())
     }
 
-    pub fn start_secreting(self: &Arc<Self>, cell_name: String, port: u16) {
+    /// Start continuous secreting (background task)
+    pub fn start_secreting(self: &Arc<Self>, cell_name: String, _port: u16) {
         let sys = self.clone();
         tokio::spawn(async move {
-            let _ = sys.secrete(&cell_name, port).await;
             loop {
-                tokio::time::sleep(Duration::from_secs(3)).await; // Faster pulse
-                if let Err(e) = sys.secrete(&cell_name, port).await {
-                    eprintln!("[Pheromones] Failed to secrete: {}", e);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+
+                // Re-advertise all our local signals
+                let signals = sys.local_signals.read().await.clone();
+                for sig in signals {
+                    if let Ok(bytes) = serde_json::to_vec(&sig) {
+                        let _ = sys.broadcast_to_all_interfaces(&bytes).await;
+                    }
                 }
             }
         });
     }
 
+    /// Lookup a single signal (returns first found)
     pub async fn lookup(&self, cell_name: &str) -> Option<Signal> {
-        self.cache.read().await.get(cell_name).cloned()
+        self.cache
+            .read()
+            .await
+            .get(cell_name)
+            .and_then(|v| v.first())
+            .cloned()
     }
 
-    /// Helper to find the "real" LAN IP (not docker0 or localhost) to advertise
-    fn resolve_best_ip() -> String {
-        if let Ok(ip) = std::env::var("CELL_IP") {
-            return ip;
-        }
+    /// Lookup ALL signals for a cell (for multi-address discovery)
+    pub async fn lookup_all(&self, cell_name: &str) -> Vec<Signal> {
+        self.cache
+            .read()
+            .await
+            .get(cell_name)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
 
-        // Heuristic: Find first non-loopback IPv4
-        if let Ok(interfaces) = if_addrs::get_if_addrs() {
-            for iface in interfaces {
-                if iface.is_loopback() {
+/// Get the best local IP for advertising
+fn get_best_local_ip() -> String {
+    // 1. Try environment variable override
+    if let Ok(ip) = std::env::var("CELL_IP") {
+        return ip;
+    }
+
+    // 2. Try local_ip_address crate (most reliable)
+    if let Ok(ip) = local_ip_address::local_ip() {
+        return ip.to_string();
+    }
+
+    // 3. Heuristic: Find first non-loopback IPv4
+    if let Ok(interfaces) = if_addrs::get_if_addrs() {
+        for iface in interfaces {
+            if iface.is_loopback() {
+                continue;
+            }
+
+            if let if_addrs::IfAddr::V4(v4_addr) = iface.addr {
+                let ip = v4_addr.ip;
+
+                // Filter out Docker, link-local, etc.
+                if ip.octets()[0] == 172 && ip.octets()[1] == 17 {
+                    continue;
+                }
+                if ip.octets()[0] == 169 && ip.octets()[1] == 254 {
                     continue;
                 }
 
-                if let if_addrs::IfAddr::V4(v4_addr) = iface.addr {
-                    let ip = v4_addr.ip;
-                    // Primitive filter to avoid Docker default gateway (usually 172.17.x.1)
-                    if ip.octets()[0] == 172 && ip.octets()[1] == 17 && ip.octets()[3] == 1 {
-                        continue;
-                    }
-                    return ip.to_string();
-                }
+                return ip.to_string();
             }
         }
-
-        "127.0.0.1".to_string()
     }
+
+    "127.0.0.1".to_string()
 }
