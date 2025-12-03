@@ -44,10 +44,6 @@ impl AxonServer {
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
         transport_config.max_concurrent_uni_streams(0_u8.into()); // We only use Bi-streams
 
-        // // 3. Try to bind to 40000, let OS fallback if busy
-        // let addr = "[::]:40000".parse().or_else(|_| "[::]:0".parse())?;
-        // let endpoint = quinn::Endpoint::server(server_config, addr)?;
-
         // 3. Bind to Random Port
         let endpoint = quinn::Endpoint::server(server_config, "[::]:0".parse()?)?;
         let port = endpoint.local_addr()?.port();
@@ -80,7 +76,11 @@ impl AxonServer {
         genome: Arc<Option<String>>,
     ) -> Result<()>
     where
-        F: for<'a> Fn(&'a Req::Archived) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Resp>> + Send + 'a>>,
+        F: for<'a> Fn(
+            &'a Req::Archived,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Resp>> + Send + 'a>,
+        >,
         Req: Archive,
         Req::Archived: for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>>,
         Resp: rkyv::Serialize<AllocSerializer<1024>>,
@@ -117,7 +117,7 @@ impl AxonServer {
         send.write_all(&(resp_bytes.len() as u32).to_le_bytes())
             .await?;
         send.write_all(&resp_bytes).await?;
-        
+
         // 6. Finish (EOF)
         send.finish().await?;
 
@@ -134,7 +134,7 @@ impl AxonClient {
     pub async fn connect(cell_name: &str) -> Result<Option<quinn::Connection>> {
         // 1. Ignite Discovery
         let pheromones = PheromoneSystem::ignite().await?;
-        
+
         // Short wait for multicast response
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -155,11 +155,18 @@ impl AxonClient {
         }
     }
 
+    /// Connect to an exact address (used by auto-discovery)
+    pub async fn connect_exact(addr: &str) -> Result<Option<quinn::Connection>> {
+        let endpoint = Self::make_endpoint()?;
+        let addr = addr.parse()?;
+        match endpoint.connect(addr, "localhost")?.await {
+            Ok(conn) => Ok(Some(conn)),
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Sends an RPC request over an existing QUIC connection
-    pub async fn fire<Req, Resp>(
-        conn: &quinn::Connection,
-        request: &Req,
-    ) -> Result<Response<Resp>>
+    pub async fn fire<Req, Resp>(conn: &quinn::Connection, request: &Req) -> Result<Response<Resp>>
     where
         Req: Serialize<AllocSerializer<1024>>,
         Resp: Archive,
@@ -170,7 +177,8 @@ impl AxonClient {
         // New Bidirectional Stream per Request
         let (mut send, mut recv) = conn.open_bi().await?;
 
-        send.write_all(&(req_bytes.len() as u32).to_le_bytes()).await?;
+        send.write_all(&(req_bytes.len() as u32).to_le_bytes())
+            .await?;
         send.write_all(&req_bytes).await?;
         send.finish().await?;
 

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 
@@ -20,6 +20,7 @@ pub struct Signal {
     pub cell_name: String,
     pub ip: String,
     pub port: u16,
+    pub timestamp: u64,
 }
 
 pub struct PheromoneSystem {
@@ -44,11 +45,21 @@ impl PheromoneSystem {
 
         // Essential for Router Traversal
         socket.set_multicast_loop_v4(true)?;
-        socket.set_multicast_ttl_v4(2)?; 
+        socket.set_multicast_ttl_v4(2)?;
 
         socket.set_nonblocking(true)?;
         socket.bind(&format!("0.0.0.0:{}", PORT).parse::<SocketAddr>()?.into())?;
+
+        // 1. Join on Default Interface (Physical LAN)
         socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED)?;
+
+        // 2. Join on Loopback Interface (Localhost Development)
+        // This ensures that processes on the same machine can see each other
+        // even if physical networking is disabled or firewall restricted.
+        // We use .ok() to ignore errors if the OS doesn't support loopback multicast.
+        socket
+            .join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::new(127, 0, 0, 1))
+            .ok();
 
         let udp = UdpSocket::from_std(socket.into())?;
         let sys = Arc::new(Self {
@@ -62,7 +73,17 @@ impl PheromoneSystem {
             loop {
                 if let Ok((len, _)) = sys_clone.socket.recv_from(&mut buf).await {
                     if let Ok(sig) = serde_json::from_slice::<Signal>(&buf[..len]) {
-                        sys_clone.cache.write().await.insert(sig.cell_name.clone(), sig);
+                        // NEW: Feed into global discovery cache
+                        crate::discovery::LanDiscovery::global()
+                            .update(sig.clone())
+                            .await;
+
+                        // Keep local cache for backwards compatibility
+                        sys_clone
+                            .cache
+                            .write()
+                            .await
+                            .insert(sig.cell_name.clone(), sig);
                     }
                 }
             }
@@ -86,6 +107,7 @@ impl PheromoneSystem {
             cell_name: cell_name.into(),
             ip: Self::local_ip(),
             port,
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         };
         let bytes = serde_json::to_vec(&sig)?;
         let target = format!("{}:{}", MULTICAST_ADDR, PORT);

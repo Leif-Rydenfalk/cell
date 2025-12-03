@@ -7,6 +7,8 @@ extern crate self as cell_sdk;
 pub mod axon;
 pub mod capsid;
 pub mod container;
+#[cfg(feature = "axon")]
+pub mod discovery;
 pub mod membrane;
 #[cfg(feature = "axon")]
 pub mod pheromones;
@@ -17,8 +19,14 @@ pub mod shm;
 pub mod synapse;
 pub mod vesicle;
 
+pub mod bootstrap;
+pub mod heartbeat;
+pub mod registry;
+
 // Re-exports for ease of use
 pub use cell_macros::{cell_remote, handler, protein, service};
+#[cfg(feature = "axon")]
+pub use discovery::LanDiscovery;
 pub use membrane::Membrane;
 pub use root::MyceliumRoot;
 pub use shm::ShmClient;
