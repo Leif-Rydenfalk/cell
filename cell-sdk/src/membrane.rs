@@ -17,8 +17,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{info, warn, error};
-use governor::{Quota, RateLimiter};
-use std::num::NonZeroU32;
+use tokio::sync::Semaphore;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
@@ -26,6 +25,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+// Fix: Concurrency limit to prevent DoS via memory exhaustion
+const MAX_CONCURRENT_CONNECTIONS: usize = 10_000;
 
 pub struct Membrane;
 
@@ -49,9 +51,8 @@ impl Membrane {
             + Send
             + 'static,
     {
-        // Fix #9: Rate Limiter (1000 req/s)
-        let quota = Quota::per_second(NonZeroU32::new(1000).unwrap());
-        let rate_limiter = Arc::new(RateLimiter::direct(quota));
+        // Fix: Use Semaphore for concurrency limiting (DoS protection) instead of Rate Limiting
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
         // 1. Ignite Axon (LAN) if enabled
         // We do this in parallel with local binding.
@@ -60,34 +61,40 @@ impl Membrane {
             let axon = AxonServer::ignite(name).await?;
             let h = handler.clone();
             let g = Arc::new(genome_json.clone());
-            let rl = rate_limiter.clone();
+            let s_axon = semaphore.clone();
 
             // Spawn the Axon server loop in the background
             tokio::spawn(async move {
                 while let Some(conn) = axon.accept().await {
                     let h_inner = h.clone();
                     let g_inner = g.clone();
-                    let rl_inner = rl.clone();
+                    let s_inner = s_axon.clone();
 
                     tokio::spawn(async move {
                         if let Ok(connection) = conn.await {
                             while let Ok((send, recv)) = connection.accept_bi().await {
-                                // Check rate limit per stream/request
-                                if rl_inner.check().is_err() {
-                                    warn!("[Axon] Rate limit exceeded");
-                                    continue;
-                                }
+                                // Concurrency Limit Check
+                                let permit = match s_inner.clone().try_acquire_owned() {
+                                    Ok(p) => p,
+                                    Err(_) => {
+                                        warn!("[Axon] Connection limit reached, dropping stream");
+                                        continue;
+                                    }
+                                };
 
                                 let h_call = h_inner.clone();
                                 let g_call = g_inner.clone();
 
-                                if let Err(e) = AxonServer::handle_rpc_stream::<F, Req, Resp>(
-                                    send, recv, h_call, g_call,
-                                )
-                                .await
-                                {
-                                    // error!("Axon RPC Error: {}", e);
-                                }
+                                tokio::spawn(async move {
+                                    let _permit = permit; // Hold permit until task completion
+                                    if let Err(e) = AxonServer::handle_rpc_stream::<F, Req, Resp>(
+                                        send, recv, h_call, g_call,
+                                    )
+                                    .await
+                                    {
+                                        // error!("Axon RPC Error: {}", e);
+                                    }
+                                });
                             }
                         }
                     });
@@ -97,7 +104,7 @@ impl Membrane {
 
         // 2. Bind Local Socket (Always active for local discovery)
         // This ensures "Same Machine" connections always work via FS/SHM
-        bind_local::<F, Req, Resp>(name, handler, Arc::new(genome_json), rate_limiter).await
+        bind_local::<F, Req, Resp>(name, handler, Arc::new(genome_json), semaphore).await
     }
 }
 
@@ -105,7 +112,7 @@ async fn bind_local<F, Req, Resp>(
     name: &str,
     handler: F,
     genome: Arc<Option<String>>,
-    rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>,
+    semaphore: Arc<Semaphore>,
 ) -> Result<()>
 where
     F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>> + Send + Sync + 'static + Clone,
@@ -150,14 +157,26 @@ where
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
+                // Fix: Concurrency Limiting (Load Shedding)
+                // We accept first, then try to acquire. If full, we drop the connection immediately.
+                let permit = match semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!("[{}] Connection limit reached ({}), dropping connection", 
+                              name, MAX_CONCURRENT_CONNECTIONS);
+                        // Stream is dropped here, closing connection
+                        continue;
+                    }
+                };
+
                 let h = handler.clone();
                 let g = genome.clone();
                 let cell_name = name.to_string();
-                let rl = rate_limiter.clone();
 
                 tokio::spawn(async move {
+                    let _permit = permit; // Held until task completes
                     if let Err(e) =
-                        handle_connection::<F, Req, Resp>(stream, h, g, &cell_name, rl).await
+                        handle_connection::<F, Req, Resp>(stream, h, g, &cell_name).await
                     {
                         if e.to_string() != "early eof" {
                             warn!("[{}] Connection Error: {}", cell_name, e);
@@ -176,7 +195,6 @@ async fn handle_connection<F, Req, Resp>(
     handler: F,
     genome: Arc<Option<String>>,
     cell_name: &str,
-    rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>,
 ) -> Result<()>
 where
     F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>> + Send + Sync + 'static,
@@ -188,13 +206,6 @@ where
         + Send,
 {
     loop {
-        // Fix #9: Rate Limiting
-        if rate_limiter.check().is_err() {
-            warn!("[{}] Rate limit exceeded", cell_name);
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            continue;
-        }
-
         let mut len_buf = [0u8; 4];
         if stream.read_exact(&mut len_buf).await.is_err() {
             return Ok(());

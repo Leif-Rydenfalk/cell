@@ -12,3 +12,7 @@ In axon.rs:
 struct SkipServerVerification; // "Trust me bro"
 
 We are skipping TLS verification. You also rely on uid checks for the SHM upgrade. If I can run a process as your UID, I can attach to your ring buffer and read your trading data.
+
+
+
+All cell is is just a way of communicating. Thats it. How we communicate is up to the implementation but cell will eventually support everything and run on everything and seamlessly allow communication between and from and to everything as efficently as the hardware allows.

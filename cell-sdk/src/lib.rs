@@ -41,12 +41,12 @@ pub use serde;
 pub use membrane::resolve_socket_dir;
 
 // Helper for rkyv validation (Fix #3)
-pub fn validate_archived_root<T: rkyv::Archive>(
-    bytes: &[u8],
+pub fn validate_archived_root<'a, T: rkyv::Archive>(
+    bytes: &'a [u8],
     context: &str,
-) -> anyhow::Result<&T::Archived>
+) -> anyhow::Result<&'a T::Archived>
 where
-    T::Archived: for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>>,
+    T::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>>,
 {
     rkyv::check_archived_root::<T>(bytes).map_err(|e| {
         anyhow::anyhow!(

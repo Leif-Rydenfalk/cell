@@ -309,20 +309,21 @@ impl<'a> WriteSlot<'a> {
             let header_ptr = self.ring.data.add(self.offset) as *mut SlotHeader;
 
             // Security Fix #1: Shared Memory Race Condition
-            // Initialize all metadata atomically *before* the epoch makes it visible.
-            // Using relaxed stores for data that shouldn't be seen yet is fine,
-            // as long as the epoch store is Release.
-            
+            // We must use Release ordering for ALL metadata stores to ensure
+            // they are strictly visible before the epoch update.
+            // On weak memory architectures (ARM/RISC-V), Relaxed stores might not be 
+            // visible to the reader even if the Epoch is.
+
             // 1. Initialize refcount (fresh)
-            (*header_ptr).refcount.store(0, Ordering::Relaxed);
+            (*header_ptr).refcount.store(0, Ordering::Release);
             
             // 2. Write length
             (*header_ptr)
                 .len
-                .store(actual_size as u32, Ordering::Relaxed);
+                .store(actual_size as u32, Ordering::Release);
 
-            // 3. Ensure data writes and metadata are visible
-            std::sync::atomic::fence(Ordering::Release);
+            // 3. Data fence to ensure payload writes are visible
+            std::sync::atomic::compiler_fence(Ordering::Release);
 
             // 4. COMMIT: Write Epoch. This makes the slot valid for the Reader.
             // Reader checks epoch with Acquire, creating the synchronized edge.

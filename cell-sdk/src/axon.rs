@@ -391,9 +391,13 @@ fn make_client_endpoint() -> Result<quinn::Endpoint> {
     
     // Load system certificates via webpki-roots
     #[cfg(feature = "axon")]
-    for cert in webpki_roots::TLS_SERVER_ROOTS.iter() {
-        let _ = roots.add(&rustls::Certificate(cert.to_vec()));
-    }
+    roots.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
+        rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
+            ta.subject,
+            ta.spki,
+            ta.name_constraints,
+        )
+    }));
 
     // Allow user to override/append with a specific trusted cert (Pinning)
     if let Ok(cert_path) = std::env::var("CELL_TRUSTED_CERT") {
