@@ -24,7 +24,17 @@ axon = [
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.36", features = ["full"] }
+tokio = { version = "1.36", features = [
+    "rt", 
+    "rt-multi-thread", 
+    "macros", 
+    "sync", 
+    "time", 
+    "io-util",
+    "fs", # Needed for UnixListener/File locks
+    "net", # Needed for UnixStream (this is distinct from TCP/UDP)
+    "signal" # Needed for Ctrl+C handling
+] }
 rand = "0.8"
 rkyv = { version = "0.7", features = ["validation"] }
 memmap2 = "0.5"
