@@ -107,6 +107,19 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         _ => panic!("Handler must implement a struct"),
     };
 
+    // Security Fix #10: Missing Input Validation
+    // Validate reasonable limits to prevent macro abuse/DoS at compile time
+    let method_count = input.items.iter()
+        .filter(|i| matches!(i, syn::ImplItem::Fn(_)))
+        .count();
+    
+    if method_count > 100 {
+        return syn::Error::new(
+            syn::spanned::Spanned::span(&input.self_ty),
+            "Too many handler methods (max 100)"
+        ).to_compile_error().into();
+    }
+
     struct MethodInfo {
         name: syn::Ident,
         args: Vec<(syn::Ident, Type)>,

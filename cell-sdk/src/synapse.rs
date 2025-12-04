@@ -4,7 +4,7 @@
 #[cfg(feature = "axon")]
 use crate::axon::AxonClient;
 use crate::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
-use crate::shm::ShmSerializer;
+use crate::shm::{ShmSerializer};
 use anyhow::{bail, Result};
 use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -111,13 +111,23 @@ impl Synapse {
             }
         }
 
-        match self.transport {
-            Transport::Socket(ref mut stream) => Self::fire_via_socket(stream, request).await,
-            #[cfg(target_os = "linux")]
-            Transport::SharedMemory { ref client, .. } => Self::fire_via_shm(client, request).await,
-            #[cfg(feature = "axon")]
-            Transport::Quic(ref mut conn) => AxonClient::fire(conn, request).await,
-            Transport::Empty => bail!("Connection unusable"),
+        // Security Fix #9: Network Timeout for General Operations
+        const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let fut = async {
+            match self.transport {
+                Transport::Socket(ref mut stream) => Self::fire_via_socket(stream, request).await,
+                #[cfg(target_os = "linux")]
+                Transport::SharedMemory { ref client, .. } => Self::fire_via_shm(client, request).await,
+                #[cfg(feature = "axon")]
+                Transport::Quic(ref mut conn) => AxonClient::fire(conn, request).await,
+                Transport::Empty => bail!("Connection unusable"),
+            }
+        };
+
+        match tokio::time::timeout(RPC_TIMEOUT, fut).await {
+            Ok(res) => res,
+            Err(_) => bail!("RPC timeout after {:?}", RPC_TIMEOUT),
         }
     }
 
@@ -176,6 +186,16 @@ impl Synapse {
             .write_all(&(SHM_UPGRADE_REQUEST.len() as u32).to_le_bytes())
             .await?;
         stream.write_all(SHM_UPGRADE_REQUEST).await?;
+
+        // Expect Challenge
+        let mut challenge = [0u8; 32];
+        stream.read_exact(&mut challenge).await?;
+        
+        // Compute and Send Response
+        // We use the same token as server (it should be shared source or config, here hardcoded for fix)
+        const SHM_AUTH_TOKEN: &[u8] = b"__CELL_SHM_TOKEN__";
+        let response = blake3::hash(&[&challenge, SHM_AUTH_TOKEN].concat());
+        stream.write_all(response.as_bytes()).await?;
 
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await?;

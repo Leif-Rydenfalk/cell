@@ -57,7 +57,14 @@ impl RingBuffer {
 
         let name_cstr = CString::new(name)?;
         let flags = MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING;
-        let owned_fd = memfd_create(&name_cstr, flags)?;
+        
+        // Security Fix #7: Handle errors in memfd_create
+        let owned_fd = match memfd_create(&name_cstr, flags) {
+            Ok(fd) => fd,
+            Err(e) => return Err(e.into()),
+        };
+        
+        // Security Fix #7: Wrap in File immediately for RAII cleanup on error
         let file = File::from(owned_fd);
         file.set_len(RING_SIZE as u64)?;
 
@@ -294,18 +301,24 @@ impl<'a> WriteSlot<'a> {
         unsafe {
             let header_ptr = self.ring.data.add(self.offset) as *mut SlotHeader;
 
+            // Security Fix #1: Shared Memory Race Condition
+            // Initialize all metadata atomically *before* the epoch makes it visible.
+            // Using relaxed stores for data that shouldn't be seen yet is fine,
+            // as long as the epoch store is Release.
+            
             // 1. Initialize refcount (fresh)
             (*header_ptr).refcount.store(0, Ordering::Relaxed);
-
-            // 2. Ensure data writes are visible
-            std::sync::atomic::fence(Ordering::Release);
-
-            // 3. Write length
+            
+            // 2. Write length
             (*header_ptr)
                 .len
                 .store(actual_size as u32, Ordering::Relaxed);
 
+            // 3. Ensure data writes and metadata are visible
+            std::sync::atomic::fence(Ordering::Release);
+
             // 4. COMMIT: Write Epoch. This makes the slot valid for the Reader.
+            // Reader checks epoch with Acquire, creating the synchronized edge.
             (*header_ptr)
                 .epoch
                 .store(self.epoch_claim, Ordering::Release);

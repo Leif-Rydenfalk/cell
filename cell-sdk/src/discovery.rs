@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 
+// Security Fix #5: Bound Discovery Cache
+const MAX_CACHE_SIZE: usize = 10_000;
+
 // --- Data Structures ---
 
 #[derive(Debug, Clone)]
@@ -102,7 +105,22 @@ impl LanDiscovery {
     }
 
     pub async fn update(&self, sig: Signal) {
-        self.cache.write().await.insert(sig.cell_name.clone(), sig);
+        let mut cache = self.cache.write().await;
+        
+        // Security Fix #5: Eviction to prevent unbounded growth
+        if cache.len() >= MAX_CACHE_SIZE {
+            // Simple eviction strategy: Remove oldest entries
+            // Since HashMap doesn't track insertion order, we sort by timestamp
+            let mut entries: Vec<_> = cache.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            entries.sort_by_key(|(_, s)| s.timestamp);
+            
+            // Remove bottom 10%
+            for (name, _) in entries.iter().take(MAX_CACHE_SIZE / 10) {
+                cache.remove(name);
+            }
+        }
+        
+        cache.insert(sig.cell_name.clone(), sig);
     }
 
     pub async fn all(&self) -> Vec<Signal> {

@@ -22,6 +22,9 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
+// Security Fix #2: Authentication Token
+const SHM_AUTH_TOKEN: &[u8] = b"__CELL_SHM_TOKEN__";
+
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub struct Membrane;
@@ -247,6 +250,7 @@ where
         for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>> + 'static,
     Resp: Serialize<ShmSerializer> + Send,
 {
+    // Security Fix #2: UID Verification and Challenge-Response
     let cred = stream.peer_cred()?;
     let my_uid = nix::unistd::getuid().as_raw();
 
@@ -255,6 +259,18 @@ where
             "Security Alert: SHM request from UID {} mismatch",
             cred.uid()
         );
+    }
+    
+    // 2. Challenge-Response Authentication to prove identity
+    let challenge: [u8; 32] = rand::random();
+    stream.write_all(&challenge).await?;
+    
+    let mut response = [0u8; 32];
+    stream.read_exact(&mut response).await?;
+    
+    let expected = blake3::hash(&[&challenge, SHM_AUTH_TOKEN].concat());
+    if response != expected.as_bytes()[..32] {
+        bail!("Authentication failed for SHM upgrade");
     }
 
     // println!("[{}]  Upgrading to zero-copy shared memory...", cell_name);

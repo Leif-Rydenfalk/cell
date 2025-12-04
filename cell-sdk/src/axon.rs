@@ -225,23 +225,33 @@ impl AxonClient {
         Resp: Archive,
         Resp::Archived: 'static,
     {
-        let req_bytes = crate::rkyv::to_bytes::<_, 1024>(request)?.into_vec();
+        // Security Fix #9: Network Timeout
+        const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-        let (mut send, mut recv) = conn.open_bi().await?;
+        let fut = async {
+             let req_bytes = crate::rkyv::to_bytes::<_, 1024>(request)?.into_vec();
 
-        send.write_all(&(req_bytes.len() as u32).to_le_bytes())
-            .await?;
-        send.write_all(&req_bytes).await?;
-        send.finish().await?;
+             let (mut send, mut recv) = conn.open_bi().await?;
 
-        let mut len_buf = [0u8; 4];
-        recv.read_exact(&mut len_buf).await?;
-        let len = u32::from_le_bytes(len_buf) as usize;
+             send.write_all(&(req_bytes.len() as u32).to_le_bytes())
+                 .await?;
+             send.write_all(&req_bytes).await?;
+             send.finish().await?;
 
-        let mut resp_bytes = vec![0u8; len];
-        recv.read_exact(&mut resp_bytes).await?;
+             let mut len_buf = [0u8; 4];
+             recv.read_exact(&mut len_buf).await?;
+             let len = u32::from_le_bytes(len_buf) as usize;
 
-        Ok(Response::Owned(resp_bytes))
+             let mut resp_bytes = vec![0u8; len];
+             recv.read_exact(&mut resp_bytes).await?;
+
+             Ok(Response::Owned(resp_bytes))
+        };
+
+        match tokio::time::timeout(RPC_TIMEOUT, fut).await {
+            Ok(res) => res,
+            Err(_) => anyhow::bail!("RPC timeout after {:?}", RPC_TIMEOUT),
+        }
     }
 
     pub fn make_endpoint() -> Result<quinn::Endpoint> {
@@ -373,24 +383,32 @@ fn make_server_config() -> Result<quinn::ServerConfig> {
 }
 
 fn make_client_endpoint() -> Result<quinn::Endpoint> {
-    struct SkipVerify;
-    impl rustls::client::ServerCertVerifier for SkipVerify {
-        fn verify_server_cert(
-            &self,
-            _end_entity: &rustls::Certificate,
-            _intermediates: &[rustls::Certificate],
-            _server_name: &rustls::ServerName,
-            _scts: &mut dyn Iterator<Item = &[u8]>,
-            _ocsp_response: &[u8],
-            _now: std::time::SystemTime,
-        ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-            Ok(rustls::client::ServerCertVerified::assertion())
+    // Security Fix #3: Replaced SkipVerify with Pinning/Root Store
+    // We try to use system roots or a pinned certificate if provided.
+    
+    let mut roots = rustls::RootCertStore::empty();
+    
+    // Check if user provided a trusted cert path
+    if let Ok(cert_path) = std::env::var("CELL_TRUSTED_CERT") {
+        if let Ok(cert_data) = std::fs::read(&cert_path) {
+             // Try to parse as PEM
+             let mut reader = std::io::BufReader::new(&cert_data[..]);
+             if let Ok(certs) = rustls_pemfile::certs(&mut reader) {
+                 for cert in certs {
+                    let _ = roots.add(&rustls::Certificate(cert));
+                 }
+             }
         }
     }
+    
+    // NOTE: Without webpki-roots or native-certs crates available in Cargo.toml,
+    // we cannot easily load system roots here. 
+    // Defaulting to empty root store means it will FAIL unless a pinned cert is added above.
+    // This is "Secure by Default".
 
     let crypto = rustls::ClientConfig::builder()
         .with_safe_defaults()
-        .with_custom_certificate_verifier(Arc::new(SkipVerify))
+        .with_root_certificates(roots)
         .with_no_client_auth();
 
     let client_config = quinn::ClientConfig::new(Arc::new(crypto));
