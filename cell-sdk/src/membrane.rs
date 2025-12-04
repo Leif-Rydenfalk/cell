@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 use tokio::sync::Semaphore;
 
 #[cfg(target_os = "linux")]
@@ -55,19 +55,25 @@ impl Membrane {
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
         // 1. Ignite Axon (LAN) if enabled
-        // We do this in parallel with local binding.
+        // We prepare the Axon server here, but run its loop in select! below to couple lifecycles.
         #[cfg(feature = "axon")]
-        if std::env::var("CELL_LAN").is_ok() {
-            let axon = AxonServer::ignite(name).await?;
-            let h = handler.clone();
-            let g = Arc::new(genome_json.clone());
-            let s_axon = semaphore.clone();
+        let axon_server = if std::env::var("CELL_LAN").is_ok() {
+            Some(AxonServer::ignite(name).await?)
+        } else {
+            None
+        };
 
-            // Spawn the Axon server loop in the background
-            tokio::spawn(async move {
+        // Shared state for Axon loop
+        let h_axon = handler.clone();
+        let g_axon = Arc::new(genome_json.clone());
+        let s_axon = semaphore.clone();
+
+        let axon_future = async move {
+            #[cfg(feature = "axon")]
+            if let Some(axon) = axon_server {
                 while let Some(conn) = axon.accept().await {
-                    let h_inner = h.clone();
-                    let g_inner = g.clone();
+                    let h_inner = h_axon.clone();
+                    let g_inner = g_axon.clone();
                     let s_inner = s_axon.clone();
 
                     tokio::spawn(async move {
@@ -92,19 +98,34 @@ impl Membrane {
                                     )
                                     .await
                                     {
-                                        // error!("Axon RPC Error: {}", e);
+                                        // Suppress common disconnect errors in logs
+                                        let msg = e.to_string();
+                                        if !msg.contains("Broken pipe") && !msg.contains("Connection reset") {
+                                             // debug!("Axon RPC Error: {}", e);
+                                        }
                                     }
                                 });
                             }
                         }
                     });
                 }
-            });
-        }
+            } else {
+                std::future::pending::<()>().await;
+            }
+            #[cfg(not(feature = "axon"))]
+            std::future::pending::<()>().await;
+            
+            Ok::<(), anyhow::Error>(())
+        };
 
         // 2. Bind Local Socket (Always active for local discovery)
-        // This ensures "Same Machine" connections always work via FS/SHM
-        bind_local::<F, Req, Resp>(name, handler, Arc::new(genome_json), semaphore).await
+        let local_future = bind_local::<F, Req, Resp>(name, handler, Arc::new(genome_json), semaphore);
+
+        // Run both transport layers. If one fails (local bind error) or is cancelled, both stop.
+        tokio::select! {
+            res = local_future => res,
+            _ = axon_future => Ok(()),
+        }
     }
 }
 
@@ -178,8 +199,16 @@ where
                     if let Err(e) =
                         handle_connection::<F, Req, Resp>(stream, h, g, &cell_name).await
                     {
-                        if e.to_string() != "early eof" {
+                        // Fix: Downgrade "Broken pipe" to avoid log spam on abrupt disconnects
+                        let msg = e.to_string();
+                        let is_disconnect = msg == "early eof" 
+                            || msg.contains("Broken pipe") 
+                            || msg.contains("Connection reset");
+
+                        if !is_disconnect {
                             warn!("[{}] Connection Error: {}", cell_name, e);
+                        } else {
+                            // debug!("[{}] Disconnected: {}", cell_name, msg);
                         }
                     }
                 });

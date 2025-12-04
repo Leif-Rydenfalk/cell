@@ -91,15 +91,15 @@ async fn main() -> Result<()> {
     // Graceful Shutdown Logic (Fix #10)
     match signal::ctrl_c().await {
         Ok(()) => {
-            info!("[Exchange] Shutdown signal received, draining connections...");
-            tokio::select! {
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
-                    warn!("[Exchange] Forced shutdown after timeout");
-                }
-                _ = server_handle => {
-                    info!("[Exchange] Clean shutdown completed");
-                }
-            }
+            info!("[Exchange] Shutdown signal received, stopping listener...");
+            
+            // Fix: Abort the server task instead of waiting, because accept() is an infinite loop
+            server_handle.abort();
+            
+            // Wait for the task to confirm cancellation
+            let _ = server_handle.await;
+            
+            info!("[Exchange] Listener stopped, shutdown completed.");
         }
         Err(err) => {
             warn!("Unable to listen for shutdown signal: {}", err);
