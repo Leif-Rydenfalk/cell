@@ -12,6 +12,8 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use std::time::Duration;
+use tracing::{info, warn};
 
 #[cfg(target_os = "linux")]
 use crate::shm::{RingBuffer, ShmClient, ShmMessage};
@@ -38,57 +40,60 @@ pub struct Synapse {
 impl Synapse {
     /// Automatic discovery with fallback chain: Local → LAN → Manual Override
     pub async fn grow(cell_name: &str) -> Result<Self> {
-        println!("[Synapse] Connecting to '{}'...", cell_name);
+        // Fix #12: Unbounded Retry
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY: Duration = Duration::from_secs(1);
+        
+        info!("[Synapse] Connecting to '{}'...", cell_name);
 
-        // 1. Try Local Socket (Fastest - same machine)
-        let socket_dir = resolve_socket_dir();
-        let socket_path = socket_dir.join(format!("{}.sock", cell_name));
+        for attempt in 1..=MAX_RETRIES {
+            // 1. Try Local Socket (Fastest - same machine)
+            let socket_dir = resolve_socket_dir();
+            let socket_path = socket_dir.join(format!("{}.sock", cell_name));
 
-        if let Ok(stream) = UnixStream::connect(&socket_path).await {
-            println!("[Synapse] ✓ Local connection established");
-            return Ok(Self {
-                transport: Transport::Socket(stream),
-                upgrade_attempted: false,
-            });
-        }
-
-        // 2. Try LAN Discovery (Automatic - no manual config needed)
-        #[cfg(feature = "axon")]
-        {
-            println!("[Synapse] Local socket not found, trying LAN discovery...");
-
-            // Manual override check (last resort)
-            if let Ok(peer_addr) = std::env::var("CELL_PEER") {
-                println!("[Synapse] Using manual override: {}", peer_addr);
-                let client = crate::axon::AxonClient::make_endpoint()?;
-                let addr = peer_addr.parse()?;
-                let conn = client.connect(addr, "localhost")?.await?;
+            if let Ok(stream) = UnixStream::connect(&socket_path).await {
+                info!("[Synapse] ✓ Local connection established");
                 return Ok(Self {
-                    transport: Transport::Quic(conn),
+                    transport: Transport::Socket(stream),
                     upgrade_attempted: false,
                 });
             }
 
-            // Automatic LAN discovery
-            if let Some(conn) = AxonClient::connect(cell_name).await? {
-                return Ok(Self {
-                    transport: Transport::Quic(conn),
-                    upgrade_attempted: false,
-                });
+            // 2. Try LAN Discovery (Automatic - no manual config needed)
+            #[cfg(feature = "axon")]
+            {
+                // Manual override check (last resort)
+                if let Ok(peer_addr) = std::env::var("CELL_PEER") {
+                    info!("[Synapse] Using manual override: {}", peer_addr);
+                    let client = crate::axon::AxonClient::make_endpoint()?;
+                    let addr = peer_addr.parse()?;
+                    let conn = client.connect(addr, "localhost")?.await?;
+                    return Ok(Self {
+                        transport: Transport::Quic(conn),
+                        upgrade_attempted: false,
+                    });
+                }
+
+                // Automatic LAN discovery
+                if let Some(conn) = AxonClient::connect(cell_name).await? {
+                    return Ok(Self {
+                        transport: Transport::Quic(conn),
+                        upgrade_attempted: false,
+                    });
+                }
+            }
+            
+            if attempt < MAX_RETRIES {
+                info!("[Synapse] Retry {}/{} after {}s...", attempt, MAX_RETRIES, RETRY_DELAY.as_secs());
+                tokio::time::sleep(RETRY_DELAY).await;
             }
         }
 
         bail!(
-            "Cell '{}' not found.\n\
-            \n\
-            Tried:\n\
-            1. Local socket: {:?}\n\
-            2. LAN discovery (automatic)\n\
-            3. Manual override (CELL_PEER env var)\n\
-            \n\
+            "Cell '{}' not found after {} attempts.\n\
             Make sure the cell is running and accessible.",
             cell_name,
-            socket_path
+            MAX_RETRIES
         );
     }
 
@@ -192,9 +197,9 @@ impl Synapse {
         stream.read_exact(&mut challenge).await?;
         
         // Compute and Send Response
-        // We use the same token as server (it should be shared source or config, here hardcoded for fix)
-        const SHM_AUTH_TOKEN: &[u8] = b"__CELL_SHM_TOKEN__";
-        let response = blake3::hash(&[&challenge, SHM_AUTH_TOKEN].concat());
+        // Fix #2: Use Secure Token
+        let auth_token = crate::membrane::get_shm_auth_token();
+        let response = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
         stream.write_all(response.as_bytes()).await?;
 
         let mut len_buf = [0u8; 4];
@@ -252,8 +257,7 @@ where
         T::Archived: for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>>,
     {
         match self {
-            Response::Owned(bytes) => crate::rkyv::check_archived_root::<T>(bytes)
-                .map_err(|e| anyhow::anyhow!("Validation failed: {:?}", e)),
+            Response::Owned(bytes) => crate::validate_archived_root::<T>(bytes, "Response::get"),
             #[cfg(target_os = "linux")]
             Response::ZeroCopy(msg) => Ok(msg.get()),
             #[cfg(not(target_os = "linux"))]

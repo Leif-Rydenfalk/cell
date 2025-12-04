@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use tracing::{warn, error};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum LogEntry {
@@ -71,6 +72,9 @@ impl WriteAheadLog {
     }
 
     pub fn read_all(&mut self) -> Result<Vec<LogEntry>> {
+        // Fix #5: Validate bounds to prevent OOM
+        const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024; // 100MB limit per entry
+
         let mut entries = Vec::new();
         self.file.seek(SeekFrom::Start(0))?;
         let mut len_buf = [0u8; 8];
@@ -81,17 +85,35 @@ impl WriteAheadLog {
                 break;
             }
             let len = u64::from_le_bytes(len_buf);
+
+            // Validation: Max size
+            if len > MAX_ENTRY_SIZE {
+                warn!("[WAL] Skipping corrupted entry (size: {} bytes > limit)", len);
+                break; // Stop recovery on corruption
+            }
+
             if self.file.read_exact(&mut crc_buf).is_err() {
                 break;
             }
-            let _crc = u32::from_le_bytes(crc_buf);
+            let expected_crc = u32::from_le_bytes(crc_buf);
+
             let mut buf = vec![0u8; len as usize];
             if self.file.read_exact(&mut buf).is_err() {
                 break;
             }
 
+            // Validation: CRC
+            let actual_crc = crc32fast::hash(&buf);
+            if actual_crc != expected_crc {
+                error!("[WAL] CRC mismatch, stopping recovery");
+                break;
+            }
+
             if let Ok(e) = bincode::deserialize(&buf) {
                 entries.push(e);
+            } else {
+                error!("[WAL] Failed to deserialize entry");
+                break;
             }
         }
         Ok(entries)

@@ -11,6 +11,14 @@ pub struct Ribosome;
 
 impl Ribosome {
     pub fn synthesize(source_path: &Path, cell_name: &str) -> Result<PathBuf> {
+        // Fix #11: Path Traversal
+        if cell_name.contains(&['/', '\\', '.'][..]) {
+            anyhow::bail!("Invalid cell name: cannot contain path separators");
+        }
+        if cell_name.is_empty() || cell_name.len() > 100 {
+            anyhow::bail!("Invalid cell name length");
+        }
+
         let cache_dir = dirs::home_dir().unwrap().join(".cell/cache");
         let protein_dir = cache_dir.join("proteins").join(cell_name);
 

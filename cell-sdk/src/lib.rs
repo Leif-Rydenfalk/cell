@@ -39,3 +39,21 @@ pub use serde;
 
 // Helper for macros
 pub use membrane::resolve_socket_dir;
+
+// Helper for rkyv validation (Fix #3)
+pub fn validate_archived_root<T: rkyv::Archive>(
+    bytes: &[u8],
+    context: &str,
+) -> anyhow::Result<&T::Archived>
+where
+    T::Archived: for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>>,
+{
+    rkyv::check_archived_root::<T>(bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "Invalid data format in {}: {:?} (len: {})",
+            context,
+            e,
+            bytes.len()
+        )
+    })
+}

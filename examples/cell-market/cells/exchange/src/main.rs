@@ -3,6 +3,8 @@ use cell_sdk as cell;
 use cell_sdk::rkyv::Archived;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::signal;
+use tracing::{info, warn};
 
 struct ExchangeState {
     trade_count: AtomicU64,
@@ -56,6 +58,13 @@ impl ExchangeService {
 async fn main() -> Result<()> {
     // Enable LAN mode automatically
     std::env::set_var("CELL_LAN", "1");
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into())
+        )
+        .init();
     
     let state = Arc::new(ExchangeState {
         trade_count: AtomicU64::new(0),
@@ -65,15 +74,37 @@ async fn main() -> Result<()> {
 
     let service = ExchangeService { state: state.clone() };
 
-    println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║           CELL EXCHANGE - MULTI-INTERFACE MODE           ║");
-    println!("╚══════════════════════════════════════════════════════════╝");
-    println!();
-    println!("[Exchange] Fingerprint: 0x{:x}", ExchangeService::SCHEMA_FINGERPRINT);
-    println!("[Exchange] Starting server with automatic LAN discovery...");
-    println!();
+    info!("╔══════════════════════════════════════════════════════════╗");
+    info!("║           CELL EXCHANGE - MULTI-INTERFACE MODE           ║");
+    info!("╚══════════════════════════════════════════════════════════╝");
+    info!("");
+    info!("[Exchange] Fingerprint: 0x{:x}", ExchangeService::SCHEMA_FINGERPRINT);
+    info!("[Exchange] Starting server with automatic LAN discovery...");
+    info!("");
     
-    service.serve("exchange").await?;
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = service.serve("exchange").await {
+            warn!("Server exited with error: {}", e);
+        }
+    });
+
+    // Graceful Shutdown Logic (Fix #10)
+    match signal::ctrl_c().await {
+        Ok(()) => {
+            info!("[Exchange] Shutdown signal received, draining connections...");
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                    warn!("[Exchange] Forced shutdown after timeout");
+                }
+                _ = server_handle => {
+                    info!("[Exchange] Clean shutdown completed");
+                }
+            }
+        }
+        Err(err) => {
+            warn!("Unable to listen for shutdown signal: {}", err);
+        }
+    }
     
     Ok(())
 }

@@ -158,6 +158,27 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
+    // Fix #7: Macro Compilation Bomb Prevention
+    let total_args: usize = methods.iter().map(|m| m.args.len()).sum();
+    if total_args > 500 {
+        return syn::Error::new(
+            syn::spanned::Spanned::span(&input.self_ty),
+            format!("Too many total arguments ({}) across all methods (max 500)", total_args)
+        ).to_compile_error().into();
+    }
+
+    // Check for recursive type definitions that could cause compile loops
+    for method in &methods {
+        for (_, ty) in &method.args {
+            if contains_recursive_type(ty, &service_name) {
+                return syn::Error::new(
+                    syn::spanned::Spanned::span(ty),
+                    "Recursive type definitions are not allowed in handlers"
+                ).to_compile_error().into();
+            }
+        }
+    }
+
     let protocol_name = format_ident!("{}Protocol", service_name);
     let response_name = format_ident!("{}Response", service_name);
 
@@ -356,5 +377,15 @@ fn normalize_protocol_type(ty: &Type) -> Type {
             inner
         }
         _ => ty.clone(),
+    }
+}
+
+fn contains_recursive_type(ty: &Type, service_name: &syn::Ident) -> bool {
+    match ty {
+        Type::Path(tp) => {
+            tp.path.segments.iter().any(|seg| seg.ident == *service_name)
+        }
+        Type::Reference(r) => contains_recursive_type(&r.elem, service_name),
+        _ => false,
     }
 }

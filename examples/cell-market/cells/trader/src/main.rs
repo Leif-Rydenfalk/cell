@@ -6,6 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::{info, warn, error};
 
 cell_remote!(ExchangeClient = "exchange");
 
@@ -124,6 +125,10 @@ fn shard_idx() -> usize {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let args: Vec<String> = env::args().collect();
     
     let (concurrency, mode) = if args.len() > 1 {
@@ -183,7 +188,8 @@ async fn main() -> Result<()> {
             let curr_lat = r_lat.load();
 
             let delta_req = curr_req - last_req;
-            let delta_lat = curr_lat - last_lat;
+            // Fix #8: Potential Overflow in Trader Metrics
+            let delta_lat = curr_lat.saturating_sub(last_lat);
 
             let rps = delta_req as f64 / elapsed;
             let avg_ns = if delta_req > 0 { delta_lat as f64 / delta_req as f64 } else { 0.0 };
@@ -229,7 +235,7 @@ async fn main() -> Result<()> {
             let mut client = match ExchangeClient::connect().await {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("Task {} failed: {}", i, e);
+                    error!("Task {} failed: {}", i, e);
                     return;
                 }
             };

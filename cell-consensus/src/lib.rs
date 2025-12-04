@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use wal::{LogEntry, WriteAheadLog};
+use tracing::info;
 
 #[derive(Debug)]
 enum WalCmd {
@@ -66,7 +67,7 @@ impl RaftNode {
         let entries = wal.read_all()?;
         
         if !entries.is_empty() {
-            println!("[Raft] Recovering node {}. Replaying {} logs.", config.id, entries.len());
+            info!("[Raft] Recovering node {}. Replaying {} logs.", config.id, entries.len());
             for entry in &entries {
                 if let LogEntry::Command(data) = entry {
                     sm.apply(data);

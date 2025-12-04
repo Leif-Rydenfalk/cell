@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tracing::{info, warn, error};
 
 pub struct MyceliumRoot {
     socket_dir: PathBuf,
@@ -32,7 +33,7 @@ impl MyceliumRoot {
         }
 
         let listener = UnixListener::bind(&umbilical_path)?;
-        println!("[Root] Umbilical Cord Active: {:?}", umbilical_path);
+        info!("[Root] Umbilical Cord Active: {:?}", umbilical_path);
 
         let root = Self {
             socket_dir,
@@ -47,7 +48,7 @@ impl MyceliumRoot {
                     let mut r_inner = r.clone();
                     tokio::spawn(async move {
                         if let Err(e) = r_inner.handle_child(stream).await {
-                            eprintln!("[Root] Error: {}", e);
+                            error!("[Root] Error: {}", e);
                         }
                     });
                 }
@@ -72,12 +73,13 @@ impl MyceliumRoot {
         let mut buf = vec![0u8; len];
         stream.read_exact(&mut buf).await?;
 
+        // Fix #3: Validation
         let req = crate::rkyv::from_bytes::<MitosisRequest>(&buf)
             .map_err(|e| anyhow::anyhow!("Invalid Protocol: {}", e))?;
 
         match req {
             MitosisRequest::Spawn { cell_name } => {
-                println!("[Root] Request to spawn: {}", cell_name);
+                info!("[Root] Request to spawn: {}", cell_name);
 
                 let source = self.dna_path.join(&cell_name);
                 if !source.exists() {

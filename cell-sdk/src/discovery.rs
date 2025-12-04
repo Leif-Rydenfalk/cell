@@ -109,10 +109,10 @@ impl LanDiscovery {
         
         // Security Fix #5: Eviction to prevent unbounded growth
         if cache.len() >= MAX_CACHE_SIZE {
+            // Fix #4: Atomic eviction by holding lock
             // Simple eviction strategy: Remove oldest entries
-            // Since HashMap doesn't track insertion order, we sort by timestamp
-            let mut entries: Vec<_> = cache.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            entries.sort_by_key(|(_, s)| s.timestamp);
+            let mut entries: Vec<_> = cache.iter().map(|(k, v)| (k.clone(), v.timestamp)).collect();
+            entries.sort_by_key(|(_, ts)| *ts);
             
             // Remove bottom 10%
             for (name, _) in entries.iter().take(MAX_CACHE_SIZE / 10) {

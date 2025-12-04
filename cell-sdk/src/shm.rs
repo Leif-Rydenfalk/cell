@@ -112,6 +112,13 @@ impl RingBuffer {
     }
 
     pub fn try_alloc(&self, exact_size: usize) -> Option<WriteSlot> {
+        // Fix #6: Missing Bounds Check
+        const MAX_ALLOC_SIZE: usize = 16 * 1024 * 1024; // 16MB max
+        if exact_size > MAX_ALLOC_SIZE {
+            eprintln!("[SHM] Allocation too large: {}", exact_size);
+            return None;
+        }
+
         let aligned_size = (exact_size + ALIGNMENT - 1) & !(ALIGNMENT - 1);
         let total_needed = HEADER_SIZE + aligned_size;
 

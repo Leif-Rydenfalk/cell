@@ -17,6 +17,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
+use tracing::{info, warn, error};
+#[cfg(feature = "axon")]
+use webpki_roots;
 
 // --- Axon Server (Multi-Interface Listener) ---
 
@@ -35,7 +38,7 @@ impl AxonServer {
         let addrs = get_all_local_addresses().await?;
 
         if addrs.is_empty() {
-            eprintln!("[Axon] WARNING: No local addresses found, using fallback 0.0.0.0");
+            warn!("[Axon] WARNING: No local addresses found, using fallback 0.0.0.0");
         }
 
         let mut endpoints = Vec::new();
@@ -58,10 +61,10 @@ impl AxonServer {
                         .secrete_specific(cell_name, &ip_str, port)
                         .await?;
 
-                    println!("[Axon] ✓ Bound and advertising {}:{}", ip_str, port);
+                    info!("[Axon] ✓ Bound and advertising {}:{}", ip_str, port);
                 }
                 Err(e) => {
-                    eprintln!("[Axon] Failed to bind {}: {}", ip, e);
+                    warn!("[Axon] Failed to bind {}: {}", ip, e);
                 }
             }
         }
@@ -135,8 +138,8 @@ impl AxonServer {
         }
 
         // Handle RPC
-        let archived_req = rkyv::check_archived_root::<Req>(&buf)
-            .map_err(|e| anyhow::anyhow!("Invalid request format: {:?}", e))?;
+        // Fix #3: Use validation helper
+        let archived_req = crate::validate_archived_root::<Req>(&buf, "handle_rpc_stream")?;
 
         let response = handler(archived_req).await?;
         let resp_bytes = rkyv::to_bytes::<_, 1024>(&response)?.into_vec();
@@ -157,7 +160,7 @@ pub struct AxonClient;
 impl AxonClient {
     /// Nuclear discovery: Tries EVERY strategy concurrently until success
     pub async fn connect(cell_name: &str) -> Result<Option<quinn::Connection>> {
-        println!("[Axon] Discovering cell '{}'...", cell_name);
+        info!("[Axon] Discovering cell '{}'...", cell_name);
 
         // 1. Start pheromone system
         let pheromones = PheromoneSystem::ignite().await?;
@@ -173,7 +176,7 @@ impl AxonClient {
             let signals = pheromones.lookup_all(cell_name).await;
 
             if !signals.is_empty() {
-                println!(
+                info!(
                     "[Axon] Found {} potential addresses for '{}'",
                     signals.len(),
                     cell_name
@@ -191,7 +194,7 @@ impl AxonClient {
                 // Wait for first success
                 for task in tasks {
                     if let Ok(Ok(Some(conn))) = task.await {
-                        println!("[Axon] ✓ Connected to '{}'", cell_name);
+                        info!("[Axon] ✓ Connected to '{}'", cell_name);
                         return Ok(Some(conn));
                     }
                 }
@@ -199,7 +202,7 @@ impl AxonClient {
 
             // Show progress
             if attempt % 10 == 0 && attempt > 0 {
-                println!(
+                info!(
                     "[Axon] Still searching... (attempt {}/{})",
                     attempt, max_attempts
                 );
@@ -208,7 +211,7 @@ impl AxonClient {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
 
-        println!("[Axon] Could not discover '{}'", cell_name);
+        warn!("[Axon] Could not discover '{}'", cell_name);
         Ok(None)
     }
 
@@ -359,7 +362,7 @@ async fn try_connect(addr: SocketAddr) -> Result<Option<quinn::Connection>> {
     match endpoint.connect(addr, "localhost") {
         Ok(connecting) => match tokio::time::timeout(timeout, connecting).await {
             Ok(Ok(conn)) => {
-                println!("[Axon] ✓ Connected to {}", addr);
+                info!("[Axon] ✓ Connected to {}", addr);
                 Ok(Some(conn))
             }
             _ => Ok(None),
@@ -383,17 +386,22 @@ fn make_server_config() -> Result<quinn::ServerConfig> {
 }
 
 fn make_client_endpoint() -> Result<quinn::Endpoint> {
-    // Security Fix #3: Replaced SkipVerify with Pinning/Root Store
-    // We try to use system roots or a pinned certificate if provided.
-    
+    // Security Fix #1: TLS Validation
     let mut roots = rustls::RootCertStore::empty();
     
-    // Check if user provided a trusted cert path
+    // Load system certificates via webpki-roots
+    #[cfg(feature = "axon")]
+    for cert in webpki_roots::TLS_SERVER_ROOTS.iter() {
+        let _ = roots.add(&rustls::Certificate(cert.to_vec()));
+    }
+
+    // Allow user to override/append with a specific trusted cert (Pinning)
     if let Ok(cert_path) = std::env::var("CELL_TRUSTED_CERT") {
         if let Ok(cert_data) = std::fs::read(&cert_path) {
-             // Try to parse as PEM
              let mut reader = std::io::BufReader::new(&cert_data[..]);
              if let Ok(certs) = rustls_pemfile::certs(&mut reader) {
+                 // Option: If pinned cert is present, should we clear system roots? 
+                 // For now, we append.
                  for cert in certs {
                     let _ = roots.add(&rustls::Certificate(cert));
                  }
@@ -401,15 +409,35 @@ fn make_client_endpoint() -> Result<quinn::Endpoint> {
         }
     }
     
-    // NOTE: Without webpki-roots or native-certs crates available in Cargo.toml,
-    // we cannot easily load system roots here. 
-    // Defaulting to empty root store means it will FAIL unless a pinned cert is added above.
-    // This is "Secure by Default".
-
-    let crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    // Development mode bypass
+    let crypto = if std::env::var("CELL_DEV_MODE").is_ok() {
+        warn!("WARNING: Running in DEV_MODE with relaxed TLS verification");
+        
+        struct DevVerifier;
+        impl rustls::client::ServerCertVerifier for DevVerifier {
+            fn verify_server_cert(
+                &self,
+                _end_entity: &rustls::Certificate,
+                _intermediates: &[rustls::Certificate],
+                _server_name: &rustls::ServerName,
+                _scts: &mut dyn Iterator<Item = &[u8]>,
+                _ocsp_response: &[u8],
+                _now: std::time::SystemTime,
+            ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+                Ok(rustls::client::ServerCertVerified::assertion())
+            }
+        }
+        
+        rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_custom_certificate_verifier(Arc::new(DevVerifier))
+            .with_no_client_auth()
+    } else {
+        rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    };
 
     let client_config = quinn::ClientConfig::new(Arc::new(crypto));
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;

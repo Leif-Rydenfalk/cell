@@ -16,14 +16,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tracing::{info, warn, error};
+use governor::{Quota, RateLimiter};
+use std::num::NonZeroU32;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
-
-// Security Fix #2: Authentication Token
-const SHM_AUTH_TOKEN: &[u8] = b"__CELL_SHM_TOKEN__";
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -49,6 +49,10 @@ impl Membrane {
             + Send
             + 'static,
     {
+        // Fix #9: Rate Limiter (1000 req/s)
+        let quota = Quota::per_second(NonZeroU32::new(1000).unwrap());
+        let rate_limiter = Arc::new(RateLimiter::direct(quota));
+
         // 1. Ignite Axon (LAN) if enabled
         // We do this in parallel with local binding.
         #[cfg(feature = "axon")]
@@ -56,16 +60,24 @@ impl Membrane {
             let axon = AxonServer::ignite(name).await?;
             let h = handler.clone();
             let g = Arc::new(genome_json.clone());
+            let rl = rate_limiter.clone();
 
             // Spawn the Axon server loop in the background
             tokio::spawn(async move {
                 while let Some(conn) = axon.accept().await {
                     let h_inner = h.clone();
                     let g_inner = g.clone();
+                    let rl_inner = rl.clone();
 
                     tokio::spawn(async move {
                         if let Ok(connection) = conn.await {
                             while let Ok((send, recv)) = connection.accept_bi().await {
+                                // Check rate limit per stream/request
+                                if rl_inner.check().is_err() {
+                                    warn!("[Axon] Rate limit exceeded");
+                                    continue;
+                                }
+
                                 let h_call = h_inner.clone();
                                 let g_call = g_inner.clone();
 
@@ -74,7 +86,7 @@ impl Membrane {
                                 )
                                 .await
                                 {
-                                    // eprintln!("Axon RPC Error: {}", e);
+                                    // error!("Axon RPC Error: {}", e);
                                 }
                             }
                         }
@@ -85,11 +97,16 @@ impl Membrane {
 
         // 2. Bind Local Socket (Always active for local discovery)
         // This ensures "Same Machine" connections always work via FS/SHM
-        bind_local::<F, Req, Resp>(name, handler, Arc::new(genome_json)).await
+        bind_local::<F, Req, Resp>(name, handler, Arc::new(genome_json), rate_limiter).await
     }
 }
 
-async fn bind_local<F, Req, Resp>(name: &str, handler: F, genome: Arc<Option<String>>) -> Result<()>
+async fn bind_local<F, Req, Resp>(
+    name: &str,
+    handler: F,
+    genome: Arc<Option<String>>,
+    rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>,
+) -> Result<()>
 where
     F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>> + Send + Sync + 'static + Clone,
     Req: Archive + Send,
@@ -108,7 +125,7 @@ where
     let mut _guard = RwLock::new(lock_file);
 
     if _guard.try_write().is_err() {
-        println!("[{}] Instance already running (Locked).", name);
+        info!("[{}] Instance already running (Locked).", name);
         // We don't exit here if LAN is running, but usually bind_local blocks main thread.
         // If locked, it means another instance is local. We should probably bail.
         return Ok(());
@@ -128,7 +145,7 @@ where
         std::fs::set_permissions(&socket_path, perm)?;
     }
 
-    println!("[{}] Membrane Active at {:?}", name, socket_path);
+    info!("[{}] Membrane Active at {:?}", name, socket_path);
 
     loop {
         match listener.accept().await {
@@ -136,13 +153,14 @@ where
                 let h = handler.clone();
                 let g = genome.clone();
                 let cell_name = name.to_string();
+                let rl = rate_limiter.clone();
 
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_connection::<F, Req, Resp>(stream, h, g, &cell_name).await
+                        handle_connection::<F, Req, Resp>(stream, h, g, &cell_name, rl).await
                     {
                         if e.to_string() != "early eof" {
-                            eprintln!("[{}] Connection Error: {}", cell_name, e);
+                            warn!("[{}] Connection Error: {}", cell_name, e);
                         }
                     }
                 });
@@ -158,6 +176,7 @@ async fn handle_connection<F, Req, Resp>(
     handler: F,
     genome: Arc<Option<String>>,
     cell_name: &str,
+    rate_limiter: Arc<RateLimiter<governor::state::direct::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>,
 ) -> Result<()>
 where
     F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>> + Send + Sync + 'static,
@@ -169,6 +188,13 @@ where
         + Send,
 {
     loop {
+        // Fix #9: Rate Limiting
+        if rate_limiter.check().is_err() {
+            warn!("[{}] Rate limit exceeded", cell_name);
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            continue;
+        }
+
         let mut len_buf = [0u8; 4];
         if stream.read_exact(&mut len_buf).await.is_err() {
             return Ok(());
@@ -222,8 +248,8 @@ where
     Req::Archived: for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>>,
     Resp: rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>,
 {
-    let archived_req = rkyv::check_archived_root::<Req>(request_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid request: {:?}", e))?;
+    // Fix #3: Use validation helper
+    let archived_req = crate::validate_archived_root::<Req>(request_bytes, "handle_socket_rpc")?;
 
     let response = handler(archived_req).await?;
 
@@ -236,6 +262,35 @@ where
 
     Ok(())
 }
+
+// Fix #2: Secure Token Logic
+pub(crate) fn get_shm_auth_token() -> Vec<u8> {
+    if let Ok(token) = std::env::var("CELL_SHM_TOKEN") {
+        return blake3::hash(token.as_bytes()).as_bytes().to_vec();
+    }
+    
+    if let Some(home) = dirs::home_dir() {
+        let token_path = home.join(".cell/shm.token");
+        if let Ok(token) = std::fs::read(&token_path) {
+            return blake3::hash(&token).as_bytes().to_vec();
+        }
+        
+        let new_token: [u8; 32] = rand::random();
+        if std::fs::write(&token_path, &new_token).is_ok() {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o600);
+                let _ = std::fs::set_permissions(&token_path, perms);
+            }
+            return blake3::hash(&new_token).as_bytes().to_vec();
+        }
+    }
+    
+    let uid = nix::unistd::getuid().as_raw();
+    blake3::hash(&uid.to_le_bytes()).as_bytes().to_vec()
+}
+
 
 #[cfg(target_os = "linux")]
 async fn handle_shm_upgrade<F, Req, Resp>(
@@ -268,12 +323,14 @@ where
     let mut response = [0u8; 32];
     stream.read_exact(&mut response).await?;
     
-    let expected = blake3::hash(&[&challenge, SHM_AUTH_TOKEN].concat());
+    let auth_token = get_shm_auth_token();
+    let expected = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
+    
     if response != expected.as_bytes()[..32] {
         bail!("Authentication failed for SHM upgrade");
     }
 
-    // println!("[{}]  Upgrading to zero-copy shared memory...", cell_name);
+    // info!("[{}]  Upgrading to zero-copy shared memory...", cell_name);
 
     let (rx_ring, rx_fd) = RingBuffer::create(&format!("{}_server_rx", cell_name))?;
     let (tx_ring, tx_fd) = RingBuffer::create(&format!("{}_server_tx", cell_name))?;
@@ -286,7 +343,7 @@ where
     let raw_fd = stream.as_raw_fd();
     send_fds(raw_fd, &[rx_fd, tx_fd])?;
 
-    // println!("[{}]  Zero-copy shared memory active", cell_name);
+    // info!("[{}]  Zero-copy shared memory active", cell_name);
 
     serve_zero_copy::<F, Req, Resp>(rx_ring, tx_ring, handler).await
 }
