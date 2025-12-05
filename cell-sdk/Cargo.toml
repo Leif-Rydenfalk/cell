@@ -16,7 +16,7 @@ axon = ["dep:cell-axon"]
 [dependencies]
 cell-model = { workspace = true }
 cell-macros = { workspace = true }
-cell-transport = { workspace = true, optional = true }
+cell-transport = { workspace = true, optional = true, features = ["std"] }
 cell-axon = { workspace = true, optional = true }
 cell-process = { workspace = true, optional = true }
 

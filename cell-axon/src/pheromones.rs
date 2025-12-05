@@ -49,7 +49,6 @@ impl PheromoneSystem {
                 };
 
                 // 2. Synchronous Parsing Scope
-                // Explicitly annotate type `Signal` here to satisfy the compiler
                 let sig: Signal = {
                     let archived = match rkyv::check_archived_root::<Signal>(&buf[..len]) {
                         Ok(a) => a,

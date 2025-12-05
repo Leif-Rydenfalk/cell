@@ -18,7 +18,6 @@ impl Capsid {
             .context("Binary path invalid or does not exist")?;
         
         if let Some(home) = dirs::home_dir() {
-            // Prefix with underscore to silence unused warning
             let _trusted_root = home.join(".cell/cache/proteins");
             if !binary_canonical.is_file() {
                 bail!("Target is not a file");

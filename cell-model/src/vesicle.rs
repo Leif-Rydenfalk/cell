@@ -1,56 +1,44 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use std::marker::PhantomData;
+use alloc::vec::Vec;
+use core::marker::PhantomData;
+use core::ops::Deref;
 
 /// A container for payload data.
-///
-/// It acts as a Zero-Copy abstraction over:
-/// 1. Owned Memory (Heap/Socket buffers)
-/// 2. Shared Memory (Ring Buffer Locks)
-///
-/// It implements `Deref<Target=[u8]>`, so you can use it like a slice.
 pub enum Vesicle<'a> {
-    /// Standard heap-allocated buffer (Socket transport)
+    /// Standard heap-allocated buffer
     Owned(Vec<u8>),
 
-    /// Zero-copy reference to the Shared Memory Ring Buffer.
-    /// Holding this variant keeps the consumer lock active via the RAII guard.
-    #[cfg(target_os = "linux")]
+    /// Zero-copy reference (e.g. Ring Buffer or Direct DMA)
+    /// This variant is valid in no_std if the transport provides a slice
     Borrowed(&'a [u8]),
 
-    /// Fallback for non-linux or empty states
+    /// Fallback
     Empty,
 
-    /// Ensures the lifetime parameter is used on non-Linux platforms
-    #[cfg(not(target_os = "linux"))]
+    /// Ensures the lifetime parameter is used
     _Phantom(PhantomData<&'a ()>),
 }
 
 impl<'a> Vesicle<'a> {
-    /// Wraps an owned vector.
     pub fn wrap(data: Vec<u8>) -> Self {
         Self::Owned(data)
     }
 
-    /// Pre-allocate capacity
     pub fn with_capacity(size: usize) -> Self {
-        Self::Owned(vec![0u8; size])
+        Self::Owned(alloc::vec![0u8; size])
     }
 
-    /// Returns a slice to the underlying data.
     pub fn as_slice(&self) -> &[u8] {
         match self {
             Self::Owned(vec) => vec.as_slice(),
-            #[cfg(target_os = "linux")]
             Self::Borrowed(slice) => slice,
             Self::Empty => &[],
-            #[cfg(not(target_os = "linux"))]
             Self::_Phantom(_) => &[],
         }
     }
 
-    /// Get mutable slice (only for Owned variant)
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         match self {
             Self::Owned(vec) => vec.as_mut_slice(),
@@ -67,16 +55,15 @@ impl<'a> Vesicle<'a> {
     }
 }
 
-// Allow treating Vesicle directly as a byte slice
-impl<'a> std::ops::Deref for Vesicle<'a> {
+impl<'a> Deref for Vesicle<'a> {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
         self.as_slice()
     }
 }
 
-impl<'a> std::fmt::Debug for Vesicle<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<'a> core::fmt::Debug for Vesicle<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Vesicle(len={})", self.len())
     }
 }

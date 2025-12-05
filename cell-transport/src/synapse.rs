@@ -1,16 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-#[cfg(feature = "axon")]
-use cell_axon::AxonClient;
-#[cfg(target_os = "linux")]
-use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
-use cell_model::resolve_socket_dir;
 use crate::response::Response;
-use crate::shm::ShmSerializer;
-#[cfg(target_os = "linux")]
-use crate::shm::{ShmClient, RingBuffer};
-
+use crate::resolve_socket_dir;
+use cell_model::Vesicle;
 use anyhow::{bail, Result};
 use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{Archive, Serialize};
@@ -21,20 +14,31 @@ use tokio::net::UnixStream;
 use std::time::Duration;
 use tracing::info;
 use socket2::SockRef;
-#[cfg(target_os = "linux")]
+
+#[cfg(feature = "axon")]
+use cell_axon::AxonClient;
+
+#[cfg(all(feature = "shm", target_os = "linux"))]
+use crate::shm::{ShmClient, RingBuffer, ShmSerializer};
+#[cfg(all(feature = "shm", target_os = "linux"))]
+use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
+#[cfg(all(feature = "shm", target_os = "linux"))]
 use std::os::unix::io::AsRawFd;
 
 const SOCKET_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
 enum Transport {
     Socket(UnixStream),
-    #[cfg(target_os = "linux")]
+    
+    #[cfg(all(feature = "shm", target_os = "linux"))]
     SharedMemory {
         client: ShmClient,
         _socket: UnixStream,
     },
+    
     #[cfg(feature = "axon")]
     Quic(quinn::Connection),
+    
     Empty,
 }
 
@@ -53,6 +57,7 @@ impl Synapse {
         info!("[Synapse] Connecting to '{}'...", cell_name);
 
         for attempt in 1..=MAX_RETRIES {
+            // 1. Try Socket
             let socket_dir = resolve_socket_dir();
             let socket_path = socket_dir.join(format!("{}.sock", cell_name));
 
@@ -70,6 +75,7 @@ impl Synapse {
                 });
             }
 
+            // 2. Try Axon (Network)
             #[cfg(feature = "axon")]
             {
                 if let Ok(peer_addr) = std::env::var("CELL_PEER") {
@@ -105,17 +111,20 @@ impl Synapse {
 
     pub async fn fire<'a, Req, Resp>(&'a mut self, request: &Req) -> Result<Response<'a, Resp>>
     where
-        Req: Serialize<AllocSerializer<1024>> + Serialize<ShmSerializer>,
+        Req: Serialize<AllocSerializer<1024>>,
+        // Conditional bounds hack for SHM
+        // Req: Serialize<ShmSerializer> is only needed if shm enabled
         Resp: Archive + 'a,
-        Resp::Archived:
-            rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
+        Resp::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
-        #[cfg(target_os = "linux")]
+        // Try SHM Upgrade
+        #[cfg(all(feature = "shm", target_os = "linux"))]
         if !self.upgrade_attempted {
             self.upgrade_attempted = true;
             if let Transport::Socket(_) = self.transport {
                 if std::env::var("CELL_DISABLE_SHM").is_err() {
                     if let Err(_e) = self.try_upgrade_to_shm().await {
+                        // Upgrade failed, fall back to socket silently
                     }
                 }
             }
@@ -130,13 +139,23 @@ impl Synapse {
         let fut = async {
             match transport {
                 Transport::Socket(stream) => Self::fire_via_socket(r_buf, w_buf, stream, request).await,
-                #[cfg(target_os = "linux")]
-                Transport::SharedMemory { client, .. } => Self::fire_via_shm(client, request).await,
+                
+                #[cfg(all(feature = "shm", target_os = "linux"))]
+                Transport::SharedMemory { client, .. } => {
+                    // We must serialize using ShmSerializer here. 
+                    // To keep the trait bounds simple in the signature above, we perform a trick:
+                    // Since ShmSerializer is type aliased to AllocSerializer<1024>, they are actually the SAME type.
+                    // So Req already implements it.
+                    let msg = client.request::<Req, Resp>(request).await?;
+                    Ok(Response::ZeroCopy(msg))
+                },
+                
                 #[cfg(feature = "axon")]
                 Transport::Quic(conn) => {
                     let bytes = AxonClient::fire(conn, request).await?;
                     Ok(Response::Owned(bytes))
                 },
+                
                 Transport::Empty => bail!("Connection unusable"),
             }
         };
@@ -192,19 +211,7 @@ impl Synapse {
         Ok(Response::Borrowed(read_buffer))
     }
 
-    #[cfg(target_os = "linux")]
-    async fn fire_via_shm<'a, Req, Resp>(client: &ShmClient, request: &Req) -> Result<Response<'a, Resp>>
-    where
-        Req: Serialize<ShmSerializer>,
-        Resp: Archive,
-        Resp::Archived:
-            rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
-    {
-        let msg = client.request::<Req, Resp>(request).await?;
-        Ok(Response::ZeroCopy(msg))
-    }
-
-    #[cfg(target_os = "linux")]
+    #[cfg(all(feature = "shm", target_os = "linux"))]
     async fn try_upgrade_to_shm(&mut self) -> Result<()> {
         let stream = match &mut self.transport {
             Transport::Socket(s) => s,
@@ -223,6 +230,7 @@ impl Synapse {
         let mut challenge = [0u8; 32];
         stream.read_exact(&mut challenge).await?;
         
+        // We need to access get_shm_auth_token from membrane module
         let auth_token = crate::membrane::get_shm_auth_token();
         let response = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
         stream.write_all(response.as_bytes()).await?;
@@ -262,8 +270,8 @@ impl Synapse {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn recv_fds(socket_fd: std::os::unix::io::RawFd, fds: &[std::os::unix::io::RawFd]) -> Result<Vec<std::os::unix::io::RawFd>> {
+#[cfg(all(feature = "shm", target_os = "linux"))]
+fn recv_fds(socket_fd: std::os::unix::io::RawFd) -> Result<Vec<std::os::unix::io::RawFd>> {
     use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
     use std::io::IoSliceMut;
 

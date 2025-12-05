@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
-/// Magic bytes sent to request the schema from a running cell
 pub const GENOME_REQUEST: &[u8] = b"__CELL_GENOME_REQUEST__";
-
-/// Magic bytes to request an upgrade to Shared Memory transport
 pub const SHM_UPGRADE_REQUEST: &[u8] = b"__SHM_UPGRADE_REQUEST__";
-
-/// Acknowledgment sent by server before sending FDs
 pub const SHM_UPGRADE_ACK: &[u8] = b"__SHM_UPGRADE_ACK__";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

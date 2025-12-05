@@ -3,9 +3,12 @@ name = "cell-model"
 version = { workspace = true }
 edition = { workspace = true }
 
+[features]
+default = ["std"]
+std = ["rkyv/std", "serde/std"]
+alloc = []
+
 [dependencies]
 rkyv = { workspace = true }
 serde = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-dirs = { workspace = true }
+# Removed: anyhow, thiserror, dirs (OS dependencies)
