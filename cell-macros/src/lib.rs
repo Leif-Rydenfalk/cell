@@ -165,18 +165,15 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         impl #service_name {
             pub async fn serve(self, name: &str) -> ::anyhow::Result<()> {
                 let service = std::sync::Arc::new(self);
-                // Membrane::bind signature updated to accept optional consensus sender
-                // Passing None for default use case
-                ::cell_sdk::Membrane::bind::<_, #protocol_name, #response_name>(
-                    name,
+                ::cell_sdk::Runtime::ignite(
                     move |archived_req| {
                         let svc = service.clone();
                         Box::pin(async move {
                             svc.dispatch(archived_req).await
                         })
                     },
-                    None, // Genome JSON
-                    None  // Consensus Sender
+                    name,
+                    None 
                 ).await
             }
 
@@ -216,9 +213,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     }
 
     let dna_path = locate_dna(cell_name);
-    let dna_path_str = dna_path.to_str().expect("Invalid path");
     
-    // FIX: Use cell_build's recursive flattener to support multi-file projects
     let file = match cell_build::load_and_flatten_source(&dna_path) {
         Ok(f) => f,
         Err(e) => panic!("Failed to flatten DNA source: {}", e),
@@ -228,8 +223,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let mut handler_impl = None;
     let mut service_struct_name = String::new();
 
-    // Helper to find items in flattened AST
-    fn find_items<'a>(items: &'a [Item], proteins: &mut Vec<&'a Item>, handler: &mut Option<&'a syn::ItemImpl>, service_name: &mut String) {
+    fn find_items<'a>(items: &'a [syn::Item], proteins: &mut Vec<&'a syn::Item>, handler: &mut Option<&'a syn::ItemImpl>, service_name: &mut String) {
         for item in items {
             match item {
                 Item::Enum(i) if has_attr(&i.attrs, "protein") => proteins.push(item),
@@ -292,7 +286,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         quote! { #vname(#wret) }
     });
 
-    let client_methods = methods.iter().map(|(n, args, wret)| {
+    let client_methods = methods.iter().map(|(n, args, _, wret)| {
         let vname = format_ident!("{}", n.to_string().to_case(Case::Pascal));
         let args_sig = args.iter().map(|(an, at)| quote! { #an: #at });
         let args_struct = args.iter().map(|(an, _)| quote! { #an });

@@ -81,34 +81,6 @@ impl Membrane {
 
                     tokio::spawn(async move {
                         let _permit = permit;
-                        
-                        // Handle potential SHM Upgrade if the connection is Unix
-                        // Note: Ideally the Listener abstracts this, but upgrading transforms the connection type.
-                        // Since `connection` is Box<dyn Connection>, we can't easily downcast to UnixConnection
-                        // to grab the raw stream for passing FDs.
-                        // 
-                        // COMPROMISE: We perform the upgrade check *inside* the handle_connection loop
-                        // if the first message looks like an upgrade request.
-                        // However, upgrade requires FD passing which is transport-specific.
-                        // 
-                        // FIX: We rely on the `handle_connection` logic to detect the upgrade request bytes
-                        // and switch modes if possible, OR we assume `UnixListenerAdapter` handled it?
-                        // `UnixListenerAdapter` returns `UnixConnection`.
-                        
-                        // For this implementation: We perform a check. If we are on SHM-capable OS,
-                        // and we see upgrade request, we can't upgrade a `Box<dyn Connection>`.
-                        // 
-                        // Solution: The server must not upgrade inside the generic loop.
-                        // We will rely on the current transport state.
-                        // If we want SHM, the *Listener* should have yielded a ShmConnection.
-                        // But SHM is upgraded *from* Unix.
-                        
-                        // To keep "write whole files" and not break architecture:
-                        // We will handle the standard loop here. SHM Upgrade on server side
-                        // requires specific handling that fits poorly in the generic `bind_generic`.
-                        // We will assume for now that Server-Side SHM is either not supported in this
-                        // generic pass, OR we implement it by peeking.
-                        
                         if let Err(_e) = handle_connection::<F, Req, Resp>(connection, h, g, &n, c).await {
                              // Suppress
                         }
@@ -181,12 +153,10 @@ where
         for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>> + 'static,
     Resp: rkyv::Serialize<AllocSerializer<1024>> + Send,
 {
-    // Used for serialization
     let mut write_buf = AlignedVec::with_capacity(16 * 1024);
 
     loop {
-        // Zero-Copy Read: We get a Vesicle back.
-        // If it's SHM, it's Guarded (raw pointer). If Unix, it's Owned.
+        // Zero-Copy Read
         let (channel_id, vesicle) = match conn.recv().await {
             Ok(res) => res,
             Err(_) => return Ok(()),
@@ -194,14 +164,12 @@ where
 
         let data = vesicle.as_slice();
 
-        // Genome Request Check (Legacy compat)
         if data == GENOME_REQUEST {
             let resp = if let Some(json) = genome.as_ref() { json.as_bytes() } else { &[] };
             conn.send(resp).await?;
             continue;
         }
 
-        // Multiplexing
         match channel_id {
             channel::APP => {
                 let archived_req = rkyv::check_archived_root::<Req>(data)
@@ -227,7 +195,6 @@ where
             channel::CONSENSUS => {
                 if let Some(tx) = consensus_tx.as_ref() {
                     let _ = tx.send(data.to_vec()).await;
-                    // Ack
                     conn.send(&[]).await?;
                 } else {
                     conn.send(b"No Consensus").await?;

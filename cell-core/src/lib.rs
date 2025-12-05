@@ -50,6 +50,7 @@ pub enum TransportError {
 
 /// Client-side: Request/Response pattern.
 pub trait Transport: Send + Sync {
+    /// Sends data. Data MUST contain the channel ID as the first byte if the transport requires framing.
     fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + Send + '_>>;
 }
 

@@ -133,13 +133,29 @@ impl Synapse {
         Ok(fds)
     }
 
+    pub async fn fire_on_channel(&mut self, channel_id: u8, data: &[u8]) -> Result<Response<Vec<u8>>> {
+        #[cfg(feature = "shm")]
+        if let Some(client) = &self.shm_client {
+             let msg = client.request_raw(data, channel_id).await?;
+             return Ok(Response::Owned(msg.get_bytes().to_vec()));
+        }
+
+        let mut frame = Vec::with_capacity(1 + data.len());
+        frame.push(channel_id);
+        frame.extend_from_slice(data);
+        
+        let resp_bytes = self.transport.call(&frame).await
+            .map_err(|e| anyhow::anyhow!("Transport Error: {:?}", e))?;
+            
+        Ok(Response::Owned(resp_bytes))
+    }
+
     pub async fn fire<'a, Req, Resp>(&'a mut self, request: &Req) -> Result<Response<'a, Resp>>
     where
         Req: Serialize<AllocSerializer<1024>>,
         Resp: Archive + 'a,
         Resp::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
-        // Channel ID for Application Layer
         let channel = channel::APP;
 
         #[cfg(feature = "shm")]

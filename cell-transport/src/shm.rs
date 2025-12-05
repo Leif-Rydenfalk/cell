@@ -155,7 +155,10 @@ impl RingBuffer {
 
     pub fn try_alloc(&self, exact_size: usize) -> Option<WriteSlot> {
         const MAX_ALLOC_SIZE: usize = 16 * 1024 * 1024;
-        if exact_size > MAX_ALLOC_SIZE { return None; }
+        if exact_size > MAX_ALLOC_SIZE {
+            eprintln!("[SHM] Allocation too large: {}", exact_size);
+            return None;
+        }
 
         let aligned_size = (exact_size + ALIGNMENT - 1) & !(ALIGNMENT - 1);
         let total_needed = HEADER_SIZE + aligned_size;
@@ -195,6 +198,7 @@ impl RingBuffer {
                     }
                 }
 
+                // Set owner PID immediately
                 let header_ptr = unsafe { self.data.add(offset) as *mut SlotHeader };
                 unsafe {
                     (*header_ptr).owner_pid.store(std::process::id(), Ordering::Release);
@@ -236,9 +240,12 @@ impl RingBuffer {
         let read = unsafe { (*self.control).read_pos.load(Ordering::Acquire) };
         let write = unsafe { (*self.control).write_pos.load(Ordering::Acquire) };
 
-        if read == write { return None; }
+        if read == write {
+            return None;
+        }
 
         let read_idx = (read % self.capacity as u64) as usize;
+
         let first_word_ptr = unsafe { self.data.add(read_idx) as *const u32 };
         let first_word = unsafe { ptr::read_volatile(first_word_ptr) };
 
@@ -258,13 +265,18 @@ impl RingBuffer {
             read
         };
 
-        if header.epoch.load(Ordering::Acquire) != expected_epoch { return None; }
-        
+        if header.epoch.load(Ordering::Acquire) != expected_epoch {
+            return None;
+        }
+
         let data_len = header.len.load(Ordering::Acquire);
-        if data_len == 0 { return None; }
+        if data_len == 0 {
+            return None;
+        }
 
         let mut rc = header.refcount.load(Ordering::Acquire);
         
+        // Robustness: Check if locked by dead process
         if rc > 0 {
             let pid = header.owner_pid.load(Ordering::Acquire);
             if pid > 0 && !is_process_alive(pid) {
@@ -274,21 +286,34 @@ impl RingBuffer {
         }
 
         loop {
-            if rc != 0 { return None; }
-            match header.refcount.compare_exchange_weak(0, 1, Ordering::AcqRel, Ordering::Acquire) {
+            if rc != 0 {
+                return None;
+            }
+            match header
+                .refcount
+                .compare_exchange_weak(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => break,
                 Err(curr) => rc = curr,
             }
         }
-        
+
         let channel = header.channel.load(Ordering::Acquire);
         let data_ptr = unsafe { self.data.add(data_offset) };
         let slice = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
         let aligned_len = (data_len as usize + ALIGNMENT - 1) & !(ALIGNMENT - 1);
         let actual_consumed = total_consumed + aligned_len;
 
-        let token = Arc::new(SlotToken { ring: self, total_consumed: actual_consumed });
-        Some(RawShmMessage { data: slice, channel, _token: token })
+        let token = Arc::new(SlotToken {
+            ring: self,
+            total_consumed: actual_consumed,
+        });
+
+        Some(RawShmMessage {
+            data: slice,
+            channel,
+            _token: token,
+        })
     }
 
     pub async fn wait_for_slot(&self, size: usize) -> WriteSlot {

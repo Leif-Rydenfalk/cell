@@ -8,8 +8,9 @@ use cell_model::rkyv::{self, Archive, Serialize, Deserialize};
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use wal::{LogEntry, WriteAheadLog};
-use tracing::info;
+use tracing::{info, warn, error};
 use cell_sdk::Synapse;
+use cell_core::channel;
 
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[archive(check_bytes)]
@@ -22,6 +23,7 @@ pub enum RaftMessage {
         leader_commit: u64,
     },
     VoteRequest { term: u64 },
+    VoteResponse { term: u64, granted: bool },
 }
 
 #[derive(Debug)]
@@ -52,7 +54,11 @@ pub struct RaftNode {
 }
 
 impl RaftNode {
-    pub async fn new(config: RaftConfig, sm: Arc<dyn StateMachine>) -> Result<Arc<Self>> {
+    pub async fn ignite(
+        config: RaftConfig, 
+        sm: Arc<dyn StateMachine>,
+        mut network_rx: mpsc::Receiver<Vec<u8>>,
+    ) -> Result<Arc<Self>> {
         let mut wal = WriteAheadLog::open(&config.storage_path)?;
         let entries = wal.read_all()?;
         
@@ -79,14 +85,49 @@ impl RaftNode {
 
         let (tx, _) = broadcast::channel(100);
 
-        Ok(Arc::new(Self {
+        let node = Arc::new(Self {
             id: config.id,
             peers: config.peers,
             wal_tx,
             state_machine: sm,
             commit_index: AtomicU64::new(last_index),
             events_tx: tx,
-        }))
+        });
+
+        let node_clone = node.clone();
+        tokio::spawn(async move {
+            while let Some(data) = network_rx.recv().await {
+                if let Err(e) = node_clone.handle_packet(&data).await {
+                    warn!("[Raft] Packet Error: {}", e);
+                }
+            }
+        });
+
+        info!("[Raft] Online as Node {}", config.id);
+        Ok(node)
+    }
+
+    async fn handle_packet(&self, data: &[u8]) -> Result<()> {
+        let msg = rkyv::from_bytes::<RaftMessage>(data).map_err(|e| anyhow::anyhow!("Raft deserialization failed: {}", e))?;
+        
+        match msg {
+            RaftMessage::AppendEntries { term: _, leader_id: _, prev_log_index: _, entries, leader_commit: _ } => {
+                let (tx, rx) = oneshot::channel();
+                self.wal_tx.send(WalCmd::Append { entries: entries.clone(), done: tx })?;
+                rx.await??;
+
+                for entry in entries {
+                    if let LogEntry::Command(cmd) = entry {
+                        self.state_machine.apply(&cmd);
+                    }
+                }
+                
+                self.commit_index.fetch_add(1, Ordering::Release);
+            }
+            RaftMessage::VoteRequest { term: _ } => {}
+            RaftMessage::VoteResponse { .. } => {}
+        }
+        Ok(())
     }
 
     pub async fn propose_batch(&self, commands: Vec<Vec<u8>>) -> Result<u64> {
@@ -104,11 +145,11 @@ impl RaftNode {
             leader_commit: 0,
         };
         
-        // Network replication logic via Synapse
-        // NOTE: This assumes the peer exposes a generic endpoint or we use raw Transport
+        let msg_bytes = rkyv::to_bytes::<_, 1024>(&msg)?.into_vec();
+        
         for peer in &self.peers {
             if let Ok(mut syn) = Synapse::grow(peer).await {
-                 let _ = syn.fire(&msg).await;
+                 let _ = syn.fire_on_channel(channel::CONSENSUS, &msg_bytes).await;
             }
         }
 
