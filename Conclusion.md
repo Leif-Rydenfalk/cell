@@ -1,60 +1,110 @@
-This documentation changes the context entirely.
+Here is the comprehensive plan to re-architect Cell into a universal, biological substrate that scales from 50-year-old mainframes to 10-cent microcontrollers, while keeping your current demos running exactly as they are.
 
-Previously, I judged this as a **library**.
-Now, I see it is an **operating system** built on top of Linux.
+# The "Run on Everything" Master Plan
 
-You are not building an RPC framework. You are building a **biological computation substrate** where code doesn't just "run"; it evolves, migrates, and reproduces based on environmental pressure (latency).
+**Objective:**
+Split the monolithic runtime into biological layers.
+*   **Nucleus (`cell-model`):** Pure logic. No OS dependencies. (`no_std`).
+*   **Nervous System (`cell-transport`):** Configurable I/O. Gated features for Linux organs vs. Embedded organs.
+*   **Body (`cell-sdk`):** The facade that re-assembles the parts based on the environment.
 
-Here is the **fair and real** analysis of the system described in your documentation versus the code you have written.
+---
 
-### 1. The Architecture: "Compute Follows Latency"
-**The Concept:** The idea that `cargo build` (or the runtime) pings a remote instance, checks latency, and decides *automatically* whether to connect to the cloud or compile/spawn a local binary is **absolute genius**.
-*   **Why it's brilliant:** It solves the "Edge vs. Cloud" debate by making it dynamic. The developer writes code; the network physics determines the topology.
-*   **The Reality Check:** This makes **Reproducible Builds** a nightmare. If I build on a fast network, I get a thin client. If I build on a slow network, I get a fat binary.
-    *   *Critique:* You need `Cell.lock` to be draconian. If the topology changes, the lockfile must scream. The build system cannot be "magic" in CI/CD environments; it must be deterministic.
+## 1. The Nucleus: `cell-model` (Pure `no_std`)
 
-### 2. Versioning: "Speciation" vs. SemVer
-**The Concept:** "Breaking changes create new organisms (Services)."
-*   **The Verdict:** You are 100% correct. Semantic Versioning is often theater. Your approach accepts the bloat of running v1, v2, and v3 simultaneously in exchange for absolute stability.
-*   **The Risk:** You are trading **Developer Complexity** (managing versions) for **Operational Complexity** (managing zombie processes).
-    *   *Critique:* Your system needs a predator. If `UserServiceV1` hasn't received a heartbeat in 30 days, the Mycelium Root needs to kill it. Without **Apoptosis** (programmed cell death), your global network will fill with cancer (unused, outdated cells consuming resources).
+We must strip this crate of all OS concepts. It defines **what** a cell is, not **how** it talks.
 
-### 3. The Security Model: "Trust Me Bro"
-**The Documentation:** `SkipServerVerification` in `axon.rs`. "Security through Linux namespaces."
-**The Reality:** This is your Achilles' heel.
-*   **The Problem:** You want a **Global** network (`cell.network`). You cannot have a global network with "Trust me bro" TLS.
-*   **The SHM Vector:** Relying on UID checks (`getuid()`) for shared memory access is insufficient for a multi-tenant system. If I compromise *any* process running as your user, I can map the ring buffer of *every* cell and read the raw memory.
-*   **The Fix:** You need capability-based security (like Capsicum or Fuchsia handles), or you need to accept that Cells inside the same UID are not truly secure from each other.
+*   **Remove:** `dirs`, `anyhow`, `thiserror`. These depend on the OS or `std`.
+*   **Remove:** `resolve_socket_dir`. Paths are a filesystem concept.
+*   **Add:** `no-std-compat` or generic `Error` types.
+*   **Add:** `#[no_std]` attribute to `lib.rs`.
+*   **Result:** This crate can now compile on a bare-metal ARM Cortex-M4. It provides `Vesicle`, `Protocol`, and the `rkyv` schemas.
 
-### 4. The Code Structure vs. The Vision
-**Portability.md** outlines a `no_std` future. **The Code** is currently heavy on `tokio` and `std`.
-*   **The Gap:** Your current implementation is tied to heavy runtimes. To achieve the `Portability.md` vision, you need to rip out `tokio` from `cell-sdk` and make it strictly modular (as you described).
-*   **The Build System:** The `cell_remote!` macro parsing source code is, as discussed, a hack. The move to the **Prost/Bindgen** pattern (`build.rs` generating clients) described in `Design.md` is **mandatory**, not optional. You cannot build a global system on regex-parsing `main.rs`.
+## 2. The Nervous System: `cell-transport` (The Switchboard)
 
-### 5. Cell-Git and Recursion
-**The Concept:** Using a Cell to host the source code for Cells.
-*   **The Verdict:** Elegant, but it introduces a "Turtle Bootstrap" problem.
-    *   *Critique:* Hardcoding `cell.network:443` in `bootstrap.rs` is a centralized point of failure. If that domain goes down, new cells cannot be born. You need a decentralized fallback mechanism (DHT or Gossip) sooner rather than later.
+This is where the magic happens. Instead of hardcoding `quinn` or `unix sockets`, we define the `Synapse` as a wrapper around *available* organs.
 
-### Summary Analysis
+### The Feature Gates (Cargo.toml)
+We define the environment via features:
+*   `std`: Enables OS primitives (Filesystem, Threads).
+*   `shm`: Enables Shared Memory (Requires `std` + Linux).
+*   `axon`: Enables QUIC Network (Requires `std` + `tokio`).
+*   `alloc`: Enables Heap (Vec/Box).
 
-**Is it clean?**
-Conceptually, it is crystalline. You have a unified metaphor (Biology) that actually maps to the engineering problems (Speciation, Latency-driven reproduction).
-*Code-wise:* It is still a prototype. The `shm` logic is dangerous, and the macro logic is fragile.
+### The Gated Enum (The API Glue)
+To keep the API "exact same" (`Synapse::grow`), we keep the `Transport` enum but guard its variants.
 
-**Is it well designed?**
-**Yes.** The separation of "DNA" (Interface), "Ribosome" (Compiler), and "Membrane" (Transport) is the correct abstraction for what you are trying to do. It decouples the *what* from the *where*.
+```rust
+pub enum Transport {
+    #[cfg(feature = "std")]
+    Socket(UnixStream),
+    
+    #[cfg(feature = "shm")]
+    SharedMemory { ... },
+    
+    #[cfg(feature = "axon")]
+    Quic(quinn::Connection),
+    
+    // Future: #[cfg(feature = "uart")]
+    // Serial(UartDevice)
+}
+```
 
-**Is it lightweight?**
-**No.** Not yet.
-*   Compiling Rust from source on the fly (`Ribosome`) is the opposite of lightweight. It requires a 1GB+ toolchain installation on every node.
-*   *Correction:* To be truly lightweight, `Ribosome` needs to download **pre-compiled** artifacts (WASM or architecture-specific binaries) hashed by the schema fingerprint. Compiling on the edge is cool for devs, but impractical for IoT/Edge.
+### The Abstraction (`NervousSystem` Trait)
+We introduce an internal trait `NervousSystem` to unify behavior.
+*   `UnixStream`, `ShmClient`, and `QuicConnection` will all implement `send` / `recv`.
+*   This prepares the codebase for custom embedded transports without breaking the current API.
 
-### Final "Real" Take
-You are building **Kubernetes, but for code instead of containers.**
-*   Kubernetes orchestrates *binaries*.
-*   Cell orchestrates *logic*.
+## 3. The Body: `cell-sdk` (The Assembler)
 
-If you can solve the Security Model (stop skipping TLS) and the Reproducibility issue (make `Cell.lock` strict), this is a paradigm-shifting piece of technology.
+The SDK creates the default experience.
 
-**Don't stop.** But please, turn on TLS verification before you open port 443.
+*   **Default Features:** `["std", "shm", "axon", "process"]`.
+    *   This ensures your demos (Exchange/Trader) compile exactly as they do today.
+*   **Embedded Build:** Users can opt-out: `default-features = false, features = ["alloc"]`.
+    *   This gives them a lightweight client library compatible with embedded systems.
+
+---
+
+## Implementation Steps
+
+### Phase 1: Purify the Core (`cell-model`)
+1.  **Delete Dependencies:** Remove `dirs` and error crates from `cell-model/Cargo.toml`.
+2.  **Refactor Errors:** Replace `thiserror` derives with manual `Display` impls or a lightweight `no_std` error crate.
+3.  **Evict Logic:** Move `resolve_socket_dir` to `cell-transport`.
+4.  **Verify:** Ensure `cell-model` compiles with `cargo build --no-default-features`.
+
+### Phase 2: Modularize Transport (`cell-transport`)
+1.  **Gate Imports:** Wrap all `tokio`, `nix`, `quinn` imports in `#[cfg(feature = "...")]` blocks.
+2.  **Gate Modules:**
+    *   `shm.rs` → `#[cfg(feature = "shm")]`
+    *   `membrane.rs` → `#[cfg(feature = "std")]` (Requires socket binding)
+3.  **Refactor Synapse:**
+    *   Update `enum Transport` to use `cfg` attributes.
+    *   Update `Synapse::grow` logic. If `std` is missing, `grow` should probably error or default to a manual connection method (since auto-discovery requires FS/Net).
+
+### Phase 3: The Axon Diet (`cell-axon`)
+1.  **JSON Purge:** As previously discussed, replace `serde_json` with `rkyv` in `pheromones.rs`.
+2.  **Gate Everything:** Ensure the entire crate is harmless if the `axon` feature is disabled in the workspace.
+
+### Phase 4: Lifecycle Isolation (`cell-process`)
+1.  **Gate It:** Ensure this crate is only included when `std` is active. It is useless on embedded.
+
+---
+
+## The Result
+
+**For your Demos (Linux Host):**
+*   You run `cargo build`.
+*   Cargo enables `default` features (`std`, `shm`, `axon`).
+*   `Synapse` includes `UnixStream` and `Quinn`.
+*   **Outcome:** 1.5M message/sec Zero-Copy performance. Same code.
+
+**For the 50-Year Future (Microcontroller):**
+*   You run `cargo build --no-default-features --features alloc`.
+*   `cell-model` provides the binary protocol.
+*   `Synapse` compiles without `tokio` or `nix`.
+*   You implement a tiny `UartTransport` and plug it in.
+*   **Outcome:** A 20KB binary running purely on metal, speaking the exact same language as the supercomputer.
+
+This plan respects your requirement for **zero code changes in the demos** while successfully decoupling the architecture from the implementation details of the Linux kernel.
