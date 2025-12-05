@@ -154,8 +154,6 @@ where
 
     if _guard.try_write().is_err() {
         info!("[{}] Instance already running (Locked).", name);
-        // We don't exit here if LAN is running, but usually bind_local blocks main thread.
-        // If locked, it means another instance is local. We should probably bail.
         return Ok(());
     }
 
@@ -178,14 +176,11 @@ where
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                // Fix: Concurrency Limiting (Load Shedding)
-                // We accept first, then try to acquire. If full, we drop the connection immediately.
                 let permit = match semaphore.clone().try_acquire_owned() {
                     Ok(p) => p,
                     Err(_) => {
                         warn!("[{}] Connection limit reached ({}), dropping connection", 
                               name, MAX_CONCURRENT_CONNECTIONS);
-                        // Stream is dropped here, closing connection
                         continue;
                     }
                 };
@@ -195,11 +190,10 @@ where
                 let cell_name = name.to_string();
 
                 tokio::spawn(async move {
-                    let _permit = permit; // Held until task completes
+                    let _permit = permit;
                     if let Err(e) =
                         handle_connection::<F, Req, Resp>(stream, h, g, &cell_name).await
                     {
-                        // Fix: Downgrade "Broken pipe" to avoid log spam on abrupt disconnects
                         let msg = e.to_string();
                         let is_disconnect = msg == "early eof" 
                             || msg.contains("Broken pipe") 
@@ -207,8 +201,6 @@ where
 
                         if !is_disconnect {
                             warn!("[{}] Connection Error: {}", cell_name, e);
-                        } else {
-                            // debug!("[{}] Disconnected: {}", cell_name, msg);
                         }
                     }
                 });
@@ -234,6 +226,10 @@ where
         + rkyv::Serialize<ShmSerializer>
         + Send,
 {
+    // OPTIMIZATION: Hoist buffer allocation out of the loop
+    // Pre-allocate 16KB which covers most typical requests without resizing
+    let mut buf = Vec::with_capacity(16 * 1024);
+
     loop {
         let mut len_buf = [0u8; 4];
         if stream.read_exact(&mut len_buf).await.is_err() {
@@ -241,7 +237,13 @@ where
         }
 
         let len = u32::from_le_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; len];
+        
+        // Re-use buffer capacity
+        if buf.capacity() < len {
+            buf.reserve(len - buf.capacity());
+        }
+        buf.resize(len, 0); // Fast resize
+        
         if stream.read_exact(&mut buf).await.is_err() {
             return Ok(());
         }
@@ -273,6 +275,7 @@ where
             }
         }
 
+        // Pass hoisted buffer
         handle_socket_rpc::<F, Req, Resp>(&mut stream, &buf, &handler).await?;
     }
 }
@@ -303,7 +306,6 @@ where
     Ok(())
 }
 
-// Fix #2: Secure Token Logic
 pub(crate) fn get_shm_auth_token() -> Vec<u8> {
     if let Ok(token) = std::env::var("CELL_SHM_TOKEN") {
         return blake3::hash(token.as_bytes()).as_bytes().to_vec();

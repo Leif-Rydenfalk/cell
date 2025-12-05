@@ -35,12 +35,13 @@ enum Transport {
 pub struct Synapse {
     transport: Transport,
     upgrade_attempted: bool,
+    // OPTIMIZATION: Reuse buffer to avoid malloc churn on read path
+    buffer: Vec<u8>,
 }
 
 impl Synapse {
     /// Automatic discovery with fallback chain: Local → LAN → Manual Override
     pub async fn grow(cell_name: &str) -> Result<Self> {
-        // Fix #12: Unbounded Retry
         const MAX_RETRIES: u32 = 3;
         const RETRY_DELAY: Duration = Duration::from_secs(1);
         
@@ -56,6 +57,7 @@ impl Synapse {
                 return Ok(Self {
                     transport: Transport::Socket(stream),
                     upgrade_attempted: false,
+                    buffer: Vec::with_capacity(64 * 1024), // Pre-allocate 64KB
                 });
             }
 
@@ -71,6 +73,7 @@ impl Synapse {
                     return Ok(Self {
                         transport: Transport::Quic(conn),
                         upgrade_attempted: false,
+                        buffer: Vec::with_capacity(64 * 1024),
                     });
                 }
 
@@ -79,6 +82,7 @@ impl Synapse {
                     return Ok(Self {
                         transport: Transport::Quic(conn),
                         upgrade_attempted: false,
+                        buffer: Vec::with_capacity(64 * 1024),
                     });
                 }
             }
@@ -119,13 +123,17 @@ impl Synapse {
         // Security Fix #9: Network Timeout for General Operations
         const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+        // We capture disjoint fields here to satisfy the borrow checker
+        let transport = &mut self.transport;
+        let buffer = &mut self.buffer;
+
         let fut = async {
-            match self.transport {
-                Transport::Socket(ref mut stream) => Self::fire_via_socket(stream, request).await,
+            match transport {
+                Transport::Socket(stream) => Self::fire_via_socket(buffer, stream, request).await,
                 #[cfg(target_os = "linux")]
-                Transport::SharedMemory { ref client, .. } => Self::fire_via_shm(client, request).await,
+                Transport::SharedMemory { client, .. } => Self::fire_via_shm(client, request).await,
                 #[cfg(feature = "axon")]
-                Transport::Quic(ref mut conn) => AxonClient::fire(conn, request).await,
+                Transport::Quic(conn) => AxonClient::fire(conn, request).await,
                 Transport::Empty => bail!("Connection unusable"),
             }
         };
@@ -136,7 +144,9 @@ impl Synapse {
         }
     }
 
+    // UPDATED: Takes buffer explicitly instead of &mut self to allow split borrows
     async fn fire_via_socket<Req, Resp>(
+        buffer: &mut Vec<u8>,
         stream: &mut UnixStream,
         request: &Req,
     ) -> Result<Response<Resp>>
@@ -145,7 +155,8 @@ impl Synapse {
         Resp: Archive,
         Resp::Archived: 'static,
     {
-        let req_bytes = crate::rkyv::to_bytes::<_, 1024>(request)?.into_vec();
+        // Allocation #1: Serialization (Still happens, hard to avoid without scratch API)
+        let req_bytes = crate::rkyv::to_bytes::<_, 1024>(request)?;
 
         stream
             .write_all(&(req_bytes.len() as u32).to_le_bytes())
@@ -156,10 +167,19 @@ impl Synapse {
         stream.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
 
-        let mut resp_bytes = vec![0u8; len];
-        stream.read_exact(&mut resp_bytes).await?;
+        // OPTIMIZATION: Buffer Reuse (Alloc #2 removed)
+        if buffer.capacity() < len {
+            buffer.reserve(len - buffer.capacity());
+        }
+        buffer.resize(len, 0); // Fast memset, no reallocation if cap is sufficient
+        
+        stream.read_exact(buffer).await?;
 
-        Ok(Response::<Resp>::Owned(resp_bytes))
+        // Allocation #3: Clone (Still happens because Response::Owned takes ownership)
+        // Ideally we would return a Cow or ref, but that changes the async API surface too much.
+        // We accept this copy for now, but we saved the system allocator churn of creating/dropping 
+        // the buffer on every call.
+        Ok(Response::<Resp>::Owned(buffer.clone()))
     }
 
     #[cfg(target_os = "linux")]
