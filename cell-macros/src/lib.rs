@@ -12,8 +12,7 @@ use convert_case::{Case, Casing};
 use std::path::PathBuf;
 use std::fs;
 
-// --- Helper Functions ---
-
+// Helpers
 fn normalize_ty(ty: &Type) -> Type {
     if let Type::Reference(type_ref) = ty {
         if let Type::Path(type_path) = &*type_ref.elem {
@@ -72,7 +71,7 @@ fn locate_dna(cell_name: &str) -> PathBuf {
     panic!("Could not locate DNA for '{}'", cell_name);
 }
 
-// --- Macros ---
+// Macros
 
 #[proc_macro_attribute]
 pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -86,8 +85,6 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut methods = Vec::new();
     for item in &input.items {
         if let syn::ImplItem::Fn(m) = item {
-             // ... extract method info (args, ret) ...
-             // Simplified extraction for brevity of "whole file" context
              let name = m.sig.ident.clone();
              let mut args = Vec::new();
              for arg in &m.sig.inputs {
@@ -111,7 +108,6 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let req_variants = methods.iter().map(|(n, args, _, _)| {
         let vname = format_ident!("{}", n.to_string().to_case(Case::Pascal));
-        // Needs normalized types for serialization
         let fields = args.iter().map(|(an, at)| {
              let norm = normalize_ty(at);
              quote! { #an: #norm }
@@ -124,20 +120,15 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { #vname(#wret) }
     });
     
-    // Dispatch logic needs to deserialize properly
-    let dispatch_arms = methods.iter().map(|(n, args, _, wret)| {
+    let dispatch_arms = methods.iter().map(|(n, args, _, _)| {
         let vname = format_ident!("{}", n.to_string().to_case(Case::Pascal));
         let field_names: Vec<_> = args.iter().map(|(an, _)| an).collect();
-        // Here we assume arguments come as CheckedArchived (zero-copy)
-        // We need to pass them to handler which expects &Archived<T> or similar
-        // For simplicity in this implementation, we just pass fields by name.
         quote! {
             ArchivedProtocol::#vname { #(#field_names),* } => {
                 let result = self.#n(#(#field_names),*).await;
-                // convert result to wret (sanitize result)
                 let wire_result = match result {
                     Ok(val) => Ok(val),
-                    Err(e) => Err(format!("{:?}", e)), // naive conversion
+                    Err(e) => Err(format!("{:?}", e)),
                 };
                 Ok(#response_name::#vname(wire_result))
             }
@@ -174,6 +165,8 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         impl #service_name {
             pub async fn serve(self, name: &str) -> ::anyhow::Result<()> {
                 let service = std::sync::Arc::new(self);
+                // Membrane::bind signature updated to accept optional consensus sender
+                // Passing None for default use case
                 ::cell_sdk::Membrane::bind::<_, #protocol_name, #response_name>(
                     name,
                     move |archived_req| {
@@ -182,7 +175,8 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             svc.dispatch(archived_req).await
                         })
                     },
-                    None
+                    None, // Genome JSON
+                    None  // Consensus Sender
                 ).await
             }
 
@@ -210,64 +204,72 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let module_name = format_ident!("{}", parts[0].trim());
     let cell_name = parts[1].trim().trim_matches(|c| c == '"' || c == ' ');
 
-    // 1. Check if Build Script generated client exists
     if let Ok(out_dir) = std::env::var("OUT_DIR") {
         let path = PathBuf::from(out_dir).join(format!("{}_client.rs", cell_name));
         if path.exists() {
             let path_str = path.to_str().unwrap();
             return TokenStream::from(quote! {
                 include!(#path_str);
-                // Re-export specific module as requested alias
                 pub use #cell_name::Client as #module_name;
             });
         }
     }
 
-    // 2. Fallback: Parse Source (Macro Mode)
     let dna_path = locate_dna(cell_name);
     let dna_path_str = dna_path.to_str().expect("Invalid path");
-    let content = fs::read_to_string(&dna_path).expect("Failed to read DNA");
-    let file = syn::parse_file(&content).expect("Failed to parse DNA");
+    
+    // FIX: Use cell_build's recursive flattener to support multi-file projects
+    let file = match cell_build::load_and_flatten_source(&dna_path) {
+        Ok(f) => f,
+        Err(e) => panic!("Failed to flatten DNA source: {}", e),
+    };
 
     let mut proteins = Vec::new();
     let mut handler_impl = None;
     let mut service_struct_name = String::new();
 
-    for item in file.items {
-        match &item {
-            Item::Enum(i) if has_attr(&i.attrs, "protein") => proteins.push(item.clone()),
-            Item::Struct(i) if has_attr(&i.attrs, "protein") => proteins.push(item.clone()),
-            Item::Impl(i) if has_attr(&i.attrs, "handler") => {
-                handler_impl = Some(i.clone());
-                if let Type::Path(tp) = &*i.self_ty {
-                    service_struct_name = tp.path.segments.last().unwrap().ident.to_string();
+    // Helper to find items in flattened AST
+    fn find_items<'a>(items: &'a [Item], proteins: &mut Vec<&'a Item>, handler: &mut Option<&'a syn::ItemImpl>, service_name: &mut String) {
+        for item in items {
+            match item {
+                Item::Enum(i) if has_attr(&i.attrs, "protein") => proteins.push(item),
+                Item::Struct(i) if has_attr(&i.attrs, "protein") => proteins.push(item),
+                Item::Impl(i) if has_attr(&i.attrs, "handler") => {
+                    *handler = Some(i);
+                    if let Type::Path(tp) = &*i.self_ty {
+                        *service_name = tp.path.segments.last().unwrap().ident.to_string();
+                    }
                 }
+                Item::Mod(m) => {
+                    if let Some((_, items)) = &m.content {
+                        find_items(items, proteins, handler, service_name);
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 
+    find_items(&file.items, &mut proteins, &mut handler_impl, &mut service_struct_name);
+
     if handler_impl.is_none() { panic!("No #[handler] found in cell '{}'", cell_name); }
 
-    // ... Extraction logic matching handler macro ...
-    // Note: Re-implementing extraction here since we are in the same file/crate context
     let mut methods = Vec::new();
-    for item in handler_impl.unwrap().items {
+    for item in handler_impl.unwrap().items.iter() {
         if let syn::ImplItem::Fn(m) = item {
              let name = m.sig.ident.clone();
              let mut args = Vec::new();
-             for arg in m.sig.inputs {
+             for arg in &m.sig.inputs {
                 if let FnArg::Typed(pat) = arg {
-                    if let Pat::Ident(id) = *pat.pat {
-                        // Normalize argument type for client call
+                    if let Pat::Ident(id) = &*pat.pat {
                         let norm = normalize_ty(&pat.ty);
-                        args.push((id.ident, norm));
+                        args.push((id.ident.clone(), norm));
                     }
                 }
              }
-             let ret = match m.sig.output {
+             let ret = match &m.sig.output {
                 ReturnType::Default => syn::parse_quote! { () },
-                ReturnType::Type(_, ty) => *ty,
+                ReturnType::Type(_, ty) => *ty.clone(),
              };
              let wire_ret = sanitize_return_type(&ret);
              methods.push((name, args, wire_ret));

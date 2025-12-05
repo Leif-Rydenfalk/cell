@@ -22,10 +22,4 @@ impl RkyvCodec {
         serializer.serialize_value(item).map_err(|_| "Serialization failed")?;
         Ok(serializer.into_serializer().into_inner().into_vec())
     }
-
-    // Decoding in Rkyv is usually done via accessors or check_archived_root, 
-    // effectively "viewing" rather than "decoding" into a new type.
-    // For full compatibility with the Codec trait we might return bytes 
-    // or a specific wrapper, but for Cell we mostly use Rkyv directly.
-    // This is a marker implementation.
 }

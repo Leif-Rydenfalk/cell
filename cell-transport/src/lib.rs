@@ -4,7 +4,7 @@
 #[cfg(feature = "shm")]
 pub mod shm;
 
-pub mod transport; // New module
+pub mod transport;
 pub mod response;
 
 #[cfg(feature = "std")]
@@ -14,6 +14,7 @@ pub mod synapse;
 pub mod membrane;
 
 pub use response::Response;
+
 #[cfg(feature = "std")]
 pub use synapse::Synapse;
 #[cfg(feature = "std")]

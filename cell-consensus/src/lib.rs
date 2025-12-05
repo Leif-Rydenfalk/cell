@@ -10,9 +10,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use wal::{LogEntry, WriteAheadLog};
 use tracing::info;
 use cell_sdk::Synapse;
-use cell_model::Vesicle;
 
-// Raft Message Definition using Rkyv
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[archive(check_bytes)]
 pub enum RaftMessage {
@@ -26,7 +24,6 @@ pub enum RaftMessage {
     VoteRequest { term: u64 },
 }
 
-// ... WalCmd ...
 #[derive(Debug)]
 enum WalCmd {
     Append {
@@ -38,7 +35,7 @@ enum WalCmd {
 pub struct RaftConfig {
     pub id: u64,
     pub storage_path: std::path::PathBuf,
-    pub peers: Vec<String>, // Cell names of peers
+    pub peers: Vec<String>,
 }
 
 pub trait StateMachine: Send + Sync + 'static {
@@ -51,7 +48,6 @@ pub struct RaftNode {
     wal_tx: mpsc::UnboundedSender<WalCmd>, 
     state_machine: Arc<dyn StateMachine>,
     commit_index: AtomicU64,
-    // Local broadcast (internal events)
     events_tx: broadcast::Sender<RaftMessage>,
 }
 
@@ -96,35 +92,26 @@ impl RaftNode {
     pub async fn propose_batch(&self, commands: Vec<Vec<u8>>) -> Result<u64> {
         let entries: Vec<LogEntry> = commands.iter().map(|c| LogEntry::Command(c.clone())).collect();
         
-        // 1. Write WAL
         let (tx, rx) = oneshot::channel();
         self.wal_tx.send(WalCmd::Append { entries: entries.clone(), done: tx })?;
         rx.await??;
 
-        // 2. Replicate to Peers (Using Synapse)
-        // In real Raft this is background async. For this implementation we fire and forget or wait.
         let msg = RaftMessage::AppendEntries {
-            term: 1, // Placeholder
+            term: 1, 
             leader_id: self.id,
             prev_log_index: 0,
             entries: entries.clone(),
             leader_commit: 0,
         };
         
+        // Network replication logic via Synapse
+        // NOTE: This assumes the peer exposes a generic endpoint or we use raw Transport
         for peer in &self.peers {
-            let mut syn = Synapse::grow(peer).await?;
-            // Note: Synapse.fire is typed. We need a Protocol definition for Raft.
-            // But RaftMessage is defined here in the library, not via macro.
-            // We use the raw transport or assume RaftMessage implements the traits needed.
-            // RaftMessage derives Archive/Serialize, so it works with Synapse::fire logic IF 
-            // the peer implements the handler.
-            
-            // This implies Raft needs to be a Cell Service.
-            // For now, assume ad-hoc usage via Synapse's generic fire.
-             let _ = syn.fire(&msg).await;
+            if let Ok(mut syn) = Synapse::grow(peer).await {
+                 let _ = syn.fire(&msg).await;
+            }
         }
 
-        // 3. Apply
         for cmd in &commands { self.state_machine.apply(cmd); }
 
         Ok(self.commit_index.fetch_add(commands.len() as u64, Ordering::Release))

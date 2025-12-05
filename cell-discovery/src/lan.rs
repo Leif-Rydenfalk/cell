@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-// This logic is partially shared/moved from cell-axon/pheromones.rs 
-// Ideally cell-axon depends on cell-discovery, or vice-versa.
-// For now, we define the Signal structure here and the LanDiscovery registry.
-// The UDP socket listening logic remains in cell-axon for Pheromones but feeds into this registry.
-
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,8 +24,12 @@ pub struct LanDiscovery {
 impl LanDiscovery {
     pub fn global() -> &'static Self {
         static INSTANCE: std::sync::OnceLock<LanDiscovery> = std::sync::OnceLock::new();
-        INSTANCE.get_or_init(|| Self {
-            cache: Arc::new(RwLock::new(HashMap::new())),
+        INSTANCE.get_or_init(|| {
+             let ld = Self {
+                cache: Arc::new(RwLock::new(HashMap::new())),
+            };
+            ld.start_pruning();
+            ld
         })
     }
 
@@ -38,11 +37,7 @@ impl LanDiscovery {
         let mut cache = self.cache.write().await;
         
         if cache.len() >= MAX_CACHE_SIZE {
-            // Simple pruning: remove stale or random if needed.
-            // For brevity, we just clear if full or impl more complex logic.
-            if cache.len() > MAX_CACHE_SIZE {
-                cache.clear();
-            }
+            cache.clear();
         }
         cache.insert(sig.cell_name.clone(), sig);
     }
@@ -53,5 +48,20 @@ impl LanDiscovery {
 
     pub async fn find(&self, name: &str) -> Option<Signal> {
         self.cache.read().await.get(name).cloned()
+    }
+
+    fn start_pruning(&self) {
+        let cache = self.cache.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let mut guard = cache.write().await;
+                guard.retain(|_, v| now - v.timestamp < 60);
+            }
+        });
     }
 }

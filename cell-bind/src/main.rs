@@ -7,7 +7,7 @@ use convert_case::{Case, Casing};
 use quote::ToTokens;
 use std::fs;
 use std::path::PathBuf;
-use syn::{parse_file, Data, DeriveInput, Fields, Item, Type};
+use syn::{parse_file, Item, Type};
 
 #[derive(Parser)]
 struct Cli {
@@ -27,7 +27,6 @@ struct Cli {
 fn main() -> Result<()> {
     let args = Cli::parse();
 
-    // 1. Locate the Schema
     let home = dirs::home_dir().context("No home dir")?;
     let schema_path = home.join(".cell/schema").join(format!("{}.rs", args.cell));
     let lock_path = home
@@ -44,7 +43,6 @@ fn main() -> Result<()> {
     let content = fs::read_to_string(&schema_path)?;
     let syntax = parse_file(&content)?;
 
-    // 2. Find the Struct/Enum matching the cell name
     let item = syntax
         .items
         .iter()
@@ -55,8 +53,6 @@ fn main() -> Result<()> {
         })
         .context("Schema definition not found in file")?;
 
-    // 3. Compute Fingerprint (Must match cell-macros logic)
-    // We quote the item back to string to normalize formatting for hashing
     let ast_string = item.to_token_stream().to_string();
     let mut hasher = blake3::Hasher::new();
     hasher.update(ast_string.as_bytes());
@@ -64,7 +60,6 @@ fn main() -> Result<()> {
     let hash_hex = hash_bytes.to_hex().to_string();
     let fp_u64 = u64::from_le_bytes(hash_bytes.as_bytes()[0..8].try_into()?);
 
-    // 4. Verify against Lockfile (Bind-time Safety)
     if lock_path.exists() {
         let expected = fs::read_to_string(lock_path)?.trim().to_string();
         if expected != hash_hex {
@@ -72,7 +67,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // 5. Generate Code
     let output = match args.lang.as_str() {
         "go" => generate_go(item, fp_u64, &args.cell)?,
         "py" => generate_py(item, fp_u64, &args.cell)?,
@@ -83,8 +77,6 @@ fn main() -> Result<()> {
     println!("Generated binding for {} ({})", args.cell, args.lang);
     Ok(())
 }
-
-// --- Go Generator ---
 
 fn generate_go(item: &Item, fp: u64, name: &str) -> Result<String> {
     let mut code = String::new();
@@ -112,13 +104,9 @@ fn generate_go(item: &Item, fp: u64, name: &str) -> Result<String> {
             }
             code.push_str("}\n\n");
 
-            // Generate Packer (Serializer)
             code.push_str(&format!("func (m *{}) Serialize() []byte {{\n", s.ident));
             code.push_str("\tbuf := new(bytes.Buffer)\n");
 
-            // Simple Rkyv-like Packer for fixed layout
-            // NOTE: This is a simplified packer for the POD examples.
-            // Full Rkyv support would require relative pointer tracking.
             for field in &s.fields {
                 let fname = field
                     .ident
@@ -139,13 +127,12 @@ fn generate_go(item: &Item, fp: u64, name: &str) -> Result<String> {
                         "\tbinary.Write(buf, binary.LittleEndian, m.{})\n",
                         fname
                     )),
-                    _ => {} // Handle others
+                    _ => {}
                 }
             }
             code.push_str("\treturn buf.Bytes()\n");
             code.push_str("}\n\n");
 
-            // Generate Unpacker (Deserializer)
             code.push_str(&format!(
                 "func Deserialize{}(data []byte) *{} {{\n",
                 name, name
@@ -179,9 +166,6 @@ fn generate_go(item: &Item, fp: u64, name: &str) -> Result<String> {
             code.push_str("}\n");
         }
         Item::Enum(_) => {
-            // For MarketMsg (Enum), we generate a simplified struct approach or interface.
-            // For this demo, we handle the specific structs used in the example manually via `cell-bind`
-            // logic expansion would go here.
             code.push_str("// Enum support coming in v0.3.1\n");
         }
         _ => {}
@@ -200,14 +184,12 @@ fn map_rust_type_to_go(ty: &Type) -> &'static str {
                 "i64" => "int64",
                 "String" => "string",
                 "bool" => "bool",
-                _ => "[]byte", // Fallback
+                _ => "[]byte",
             };
         }
     }
     "[]byte"
 }
-
-// --- Python Generator ---
 
 fn generate_py(item: &Item, fp: u64, name: &str) -> Result<String> {
     Ok(format!(

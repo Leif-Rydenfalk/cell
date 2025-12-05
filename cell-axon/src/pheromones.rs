@@ -3,18 +3,18 @@
 
 use anyhow::Result;
 use rkyv::{Archive, Deserialize, Serialize};
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use cell_discovery::lan::{Signal, LanDiscovery};
+use local_ip_address;
+use if_addrs;
 
 const PORT: u16 = 9099;
 
 pub struct PheromoneSystem {
-    // cache: Arc<RwLock<HashMap<String, Vec<Signal>>>>, // Deprecated in favor of LanDiscovery
     socket: Arc<UdpSocket>,
     local_signals: Arc<RwLock<Vec<Signal>>>, 
 }
@@ -38,7 +38,6 @@ impl PheromoneSystem {
                     Err(_) => continue,
                 };
 
-                // Explicitly annotate type Signal
                 let sig: Signal = {
                     let archived = match rkyv::check_archived_root::<Signal>(&buf[..len]) {
                         Ok(a) => a,
@@ -153,7 +152,6 @@ impl PheromoneSystem {
     }
 
     pub async fn lookup_all(&self, cell_name: &str) -> Vec<Signal> {
-        // Now queries the global discovery
         let all = LanDiscovery::global().all().await;
         all.into_iter().filter(|s| s.cell_name == cell_name).collect()
     }

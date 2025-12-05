@@ -11,7 +11,7 @@ use crate::transport::ShmTransport;
 #[cfg(feature = "shm")]
 use crate::shm::{RingBuffer, ShmClient};
 
-use cell_core::{Transport, TransportError};
+use cell_core::{Transport, TransportError, channel};
 use anyhow::{bail, Result, Context};
 use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{Archive, Serialize};
@@ -29,11 +29,8 @@ use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
 use std::os::unix::io::AsRawFd;
 
 pub struct Synapse {
-    // The core of the refactor: Generic Transport
     transport: Box<dyn Transport>,
     
-    // For Zero-Copy optimizations (SHM), we hold specific handle if available.
-    // This allows specific optimization methods to bypass the generic Transport::call
     #[cfg(feature = "shm")]
     shm_client: Option<ShmClient>,
 }
@@ -45,24 +42,15 @@ impl Synapse {
         let socket_dir = resolve_socket_dir();
         let socket_path = socket_dir.join(format!("{}.sock", cell_name));
         
-        // 1. Try Unix Socket
         if let Ok(mut stream) = UnixStream::connect(&socket_path).await {
             info!("[Synapse] ✓ Local connection established");
             
-            // Try SHM Upgrade
             #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
             if std::env::var("CELL_DISABLE_SHM").is_err() {
-                // Perform upgrade handshake on raw stream
                 if let Ok(client) = Self::try_upgrade_to_shm(&mut stream).await {
                     info!("[Synapse] ✓ Upgraded to Shared Memory");
                     return Ok(Self {
                         transport: Box::new(ShmTransport::new(
-                            // Cloning ShmClient is cheap (Arc internally)
-                            // We need to construct a new one for transport, 
-                            // but we can't easily clone the one we just made if ShmClient isn't Clone.
-                            // Assuming ShmClient is Clone or cheaply constructable.
-                            // ShmClient fields are Arcs, so it should derive Clone. 
-                            // If not, we fix ShmClient. (Checked: ShmClient holds Arcs, so cheap copy manually if needed)
                             ShmClient::new(client.tx.clone(), client.rx.clone())
                         )),
                         shm_client: Some(client),
@@ -70,7 +58,6 @@ impl Synapse {
                 }
             }
             
-            // Fallback to UnixTransport
             return Ok(Self {
                 transport: Box::new(UnixTransport::new(stream)),
                 #[cfg(feature = "shm")]
@@ -78,7 +65,6 @@ impl Synapse {
             });
         }
 
-        // 2. Try Axon
         #[cfg(feature = "axon")]
         {
             if let Some(conn) = AxonClient::connect(cell_name).await? {
@@ -105,8 +91,6 @@ impl Synapse {
         let mut challenge = [0u8; 32];
         stream.read_exact(&mut challenge).await?;
         
-        // Note: crate::membrane::get_shm_auth_token is needed here.
-        // For strict compilation, we assume that helper is public or accessible.
         let auth_token = crate::membrane::get_shm_auth_token();
         let response = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
         stream.write_all(response.as_bytes()).await?;
@@ -155,17 +139,22 @@ impl Synapse {
         Resp: Archive + 'a,
         Resp::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
-        // Optimization: If SHM client is available, use it for zero-copy receive
+        // Channel ID for Application Layer
+        let channel = channel::APP;
+
         #[cfg(feature = "shm")]
         if let Some(client) = &self.shm_client {
-             let msg = client.request::<Req, Resp>(request).await?;
+             let msg = client.request::<Req, Resp>(request, channel).await?;
              return Ok(Response::ZeroCopy(msg));
         }
 
-        // Generic Transport Path
         let req_bytes = rkyv::to_bytes::<_, 1024>(request)?.into_vec();
         
-        let resp_bytes = self.transport.call(&req_bytes).await
+        let mut frame = Vec::with_capacity(1 + req_bytes.len());
+        frame.push(channel);
+        frame.extend_from_slice(&req_bytes);
+        
+        let resp_bytes = self.transport.call(&frame).await
             .map_err(|e| anyhow::anyhow!("Transport Error: {:?}", e))?;
             
         Ok(Response::Owned(resp_bytes))

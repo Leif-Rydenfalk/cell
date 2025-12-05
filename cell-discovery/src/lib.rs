@@ -28,12 +28,6 @@ impl CellNode {
             self.status.local_latency = local::probe_unix_socket(path).await;
         }
         
-        // Note: LAN probing requires axon/transport logic, typically handled by upper layers
-        // or we move the probe logic here if dependencies allow.
-        // For strict layering, discovery provides addresses, transport probes them.
-        // However, to keep "Do not change anything else" philosophy, we include the helpers here
-        // assuming transport dependencies or trait usage.
-        
         self.status.is_alive = self.status.local_latency.is_some() || self.status.lan_latency.is_some();
     }
 }

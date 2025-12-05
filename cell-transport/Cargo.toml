@@ -14,8 +14,6 @@ cell-core = { workspace = true, optional = true }
 cell-codec = { workspace = true }
 cell-model = { workspace = true }
 cell-discovery = { workspace = true }
-
-# Implementations
 cell-axon = { workspace = true, optional = true }
 
 rkyv = { workspace = true }
@@ -23,7 +21,6 @@ rand = { workspace = true }
 blake3 = { workspace = true }
 anyhow = { workspace = true }
 
-# OS / Network
 tokio = { workspace = true, optional = true }
 nix = { workspace = true, optional = true }
 memmap2 = { workspace = true, optional = true }

@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::io::AsRawFd;
 use std::ptr;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::time::Duration;
 
@@ -25,9 +25,12 @@ const HEADER_SIZE: usize = std::mem::size_of::<SlotHeader>();
 
 #[repr(C)]
 struct SlotHeader {
-    refcount: AtomicU32,
-    len: AtomicU32,
-    epoch: AtomicU64,
+    refcount: AtomicU32, // 4
+    len: AtomicU32,      // 4
+    epoch: AtomicU64,    // 8
+    owner_pid: AtomicU32,// 4
+    channel: AtomicU8,   // 1
+    _pad: [u8; 3],       // 3 (Padding to 24 bytes)
 }
 
 #[repr(C, align(64))]
@@ -101,20 +104,15 @@ impl RingBuffer {
         let unique_name = format!("/{}_{}", name, rand::random::<u32>());
         let name_cstr = CString::new(unique_name)?;
 
-        // Pass as &CStr
         let owned_fd = shm_open(
             name_cstr.as_c_str(),
             ShmOFlag::O_CREAT | ShmOFlag::O_RDWR | ShmOFlag::O_EXCL,
             Mode::S_IRUSR | Mode::S_IWUSR,
         )?;
 
-        // Unlink using &CStr
         let _ = shm_unlink(name_cstr.as_c_str());
-
-        // Set size
         ftruncate(&owned_fd, RING_SIZE as i64)?;
 
-        // Wrap in File (OwnedFd converts directly)
         let file = File::from(owned_fd);
         let raw_fd = file.as_raw_fd();
 
@@ -157,10 +155,7 @@ impl RingBuffer {
 
     pub fn try_alloc(&self, exact_size: usize) -> Option<WriteSlot> {
         const MAX_ALLOC_SIZE: usize = 16 * 1024 * 1024;
-        if exact_size > MAX_ALLOC_SIZE {
-            eprintln!("[SHM] Allocation too large: {}", exact_size);
-            return None;
-        }
+        if exact_size > MAX_ALLOC_SIZE { return None; }
 
         let aligned_size = (exact_size + ALIGNMENT - 1) & !(ALIGNMENT - 1);
         let total_needed = HEADER_SIZE + aligned_size;
@@ -200,6 +195,11 @@ impl RingBuffer {
                     }
                 }
 
+                let header_ptr = unsafe { self.data.add(offset) as *mut SlotHeader };
+                unsafe {
+                    (*header_ptr).owner_pid.store(std::process::id(), Ordering::Release);
+                }
+
                 return Some(WriteSlot {
                     ring: self,
                     offset,
@@ -214,14 +214,11 @@ impl RingBuffer {
         T::Archived:
             rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
-        // This method is for typed reading using ShmMessage wrapper
-        // Re-uses logic from try_read_raw but casts.
         if let Some(raw) = self.try_read_raw() {
             let archived_ref = unsafe {
-                // We trust the raw read logic provided a valid slice for the epoch
                 match rkyv::check_archived_root::<T>(raw.data) {
                     Ok(a) => a,
-                    Err(_) => return None, // Should ideally invalidate slot, but SlotToken handles cleanup
+                    Err(_) => return None,
                 }
             };
             let archived_static: &'static T::Archived = unsafe { std::mem::transmute(archived_ref) };
@@ -239,12 +236,9 @@ impl RingBuffer {
         let read = unsafe { (*self.control).read_pos.load(Ordering::Acquire) };
         let write = unsafe { (*self.control).write_pos.load(Ordering::Acquire) };
 
-        if read == write {
-            return None;
-        }
+        if read == write { return None; }
 
         let read_idx = (read % self.capacity as u64) as usize;
-
         let first_word_ptr = unsafe { self.data.add(read_idx) as *const u32 };
         let first_word = unsafe { ptr::read_volatile(first_word_ptr) };
 
@@ -255,8 +249,8 @@ impl RingBuffer {
             (read_idx + HEADER_SIZE, HEADER_SIZE)
         };
 
-        let header_ptr = unsafe { self.data.add(data_offset - HEADER_SIZE) as *const SlotHeader };
-        let header = unsafe { &*header_ptr };
+        let header_ptr = unsafe { self.data.add(data_offset - HEADER_SIZE) as *mut SlotHeader };
+        let header = unsafe { &mut *header_ptr };
 
         let expected_epoch = if first_word == PADDING_SENTINEL {
             read + (self.capacity - read_idx) as u64
@@ -264,51 +258,37 @@ impl RingBuffer {
             read
         };
 
-        let found_epoch = header.epoch.load(Ordering::Acquire);
-
-        if found_epoch != expected_epoch {
-            return None;
-        }
-
+        if header.epoch.load(Ordering::Acquire) != expected_epoch { return None; }
+        
         let data_len = header.len.load(Ordering::Acquire);
-        if data_len == 0 {
-            return None;
-        }
+        if data_len == 0 { return None; }
 
         let mut rc = header.refcount.load(Ordering::Acquire);
-        loop {
-            if rc != 0 {
-                return None;
+        
+        if rc > 0 {
+            let pid = header.owner_pid.load(Ordering::Acquire);
+            if pid > 0 && !is_process_alive(pid) {
+                header.refcount.store(0, Ordering::Release);
+                rc = 0;
             }
-            match header
-                .refcount
-                .compare_exchange_weak(0, 1, Ordering::AcqRel, Ordering::Acquire)
-            {
+        }
+
+        loop {
+            if rc != 0 { return None; }
+            match header.refcount.compare_exchange_weak(0, 1, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => break,
                 Err(curr) => rc = curr,
             }
         }
-
-        let aligned_len = (data_len as usize + ALIGNMENT - 1) & !(ALIGNMENT - 1);
-        let actual_consumed = if first_word == PADDING_SENTINEL {
-            total_consumed + aligned_len
-        } else {
-            total_consumed + aligned_len
-        };
-
-        let data_ptr = unsafe { self.data.add(data_offset) };
         
+        let channel = header.channel.load(Ordering::Acquire);
+        let data_ptr = unsafe { self.data.add(data_offset) };
         let slice = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
+        let aligned_len = (data_len as usize + ALIGNMENT - 1) & !(ALIGNMENT - 1);
+        let actual_consumed = total_consumed + aligned_len;
 
-        let token = Arc::new(SlotToken {
-            ring: self,
-            total_consumed: actual_consumed,
-        });
-
-        Some(RawShmMessage {
-            data: slice,
-            _token: token,
-        })
+        let token = Arc::new(SlotToken { ring: self, total_consumed: actual_consumed });
+        Some(RawShmMessage { data: slice, channel, _token: token })
     }
 
     pub async fn wait_for_slot(&self, size: usize) -> WriteSlot {
@@ -336,10 +316,13 @@ pub struct WriteSlot<'a> {
 }
 
 impl<'a> WriteSlot<'a> {
-    pub fn write(&mut self, data: &[u8]) {
+    pub fn write(&mut self, data: &[u8], channel: u8) {
         unsafe {
             let dest = self.ring.data.add(self.offset + HEADER_SIZE);
             ptr::copy_nonoverlapping(data.as_ptr(), dest, data.len());
+            
+            let header_ptr = self.ring.data.add(self.offset) as *mut SlotHeader;
+            (*header_ptr).channel.store(channel, Ordering::Release);
         }
     }
 
@@ -358,7 +341,7 @@ impl<'a> Drop for WriteSlot<'a> {
     fn drop(&mut self) {}
 }
 
-struct SlotToken {
+pub struct SlotToken {
     ring: *const RingBuffer,
     total_consumed: usize,
 }
@@ -379,10 +362,13 @@ impl Drop for SlotToken {
 
 pub struct RawShmMessage {
     data: &'static [u8],
+    channel: u8,
     _token: Arc<SlotToken>,
 }
 impl RawShmMessage {
     pub fn get_bytes(&self) -> &[u8] { self.data }
+    pub fn channel(&self) -> u8 { self.channel }
+    pub fn token(&self) -> Arc<SlotToken> { self._token.clone() }
 }
 
 pub struct ShmMessage<T: Archive>
@@ -437,10 +423,10 @@ impl ShmClient {
         Self { tx, rx }
     }
 
-    pub async fn request_raw(&self, req_bytes: &[u8]) -> anyhow::Result<RawShmMessage> {
+    pub async fn request_raw(&self, req_bytes: &[u8], channel: u8) -> anyhow::Result<RawShmMessage> {
         let size = req_bytes.len();
         let mut slot = self.tx.wait_for_slot(size).await;
-        slot.write(req_bytes);
+        slot.write(req_bytes, channel);
         slot.commit(size);
 
         let mut spin = 0u32;
@@ -459,16 +445,15 @@ impl ShmClient {
         }
     }
 
-    pub async fn request<Req, Resp>(&self, req: &Req) -> anyhow::Result<ShmMessage<Resp>>
+    pub async fn request<Req, Resp>(&self, req: &Req, channel: u8) -> anyhow::Result<ShmMessage<Resp>>
     where
         Req: Serialize<ShmSerializer>,
         Resp: Archive,
         Resp::Archived:
             rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
-        // Optimized path for typed clients that avoids the Vec<u8> copy of Transport trait
         let bytes = rkyv::to_bytes::<_, 1024>(req)?.into_vec();
-        let msg = self.request_raw(&bytes).await?;
+        let msg = self.request_raw(&bytes, channel).await?;
         
         let archived_ref = unsafe {
              match rkyv::check_archived_root::<Resp>(msg.data) {
@@ -484,4 +469,13 @@ impl ShmClient {
             _phantom: PhantomData,
         })
     }
+}
+
+fn is_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, 0) == 0 || *libc::__errno_location() == libc::EPERM
+    }
+    #[cfg(not(unix))]
+    true
 }
