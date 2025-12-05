@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
+//! # Membrane - The Cell Boundary
+//! 
+//! Handles incoming connections, protocol detection (Genome/RPC/SHM), and 
+//! security validation.
+
 #[cfg(feature = "axon")]
 use crate::axon::AxonServer;
 use crate::protocol::{GENOME_REQUEST, SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
-use crate::shm::{RingBuffer, ShmMessage, ShmSerializer};
+use crate::shm::{ShmSerializer};
 use anyhow::{bail, Context, Result};
 use fd_lock::RwLock;
 use rkyv::ser::Serializer;
@@ -18,7 +23,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{info, warn, error, debug};
 use tokio::sync::Semaphore;
+use socket2::{SockRef, Socket};
+use rkyv::AlignedVec;
 
+#[cfg(target_os = "linux")]
+use crate::shm::{RingBuffer, ShmMessage};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
@@ -26,8 +35,10 @@ use std::os::unix::io::AsRawFd;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-// Fix: Concurrency limit to prevent DoS via memory exhaustion
+// Security Fix: Bound concurrency to prevent OOM DoS
 const MAX_CONCURRENT_CONNECTIONS: usize = 10_000;
+// OPTIMIZATION: Large buffers for high-bandwidth payloads
+const SOCKET_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB
 
 pub struct Membrane;
 
@@ -39,10 +50,7 @@ impl Membrane {
     ) -> Result<()>
     where
         F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>>
-            + Send
-            + Sync
-            + 'static
-            + Clone,
+            + Send + Sync + 'static + Clone,
         Req: Archive + Send,
         Req::Archived:
             for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>> + 'static,
@@ -51,11 +59,8 @@ impl Membrane {
             + Send
             + 'static,
     {
-        // Fix: Use Semaphore for concurrency limiting (DoS protection) instead of Rate Limiting
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
-        // 1. Ignite Axon (LAN) if enabled
-        // We prepare the Axon server here, but run its loop in select! below to couple lifecycles.
         #[cfg(feature = "axon")]
         let axon_server = if std::env::var("CELL_LAN").is_ok() {
             Some(AxonServer::ignite(name).await?)
@@ -63,7 +68,6 @@ impl Membrane {
             None
         };
 
-        // Shared state for Axon loop
         let h_axon = handler.clone();
         let g_axon = Arc::new(genome_json.clone());
         let s_axon = semaphore.clone();
@@ -79,31 +83,17 @@ impl Membrane {
                     tokio::spawn(async move {
                         if let Ok(connection) = conn.await {
                             while let Ok((send, recv)) = connection.accept_bi().await {
-                                // Concurrency Limit Check
                                 let permit = match s_inner.clone().try_acquire_owned() {
                                     Ok(p) => p,
-                                    Err(_) => {
-                                        warn!("[Axon] Connection limit reached, dropping stream");
-                                        continue;
-                                    }
+                                    Err(_) => continue,
                                 };
-
                                 let h_call = h_inner.clone();
                                 let g_call = g_inner.clone();
-
                                 tokio::spawn(async move {
-                                    let _permit = permit; // Hold permit until task completion
-                                    if let Err(e) = AxonServer::handle_rpc_stream::<F, Req, Resp>(
+                                    let _permit = permit;
+                                    let _ = AxonServer::handle_rpc_stream::<F, Req, Resp>(
                                         send, recv, h_call, g_call,
-                                    )
-                                    .await
-                                    {
-                                        // Suppress common disconnect errors in logs
-                                        let msg = e.to_string();
-                                        if !msg.contains("Broken pipe") && !msg.contains("Connection reset") {
-                                             // debug!("Axon RPC Error: {}", e);
-                                        }
-                                    }
+                                    ).await;
                                 });
                             }
                         }
@@ -114,14 +104,11 @@ impl Membrane {
             }
             #[cfg(not(feature = "axon"))]
             std::future::pending::<()>().await;
-            
             Ok::<(), anyhow::Error>(())
         };
 
-        // 2. Bind Local Socket (Always active for local discovery)
         let local_future = bind_local::<F, Req, Resp>(name, handler, Arc::new(genome_json), semaphore);
 
-        // Run both transport layers. If one fails (local bind error) or is cancelled, both stop.
         tokio::select! {
             res = local_future => res,
             _ = axon_future => Ok(()),
@@ -176,11 +163,15 @@ where
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
+                // OPTIMIZATION: Set large buffers on the server side too
+                let sock_ref = SockRef::from(&stream);
+                let _ = sock_ref.set_recv_buffer_size(SOCKET_BUFFER_SIZE);
+                let _ = sock_ref.set_send_buffer_size(SOCKET_BUFFER_SIZE);
+
                 let permit = match semaphore.clone().try_acquire_owned() {
                     Ok(p) => p,
                     Err(_) => {
-                        warn!("[{}] Connection limit reached ({}), dropping connection", 
-                              name, MAX_CONCURRENT_CONNECTIONS);
+                        warn!("[{}] Load Shedding", name);
                         continue;
                     }
                 };
@@ -226,9 +217,9 @@ where
         + rkyv::Serialize<ShmSerializer>
         + Send,
 {
-    // OPTIMIZATION: Hoist buffer allocation out of the loop
-    // Pre-allocate 16KB which covers most typical requests without resizing
-    let mut buf = Vec::with_capacity(16 * 1024);
+    // OPTIMIZATION: Persistent buffers on Server Read Path
+    let mut read_buf = Vec::with_capacity(16 * 1024);
+    let mut write_buf = AlignedVec::with_capacity(16 * 1024);
 
     loop {
         let mut len_buf = [0u8; 4];
@@ -238,17 +229,17 @@ where
 
         let len = u32::from_le_bytes(len_buf) as usize;
         
-        // Re-use buffer capacity
-        if buf.capacity() < len {
-            buf.reserve(len - buf.capacity());
+        if read_buf.capacity() < len {
+            read_buf.reserve(len - read_buf.capacity());
         }
-        buf.resize(len, 0); // Fast resize
+        read_buf.resize(len, 0); 
         
-        if stream.read_exact(&mut buf).await.is_err() {
+        if stream.read_exact(&mut read_buf).await.is_err() {
             return Ok(());
         }
 
-        if buf == GENOME_REQUEST {
+        // Protocol Detection
+        if read_buf == GENOME_REQUEST {
             let resp = if let Some(json) = genome.as_ref() {
                 json.as_bytes()
             } else {
@@ -259,7 +250,7 @@ where
             continue;
         }
 
-        if buf == SHM_UPGRADE_REQUEST {
+        if read_buf == SHM_UPGRADE_REQUEST {
             #[cfg(target_os = "linux")]
             {
                 if std::env::var("CELL_DISABLE_SHM").is_ok() {
@@ -275,14 +266,14 @@ where
             }
         }
 
-        // Pass hoisted buffer
-        handle_socket_rpc::<F, Req, Resp>(&mut stream, &buf, &handler).await?;
+        handle_socket_rpc::<F, Req, Resp>(&mut stream, &read_buf, &mut write_buf, &handler).await?;
     }
 }
 
 async fn handle_socket_rpc<F, Req, Resp>(
     stream: &mut UnixStream,
     request_bytes: &[u8],
+    write_buffer: &mut AlignedVec,
     handler: &F,
 ) -> Result<()>
 where
@@ -293,15 +284,30 @@ where
 {
     // Fix #3: Use validation helper
     let archived_req = crate::validate_archived_root::<Req>(request_bytes, "handle_socket_rpc")?;
-
     let response = handler(archived_req).await?;
 
-    let resp_bytes = rkyv::to_bytes::<_, 1024>(&response)?.into_vec();
+    // OPTIMIZATION: Zero-Alloc Response Serialization (Server Side)
+    let aligned_input = std::mem::take(write_buffer);
+    
+    let mut serializer = rkyv::ser::serializers::CompositeSerializer::new(
+        rkyv::ser::serializers::AlignedSerializer::new(aligned_input),
+        rkyv::ser::serializers::FallbackScratch::default(),
+        rkyv::ser::serializers::SharedSerializeMap::default(),
+    );
 
-    stream
-        .write_all(&(resp_bytes.len() as u32).to_le_bytes())
-        .await?;
-    stream.write_all(&resp_bytes).await?;
+    serializer.serialize_value(&response)?;
+    
+    let aligned_output = serializer.into_serializer().into_inner();
+    let bytes = aligned_output.as_slice();
+    let len_bytes = (bytes.len() as u32).to_le_bytes();
+
+    // Use write_all to guarantee delivery of large payloads
+    stream.write_all(&len_bytes).await?;
+    stream.write_all(bytes).await?;
+
+    // Recycle
+    *write_buffer = aligned_output;
+    write_buffer.clear();
 
     Ok(())
 }
@@ -317,6 +323,7 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
             return blake3::hash(&token).as_bytes().to_vec();
         }
         
+        // Generate new token if missing
         let new_token: [u8; 32] = rand::random();
         if std::fs::write(&token_path, &new_token).is_ok() {
             #[cfg(target_os = "linux")]
@@ -329,6 +336,7 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
         }
     }
     
+    // Fallback: Hash of UID
     let uid = nix::unistd::getuid().as_raw();
     blake3::hash(&uid.to_le_bytes()).as_bytes().to_vec()
 }
@@ -347,7 +355,7 @@ where
         for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>> + 'static,
     Resp: Serialize<ShmSerializer> + Send,
 {
-    // Security Fix #2: UID Verification and Challenge-Response
+    // Security Fix #2: UID Verification
     let cred = stream.peer_cred()?;
     let my_uid = nix::unistd::getuid().as_raw();
 
@@ -358,7 +366,7 @@ where
         );
     }
     
-    // 2. Challenge-Response Authentication to prove identity
+    // 2. Challenge-Response Authentication
     let challenge: [u8; 32] = rand::random();
     stream.write_all(&challenge).await?;
     
@@ -372,8 +380,7 @@ where
         bail!("Authentication failed for SHM upgrade");
     }
 
-    // info!("[{}]  Upgrading to zero-copy shared memory...", cell_name);
-
+    // Initialize Ring Buffers
     let (rx_ring, rx_fd) = RingBuffer::create(&format!("{}_server_rx", cell_name))?;
     let (tx_ring, tx_fd) = RingBuffer::create(&format!("{}_server_tx", cell_name))?;
 
@@ -384,8 +391,6 @@ where
 
     let raw_fd = stream.as_raw_fd();
     send_fds(raw_fd, &[rx_fd, tx_fd])?;
-
-    // info!("[{}]  Zero-copy shared memory active", cell_name);
 
     serve_zero_copy::<F, Req, Resp>(rx_ring, tx_ring, handler).await
 }
@@ -423,7 +428,8 @@ where
         let response = handler(archived_req).await?;
         drop(request_msg);
 
-        // Serialize to buffer
+        // Serialize to buffer (using a temp aligned vec or passing a reused one if we refactor)
+        // For SHM path we currently create a new buffer for simplicity as it writes directly to memfd
         let bytes = rkyv::to_bytes::<_, 1024>(&response)?.into_vec();
         let size = bytes.len();
 
