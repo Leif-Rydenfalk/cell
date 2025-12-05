@@ -1,29 +1,28 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-//! # Membrane - The Cell Boundary
-//! 
-//! Handles incoming connections, protocol detection (Genome/RPC/SHM), and 
-//! security validation.
-
 #[cfg(feature = "axon")]
-use crate::axon::AxonServer;
-use crate::protocol::{GENOME_REQUEST, SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
-use crate::shm::{ShmSerializer};
-use anyhow::{bail, Context, Result};
+use cell_axon::AxonServer;
+#[cfg(target_os = "linux")]
+use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
+use cell_model::protocol::GENOME_REQUEST;
+use cell_model::resolve_socket_dir;
+use crate::shm::ShmSerializer;
+use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use anyhow::bail;
 use fd_lock::RwLock;
 use rkyv::ser::Serializer;
-use rkyv::{Archive, Serialize};
+use rkyv::Archive;
 use std::fs::File;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn};
 use tokio::sync::Semaphore;
-use socket2::{SockRef, Socket};
+use socket2::SockRef;
 use rkyv::AlignedVec;
 
 #[cfg(target_os = "linux")]
@@ -35,10 +34,8 @@ use std::os::unix::io::AsRawFd;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-// Security Fix: Bound concurrency to prevent OOM DoS
 const MAX_CONCURRENT_CONNECTIONS: usize = 10_000;
-// OPTIMIZATION: Large buffers for high-bandwidth payloads
-const SOCKET_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB
+const SOCKET_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
 pub struct Membrane;
 
@@ -163,7 +160,6 @@ where
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                // OPTIMIZATION: Set large buffers on the server side too
                 let sock_ref = SockRef::from(&stream);
                 let _ = sock_ref.set_recv_buffer_size(SOCKET_BUFFER_SIZE);
                 let _ = sock_ref.set_send_buffer_size(SOCKET_BUFFER_SIZE);
@@ -206,7 +202,7 @@ async fn handle_connection<F, Req, Resp>(
     mut stream: UnixStream,
     handler: F,
     genome: Arc<Option<String>>,
-    cell_name: &str,
+    _cell_name: &str,
 ) -> Result<()>
 where
     F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>> + Send + Sync + 'static,
@@ -217,7 +213,6 @@ where
         + rkyv::Serialize<ShmSerializer>
         + Send,
 {
-    // OPTIMIZATION: Persistent buffers on Server Read Path
     let mut read_buf = Vec::with_capacity(16 * 1024);
     let mut write_buf = AlignedVec::with_capacity(16 * 1024);
 
@@ -238,7 +233,6 @@ where
             return Ok(());
         }
 
-        // Protocol Detection
         if read_buf == GENOME_REQUEST {
             let resp = if let Some(json) = genome.as_ref() {
                 json.as_bytes()
@@ -250,20 +244,18 @@ where
             continue;
         }
 
+        #[cfg(target_os = "linux")]
         if read_buf == SHM_UPGRADE_REQUEST {
-            #[cfg(target_os = "linux")]
-            {
-                if std::env::var("CELL_DISABLE_SHM").is_ok() {
-                    stream.write_all(&0u32.to_le_bytes()).await?;
-                    continue;
-                }
-                return handle_shm_upgrade::<F, Req, Resp>(stream, handler, cell_name).await;
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
+            if std::env::var("CELL_DISABLE_SHM").is_ok() {
                 stream.write_all(&0u32.to_le_bytes()).await?;
                 continue;
             }
+            return handle_shm_upgrade::<F, Req, Resp>(stream, handler, _cell_name).await;
+        }
+        #[cfg(not(target_os = "linux"))]
+        if read_buf == cell_model::protocol::SHM_UPGRADE_REQUEST {
+             stream.write_all(&0u32.to_le_bytes()).await?;
+             continue;
         }
 
         handle_socket_rpc::<F, Req, Resp>(&mut stream, &read_buf, &mut write_buf, &handler).await?;
@@ -282,11 +274,11 @@ where
     Req::Archived: for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>>,
     Resp: rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>,
 {
-    // Fix #3: Use validation helper
-    let archived_req = crate::validate_archived_root::<Req>(request_bytes, "handle_socket_rpc")?;
+    let archived_req = rkyv::check_archived_root::<Req>(request_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid data: {:?}", e))?;
+
     let response = handler(archived_req).await?;
 
-    // OPTIMIZATION: Zero-Alloc Response Serialization (Server Side)
     let aligned_input = std::mem::take(write_buffer);
     
     let mut serializer = rkyv::ser::serializers::CompositeSerializer::new(
@@ -301,11 +293,9 @@ where
     let bytes = aligned_output.as_slice();
     let len_bytes = (bytes.len() as u32).to_le_bytes();
 
-    // Use write_all to guarantee delivery of large payloads
     stream.write_all(&len_bytes).await?;
     stream.write_all(bytes).await?;
 
-    // Recycle
     *write_buffer = aligned_output;
     write_buffer.clear();
 
@@ -323,7 +313,6 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
             return blake3::hash(&token).as_bytes().to_vec();
         }
         
-        // Generate new token if missing
         let new_token: [u8; 32] = rand::random();
         if std::fs::write(&token_path, &new_token).is_ok() {
             #[cfg(target_os = "linux")]
@@ -336,7 +325,6 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
         }
     }
     
-    // Fallback: Hash of UID
     let uid = nix::unistd::getuid().as_raw();
     blake3::hash(&uid.to_le_bytes()).as_bytes().to_vec()
 }
@@ -355,7 +343,6 @@ where
         for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>> + 'static,
     Resp: Serialize<ShmSerializer> + Send,
 {
-    // Security Fix #2: UID Verification
     let cred = stream.peer_cred()?;
     let my_uid = nix::unistd::getuid().as_raw();
 
@@ -366,7 +353,6 @@ where
         );
     }
     
-    // 2. Challenge-Response Authentication
     let challenge: [u8; 32] = rand::random();
     stream.write_all(&challenge).await?;
     
@@ -380,7 +366,6 @@ where
         bail!("Authentication failed for SHM upgrade");
     }
 
-    // Initialize Ring Buffers
     let (rx_ring, rx_fd) = RingBuffer::create(&format!("{}_server_rx", cell_name))?;
     let (tx_ring, tx_fd) = RingBuffer::create(&format!("{}_server_tx", cell_name))?;
 
@@ -428,8 +413,6 @@ where
         let response = handler(archived_req).await?;
         drop(request_msg);
 
-        // Serialize to buffer (using a temp aligned vec or passing a reused one if we refactor)
-        // For SHM path we currently create a new buffer for simplicity as it writes directly to memfd
         let bytes = rkyv::to_bytes::<_, 1024>(&response)?.into_vec();
         let size = bytes.len();
 
@@ -449,18 +432,4 @@ fn send_fds(socket_fd: std::os::unix::io::RawFd, fds: &[std::os::unix::io::RawFd
     let cmsg = ControlMessage::ScmRights(fds);
     sendmsg::<()>(socket_fd, &iov, &[cmsg], MsgFlags::empty(), None)?;
     Ok(())
-}
-
-pub fn resolve_socket_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
-        return PathBuf::from(p);
-    }
-    let container_dir = std::path::Path::new("/tmp/cell");
-    if container_dir.exists() {
-        return container_dir.to_path_buf();
-    }
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".cell/run");
-    }
-    PathBuf::from("/tmp/cell")
 }

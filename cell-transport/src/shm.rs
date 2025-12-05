@@ -3,10 +3,10 @@
 
 use memmap2::MmapMut;
 use rkyv::ser::serializers::AllocSerializer;
-use rkyv::ser::Serializer as _;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::fs::File;
 use std::marker::PhantomData;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -26,7 +26,6 @@ const HEADER_SIZE: usize = std::mem::size_of::<SlotHeader>();
 struct SlotHeader {
     refcount: AtomicU32,
     len: AtomicU32,
-    // NEW: Epoch ensures we strictly read data for the current position
     epoch: AtomicU64,
 }
 
@@ -58,13 +57,11 @@ impl RingBuffer {
         let name_cstr = CString::new(name)?;
         let flags = MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING;
         
-        // Security Fix #7: Handle errors in memfd_create
         let owned_fd = match memfd_create(&name_cstr, flags) {
             Ok(fd) => fd,
             Err(e) => return Err(e.into()),
         };
         
-        // Security Fix #7: Wrap in File immediately for RAII cleanup on error
         let file = File::from(owned_fd);
         file.set_len(RING_SIZE as u64)?;
 
@@ -112,8 +109,7 @@ impl RingBuffer {
     }
 
     pub fn try_alloc(&self, exact_size: usize) -> Option<WriteSlot> {
-        // Fix #6: Missing Bounds Check
-        const MAX_ALLOC_SIZE: usize = 16 * 1024 * 1024; // 16MB max
+        const MAX_ALLOC_SIZE: usize = 16 * 1024 * 1024;
         if exact_size > MAX_ALLOC_SIZE {
             eprintln!("[SHM] Allocation too large: {}", exact_size);
             return None;
@@ -157,14 +153,9 @@ impl RingBuffer {
                     }
                 }
 
-                // We do NOT zero the header here. We overwrite it in commit().
-                // Zeroing here would race with the reader checking epoch.
-
                 return Some(WriteSlot {
                     ring: self,
                     offset,
-                    // Pass the exact write position we claimed.
-                    // This is our "Epoch" or "Sequence Number".
                     epoch_claim: write + wrap_padding as u64,
                 });
             }
@@ -198,12 +189,6 @@ impl RingBuffer {
         let header_ptr = unsafe { self.data.add(data_offset - HEADER_SIZE) as *const SlotHeader };
         let header = unsafe { &*header_ptr };
 
-        // 1. EPOCH CHECK (The Fix)
-        // We calculate what the write_pos SHOULD be for this data to be valid.
-        // It should match the current monotonic read_pos (adjusted for wrapping if we consumed padding).
-        // Wait, 'read' variable is the monotonic counter.
-        // If we hit sentinel, we consumed bytes_to_end. The REAL data starts at `read + bytes_to_end`.
-
         let expected_epoch = if first_word == PADDING_SENTINEL {
             read + (self.capacity - read_idx) as u64
         } else {
@@ -213,22 +198,19 @@ impl RingBuffer {
         let found_epoch = header.epoch.load(Ordering::Acquire);
 
         if found_epoch != expected_epoch {
-            // Stale data. Writer has reserved space but hasn't committed yet.
             return None;
         }
 
-        // 2. Data is valid, proceed
         let data_len = header.len.load(Ordering::Acquire);
         if data_len == 0 {
             return None;
-        } // Should not happen if epoch matches, but safe.
+        }
 
-        // 3. Claim Refcount
         let mut rc = header.refcount.load(Ordering::Acquire);
         loop {
             if rc != 0 {
                 return None;
-            } // Taken by another thread
+            }
             match header
                 .refcount
                 .compare_exchange_weak(0, 1, Ordering::AcqRel, Ordering::Acquire)
@@ -245,14 +227,12 @@ impl RingBuffer {
             total_consumed + aligned_len
         };
 
-        // 4. Validate and Return
         let data_ptr = unsafe { self.data.add(data_offset) };
         let archived_ref = unsafe {
             let slice = std::slice::from_raw_parts(data_ptr, data_len as usize);
             match rkyv::check_archived_root::<T>(slice) {
                 Ok(a) => a,
                 Err(_) => {
-                    // Corruption/Panic recovery
                     header.refcount.store(0, Ordering::Release);
                     return None;
                 }
@@ -293,7 +273,7 @@ impl RingBuffer {
 pub struct WriteSlot<'a> {
     ring: &'a RingBuffer,
     offset: usize,
-    epoch_claim: u64, // The epoch we must write to validate this slot
+    epoch_claim: u64,
 }
 
 impl<'a> WriteSlot<'a> {
@@ -307,29 +287,10 @@ impl<'a> WriteSlot<'a> {
     pub fn commit(self, actual_size: usize) {
         unsafe {
             let header_ptr = self.ring.data.add(self.offset) as *mut SlotHeader;
-
-            // Security Fix #1: Shared Memory Race Condition
-            // We must use Release ordering for ALL metadata stores to ensure
-            // they are strictly visible before the epoch update.
-            // On weak memory architectures (ARM/RISC-V), Relaxed stores might not be 
-            // visible to the reader even if the Epoch is.
-
-            // 1. Initialize refcount (fresh)
             (*header_ptr).refcount.store(0, Ordering::Release);
-            
-            // 2. Write length
-            (*header_ptr)
-                .len
-                .store(actual_size as u32, Ordering::Release);
-
-            // 3. Data fence to ensure payload writes are visible
+            (*header_ptr).len.store(actual_size as u32, Ordering::Release);
             std::sync::atomic::compiler_fence(Ordering::Release);
-
-            // 4. COMMIT: Write Epoch. This makes the slot valid for the Reader.
-            // Reader checks epoch with Acquire, creating the synchronized edge.
-            (*header_ptr)
-                .epoch
-                .store(self.epoch_claim, Ordering::Release);
+            (*header_ptr).epoch.store(self.epoch_claim, Ordering::Release);
         }
     }
 }
@@ -349,7 +310,6 @@ unsafe impl Sync for SlotToken {}
 impl Drop for SlotToken {
     fn drop(&mut self) {
         let ring = unsafe { &*self.ring };
-        // Advance read_pos to free space
         unsafe {
             (*ring.control)
                 .read_pos

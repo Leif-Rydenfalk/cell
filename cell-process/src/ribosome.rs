@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use fd_lock::RwLock;
-use std::fs::{self, OpenOptions}; // Removed unused 'File'
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -11,7 +11,6 @@ pub struct Ribosome;
 
 impl Ribosome {
     pub fn synthesize(source_path: &Path, cell_name: &str) -> Result<PathBuf> {
-        // Fix #11: Path Traversal
         if cell_name.contains(&['/', '\\', '.'][..]) {
             anyhow::bail!("Invalid cell name: cannot contain path separators");
         }
@@ -53,11 +52,6 @@ impl Ribosome {
             println!("[Ribosome] Synthesizing '{}'...", cell_name);
         }
 
-        if !source_path.join("vendor").exists() {
-            // Only warn once per session to reduce noise?
-            // For now, we keep it but it's fine.
-        }
-
         let mut cmd = Command::new("cargo");
         cmd.arg("build").arg("--release");
 
@@ -97,7 +91,6 @@ impl Ribosome {
                     let path = entry.path();
 
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        // FIX: Ignore Cargo.lock to prevent rebuild loops when lockfile updates
                         if name == "target" || name.starts_with('.') || name == "Cargo.lock" {
                             continue;
                         }

@@ -1,0 +1,24 @@
+[package]
+name = "cell-transport"
+version = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+cell-model = { workspace = true }
+cell-axon = { workspace = true, optional = true }
+tokio = { workspace = true }
+nix = { workspace = true }
+memmap2 = { workspace = true }
+fd-lock = { workspace = true }
+socket2 = { workspace = true }
+rand = { workspace = true }
+blake3 = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+rkyv = { workspace = true }
+quinn = "0.10"
+
+[features]
+default = ["axon"]
+axon = ["dep:cell-axon"]

@@ -8,71 +8,21 @@ description = "Zero-copy RPC framework and runtime SDK."
 repository = { workspace = true }
 
 [features]
-default = ["axon"]
-# Feature flag for LAN/WAN capabilities (QUIC, TLS, Discovery)
-axon = [
-    "dep:quinn",
-    "dep:rustls",
-    "dep:rcgen",
-    "dep:local-ip-address",
-    "dep:futures",
-    "dep:webpki-roots",
-    "dep:rustls-pemfile",
-]
+default = ["transport", "process", "axon"]
+transport = ["dep:cell-transport"]
+process = ["dep:cell-process"]
+axon = ["dep:cell-axon"]
 
 [dependencies]
-anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.36", features = [
-    "rt", 
-    "rt-multi-thread", 
-    "macros", 
-    "sync", 
-    "time", 
-    "io-util",
-    "fs", # Needed for UnixListener/File locks
-    "net", # Needed for UnixStream (this is distinct from TCP/UDP)
-    "signal" # Needed for Ctrl+C handling
-] }
-rand = "0.8"
-rkyv = { version = "0.7", features = ["validation"] }
-memmap2 = "0.5"
-nix = { version = "0.27", features = [
-    "mman",
-    "fs",
-    "socket",
-    "uio",
-    "ioctl",
-    "user",
-] }
-socket2 = { version = "0.5", features = ["all"] }
-fd-lock = "4.0"
-dirs = "5.0"
-users = "0.11"
-cell-macros = { path = "../cell-macros" }
-blake3 = "1.5"
+cell-model = { workspace = true }
+cell-macros = { workspace = true }
+cell-transport = { workspace = true, optional = true }
+cell-axon = { workspace = true, optional = true }
+cell-process = { workspace = true, optional = true }
+
+# Re-exports
+serde = { workspace = true }
+rkyv = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
-tracing = "0.1"
-
-# Networking (enabled by default via "axon" feature)
-quinn = { version = "0.10", optional = true }
-rustls = { version = "0.21", features = [
-    "dangerous_configuration",
-    "quic",
-], optional = true }
-rcgen = { version = "0.11", optional = true }
-local-ip-address = { version = "0.5", optional = true }
-futures = { version = "0.3", optional = true }
-lazy_static = "1.4"
-if-addrs = "0.10"
-webpki-roots = { version = "0.25", optional = true }
-rustls-pemfile = { version = "1.0", optional = true }
-
-# Git
-chrono = { version = "0.4", features = ["serde"] }
-
-[[example]]
-name = "cell-discover"
-path = "examples/cell-discover.rs"
-required-features = ["axon"]

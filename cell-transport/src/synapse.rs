@@ -2,29 +2,28 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 #[cfg(feature = "axon")]
-use crate::axon::AxonClient;
-use crate::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
-use crate::shm::{ShmSerializer};
+use cell_axon::AxonClient;
+#[cfg(target_os = "linux")]
+use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
+use cell_model::resolve_socket_dir;
+use crate::response::Response;
+use crate::shm::ShmSerializer;
+#[cfg(target_os = "linux")]
+use crate::shm::{ShmClient, RingBuffer};
+
 use anyhow::{bail, Result};
 use rkyv::ser::serializers::AllocSerializer;
-use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::{Archive, Serialize};
 use rkyv::ser::Serializer;
 use rkyv::AlignedVec;
-use std::marker::PhantomData;
-use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 use socket2::SockRef;
-
-#[cfg(target_os = "linux")]
-use crate::shm::{RingBuffer, ShmClient, ShmMessage};
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
-// OPTIMIZATION: Large buffers (8MB) to prevent kernel fragmentation on large payloads.
-// Standard Unix sockets default to ~128KB, causing context switch storms for MB-sized messages.
 const SOCKET_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
 enum Transport {
@@ -32,7 +31,7 @@ enum Transport {
     #[cfg(target_os = "linux")]
     SharedMemory {
         client: ShmClient,
-        _socket: UnixStream, // Keep socket alive to hold file lock/credentials
+        _socket: UnixStream,
     },
     #[cfg(feature = "axon")]
     Quic(quinn::Connection),
@@ -42,15 +41,11 @@ enum Transport {
 pub struct Synapse {
     transport: Transport,
     upgrade_attempted: bool,
-    // OPTIMIZATION: Persistent buffers to avoid malloc churn.
-    // read_buffer: Resizable Vec for incoming data.
-    // write_buffer: AlignedVec for zero-copy serialization reuse (rkyv requirement).
     read_buffer: Vec<u8>,
     write_buffer: AlignedVec,
 }
 
 impl Synapse {
-    /// Automatic discovery with fallback chain: Local → LAN → Manual Override.
     pub async fn grow(cell_name: &str) -> Result<Self> {
         const MAX_RETRIES: u32 = 3;
         const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -58,12 +53,10 @@ impl Synapse {
         info!("[Synapse] Connecting to '{}'...", cell_name);
 
         for attempt in 1..=MAX_RETRIES {
-            // 1. Try Local Socket (Fastest - same machine)
             let socket_dir = resolve_socket_dir();
             let socket_path = socket_dir.join(format!("{}.sock", cell_name));
 
             if let Ok(stream) = UnixStream::connect(&socket_path).await {
-                // Configure kernel buffers
                 let sock_ref = SockRef::from(&stream);
                 let _ = sock_ref.set_recv_buffer_size(SOCKET_BUFFER_SIZE);
                 let _ = sock_ref.set_send_buffer_size(SOCKET_BUFFER_SIZE);
@@ -77,13 +70,11 @@ impl Synapse {
                 });
             }
 
-            // 2. Try LAN Discovery (Axon / QUIC)
             #[cfg(feature = "axon")]
             {
-                // Manual override check (last resort for cross-network debugging)
                 if let Ok(peer_addr) = std::env::var("CELL_PEER") {
                     info!("[Synapse] Using manual override: {}", peer_addr);
-                    let client = crate::axon::AxonClient::make_endpoint()?;
+                    let client = cell_axon::AxonClient::make_endpoint()?;
                     let addr = peer_addr.parse()?;
                     let conn = client.connect(addr, "localhost")?.await?;
                     return Ok(Self {
@@ -94,7 +85,6 @@ impl Synapse {
                     });
                 }
 
-                // Automatic Pheromone Discovery
                 if let Some(conn) = AxonClient::connect(cell_name).await? {
                     return Ok(Self {
                         transport: Transport::Quic(conn),
@@ -113,36 +103,26 @@ impl Synapse {
         bail!("Cell '{}' not found. Ensure it is running.", cell_name);
     }
 
-    /// Sends a request and returns a Zero-Copy response.
-    /// 
-    /// The returned `Response` borrows the internal read buffer of this `Synapse`,
-    /// preventing a heap allocation on the read path.
     pub async fn fire<'a, Req, Resp>(&'a mut self, request: &Req) -> Result<Response<'a, Resp>>
     where
         Req: Serialize<AllocSerializer<1024>> + Serialize<ShmSerializer>,
-        Resp: Archive + 'a, // Added lifetime bound
+        Resp: Archive + 'a,
         Resp::Archived:
             rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
-        // Opportunistic Upgrade to Shared Memory (Linux Only)
         #[cfg(target_os = "linux")]
         if !self.upgrade_attempted {
             self.upgrade_attempted = true;
             if let Transport::Socket(_) = self.transport {
-                // Env var escape hatch for debugging raw sockets
                 if std::env::var("CELL_DISABLE_SHM").is_err() {
                     if let Err(_e) = self.try_upgrade_to_shm().await {
-                        // Silent failure - we just continue using sockets
-                        // warn!("SHM Upgrade Failed: {}", _e);
                     }
                 }
             }
         }
 
-        // Security Fix: Enforce timeouts to prevent indefinite hangs on network partition
         const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-        // Split borrows to satisfy borrow checker rules
         let transport = &mut self.transport;
         let r_buf = &mut self.read_buffer;
         let w_buf = &mut self.write_buffer;
@@ -153,7 +133,10 @@ impl Synapse {
                 #[cfg(target_os = "linux")]
                 Transport::SharedMemory { client, .. } => Self::fire_via_shm(client, request).await,
                 #[cfg(feature = "axon")]
-                Transport::Quic(conn) => AxonClient::fire(conn, request).await,
+                Transport::Quic(conn) => {
+                    let bytes = AxonClient::fire(conn, request).await?;
+                    Ok(Response::Owned(bytes))
+                },
                 Transport::Empty => bail!("Connection unusable"),
             }
         };
@@ -172,14 +155,11 @@ impl Synapse {
     ) -> Result<Response<'a, Resp>>
     where
         Req: Serialize<AllocSerializer<1024>>,
-        Resp: Archive + 'a, // Added lifetime bound
+        Resp: Archive + 'a,
         Resp::Archived: 'static,
     {
-        // 1. Serialization (Zero Alloc via Buffer Reuse)
-        // We take the aligned buffer out of the struct temporarily to use it.
         let aligned_input = std::mem::take(write_buffer);
         
-        // Use CompositeSerializer to serialize directly into existing memory
         let mut serializer = rkyv::ser::serializers::CompositeSerializer::new(
             rkyv::ser::serializers::AlignedSerializer::new(aligned_input),
             rkyv::ser::serializers::FallbackScratch::default(),
@@ -192,17 +172,12 @@ impl Synapse {
         let bytes = aligned_output.as_slice();
         let len_bytes = (bytes.len() as u32).to_le_bytes();
 
-        // 2. Write
-        // We use two write calls. write_vectored is technically fewer syscalls, 
-        // but write_all guarantees complete delivery for large payloads (preventing deadlocks).
         stream.write_all(&len_bytes).await?;
         stream.write_all(bytes).await?;
 
-        // 3. Recycle Write Buffer
         *write_buffer = aligned_output;
         write_buffer.clear(); 
 
-        // 4. Read (Into reused read_buffer)
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
@@ -210,14 +185,10 @@ impl Synapse {
         if read_buffer.capacity() < len {
             read_buffer.reserve(len - read_buffer.capacity());
         }
-        // Resizing to len is safe because we immediately read_exact into it.
-        // We rely on the OS to fill it or error out.
         read_buffer.resize(len, 0); 
         
         stream.read_exact(read_buffer).await?;
 
-        // OPTIMIZATION: Return Borrowed Slice (Zero Copy Read)
-        // This avoids the memcpy back to the user application.
         Ok(Response::Borrowed(read_buffer))
     }
 
@@ -240,31 +211,22 @@ impl Synapse {
             _ => bail!("Invalid state"),
         };
 
-        // Security Check 1: UID Verification
-        // Only allow SHM upgrades if the process owner matches.
         let cred = stream.peer_cred()?;
         let my_uid = nix::unistd::getuid().as_raw();
         if cred.uid() != my_uid {
-            bail!("UID mismatch: Peer is {}, I am {}. SHM denied.", cred.uid(), my_uid);
+            bail!("UID mismatch");
         }
 
-        // 1. Request Upgrade
-        stream
-            .write_all(&(SHM_UPGRADE_REQUEST.len() as u32).to_le_bytes())
-            .await?;
+        stream.write_all(&(SHM_UPGRADE_REQUEST.len() as u32).to_le_bytes()).await?;
         stream.write_all(SHM_UPGRADE_REQUEST).await?;
 
-        // 2. Receive Challenge (Nonce)
         let mut challenge = [0u8; 32];
         stream.read_exact(&mut challenge).await?;
         
-        // Security Check 2: Challenge-Response
-        // Prove we have access to the shared secret (file-system protected token).
         let auth_token = crate::membrane::get_shm_auth_token();
         let response = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
         stream.write_all(response.as_bytes()).await?;
 
-        // 4. Await Ack
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
@@ -272,18 +234,15 @@ impl Synapse {
         stream.read_exact(&mut ack).await?;
 
         if ack != SHM_UPGRADE_ACK {
-            bail!("SHM Upgrade Rejected by Server (Auth Failed)");
+            bail!("SHM Upgrade Rejected");
         }
 
-        // 5. Receive File Descriptors (Ring Buffers)
         stream.readable().await?;
         let fds = recv_fds(stream.as_raw_fd())?;
         if fds.len() != 2 {
-            bail!("Expected 2 FDs, got {}", fds.len());
+            bail!("Expected 2 FDs");
         }
 
-        // 6. Attach to Shared Memory
-        // This maps the memory into our address space.
         let tx = unsafe { RingBuffer::attach(fds[0])? };
         let rx = unsafe { RingBuffer::attach(fds[1])? };
 
@@ -293,64 +252,18 @@ impl Synapse {
         if let Transport::Socket(socket) = old {
             self.transport = Transport::SharedMemory {
                 client,
-                _socket: socket, // Keep socket for FD lifecycle management
+                _socket: socket,
             };
             Ok(())
         } else {
             self.transport = old;
-            bail!("State error during upgrade");
+            bail!("State error");
         }
-    }
-}
-
-// Response now carries a lifetime 'a to allow borrowing from Synapse buffer
-pub enum Response<'a, T: Archive>
-where
-    <T as Archive>::Archived: 'static,
-{
-    Owned(Vec<u8>), // Network / Legacy
-    Borrowed(&'a [u8]), // Zero-Copy Socket Read
-    #[cfg(target_os = "linux")]
-    ZeroCopy(ShmMessage<T>), // Zero-Copy SHM
-    #[cfg(not(target_os = "linux"))]
-    _Phantom(PhantomData<&'a T>),
-}
-
-impl<'a, T: Archive> Response<'a, T>
-where
-    <T as Archive>::Archived: 'static,
-{
-    /// Access the archived data without deserializing.
-    /// This is the fastest way to read data.
-    pub fn get(&self) -> Result<&T::Archived>
-    where
-        T::Archived: for<'b> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>>,
-    {
-        match self {
-            Response::Owned(bytes) => crate::validate_archived_root::<T>(bytes, "Response::get"),
-            Response::Borrowed(bytes) => crate::validate_archived_root::<T>(bytes, "Response::get"),
-            #[cfg(target_os = "linux")]
-            Response::ZeroCopy(msg) => Ok(msg.get()),
-            #[cfg(not(target_os = "linux"))]
-            Response::_Phantom(_) => anyhow::bail!("Invalid state"),
-        }
-    }
-
-    /// Deserializes the data into a standard Rust struct.
-    /// This performs a deep copy and allocation.
-    pub fn deserialize(&self) -> Result<T>
-    where
-        T::Archived: Deserialize<T, rkyv::de::deserializers::SharedDeserializeMap>
-            + for<'b> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>>,
-    {
-        let archived: &T::Archived = self.get()?;
-        let mut deserializer = rkyv::de::deserializers::SharedDeserializeMap::new();
-        Ok(archived.deserialize(&mut deserializer)?)
     }
 }
 
 #[cfg(target_os = "linux")]
-fn recv_fds(socket_fd: std::os::unix::io::RawFd) -> Result<Vec<std::os::unix::io::RawFd>> {
+fn recv_fds(socket_fd: std::os::unix::io::RawFd, fds: &[std::os::unix::io::RawFd]) -> Result<Vec<std::os::unix::io::RawFd>> {
     use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
     use std::io::IoSliceMut;
 
@@ -367,18 +280,4 @@ fn recv_fds(socket_fd: std::os::unix::io::RawFd) -> Result<Vec<std::os::unix::io
         }
     }
     Ok(fds)
-}
-
-pub fn resolve_socket_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
-        return PathBuf::from(p);
-    }
-    let container_dir = std::path::Path::new("/tmp/cell");
-    if container_dir.exists() {
-        return container_dir.to_path_buf();
-    }
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".cell/run");
-    }
-    PathBuf::from("/tmp/cell")
 }

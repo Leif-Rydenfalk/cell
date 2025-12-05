@@ -1,23 +1,18 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-#![cfg(feature = "axon")]
-
 use crate::pheromones::PheromoneSystem;
-use crate::protocol::GENOME_REQUEST;
-use crate::synapse::Response;
-use anyhow::{Context, Result};
-use rkyv::ser::serializers::AllocSerializer;
-use rkyv::{Archive, Serialize};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use cell_model::protocol::GENOME_REQUEST;
+use anyhow::{Result};
+// Fixed: Use cell_model::rkyv
+use cell_model::rkyv::ser::serializers::AllocSerializer;
+use cell_model::rkyv::{self, Archive, Serialize};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr}; // Added Ipv6Addr
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
-use tracing::{info, warn, error};
-#[cfg(feature = "axon")]
+use tracing::{info, warn};
 use webpki_roots;
-
-// --- Axon Server (Multi-Interface Listener) ---
 
 pub struct AxonServer {
     endpoints: Vec<(SocketAddr, quinn::Endpoint)>,
@@ -25,7 +20,6 @@ pub struct AxonServer {
 }
 
 impl AxonServer {
-    /// Ignites the LAN interface: Binds to EVERY local address automatically
     pub async fn ignite(cell_name: &str) -> Result<Self> {
         let pheromones = PheromoneSystem::ignite().await?;
         let addrs = get_all_local_addresses().await?;
@@ -118,7 +112,9 @@ impl AxonServer {
             return Ok(());
         }
 
-        let archived_req = crate::validate_archived_root::<Req>(&buf, "handle_rpc_stream")?;
+        let archived_req = rkyv::check_archived_root::<Req>(&buf)
+            .map_err(|e| anyhow::anyhow!("Invalid rpc data: {:?}", e))?;
+
         let response = handler(archived_req).await?;
         let resp_bytes = rkyv::to_bytes::<_, 1024>(&response)?.into_vec();
 
@@ -168,17 +164,14 @@ impl AxonClient {
         try_connect(socket_addr).await
     }
 
-    // UPDATED SIGNATURE: Returns Response<'a>
-    pub async fn fire<'a, Req, Resp>(conn: &quinn::Connection, request: &Req) -> Result<Response<'a, Resp>>
+    pub async fn fire<Req>(conn: &quinn::Connection, request: &Req) -> Result<Vec<u8>>
     where
         Req: Serialize<AllocSerializer<1024>>,
-        Resp: Archive + 'a, // Added lifetime bound
-        Resp::Archived: 'static,
     {
         const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
         let fut = async {
-             let req_bytes = crate::rkyv::to_bytes::<_, 1024>(request)?.into_vec();
+             let req_bytes = rkyv::to_bytes::<_, 1024>(request)?.into_vec();
              let (mut send, mut recv) = conn.open_bi().await?;
 
              send.write_all(&(req_bytes.len() as u32).to_le_bytes()).await?;
@@ -192,8 +185,7 @@ impl AxonClient {
              let mut resp_bytes = vec![0u8; len];
              recv.read_exact(&mut resp_bytes).await?;
 
-             // For Quic, we still return Owned because we allocated a fresh vec
-             Ok(Response::Owned(resp_bytes))
+             Ok(resp_bytes)
         };
 
         match tokio::time::timeout(RPC_TIMEOUT, fut).await {
@@ -293,10 +285,8 @@ fn make_server_config() -> Result<quinn::ServerConfig> {
 }
 
 fn make_client_endpoint() -> Result<quinn::Endpoint> {
-    // Security Fix #1: TLS Validation with WebPKI Roots
     let mut roots = rustls::RootCertStore::empty();
     
-    #[cfg(feature = "axon")]
     roots.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
         rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
             ta.subject,
@@ -305,7 +295,6 @@ fn make_client_endpoint() -> Result<quinn::Endpoint> {
         )
     }));
 
-    // Allow user to override/append with a specific trusted cert (Pinning)
     if let Ok(cert_path) = std::env::var("CELL_TRUSTED_CERT") {
         if let Ok(cert_data) = std::fs::read(&cert_path) {
              let mut reader = std::io::BufReader::new(&cert_data[..]);
@@ -317,7 +306,6 @@ fn make_client_endpoint() -> Result<quinn::Endpoint> {
         }
     }
     
-    // Development mode bypass (Explicit opt-in required)
     let crypto = if std::env::var("CELL_DEV_MODE").is_ok() {
         warn!("WARNING: Running in DEV_MODE with relaxed TLS verification");
         

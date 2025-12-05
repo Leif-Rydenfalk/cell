@@ -1,0 +1,21 @@
+[package]
+name = "cell-axon"
+version = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+cell-model = { workspace = true }
+tokio = { workspace = true }
+quinn = "0.10"
+rustls = { version = "0.21", features = ["quic", "dangerous_configuration"] }
+rcgen = "0.11"
+local-ip-address = "0.5"
+if-addrs = "0.10"
+libp2p = { version = "0.53", optional = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = "1.0"
+futures = "0.3"
+webpki-roots = "0.25"
+rustls-pemfile = "1.0"
