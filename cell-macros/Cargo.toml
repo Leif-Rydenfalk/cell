@@ -11,14 +11,13 @@ description = "Procedural macros for Cell schemas."
 proc-macro = true
 
 [dependencies]
-quote = { workspace = true }
-syn = { workspace = true, features = ["full", "extra-traits", "parsing"] }
-proc-macro2 = { workspace = true }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { workspace = true }
-blake3 = { workspace = true }
-# We need rkyv directly here for compile-time serialization (Mitosis)
-rkyv = { workspace = true }
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "extra-traits", "parsing", "visit", "fold"] }
+proc-macro2 = "1.0"
+convert_case = "0.6"
 dirs = "5.0"
-tokio = { version = "1", features = ["full"] }
+# Dependencies required for the expanded code to compile if referred to by absolute path
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rkyv = { version = "0.7", features = ["validation"] }
 anyhow = "1.0"

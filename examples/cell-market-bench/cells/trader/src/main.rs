@@ -6,63 +6,16 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{info, warn, error};
+use tracing::{error};
 
+// Generates ExchangeClient (alias for ExchangeServiceClient) and imports DNA
 cell_remote!(ExchangeClient = "exchange");
 
-// --- Protocol Definitions ---
-#[derive(cell_sdk::serde::Serialize, cell_sdk::serde::Deserialize, cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize, cell_sdk::rkyv::Deserialize)]
-#[serde(crate = "cell_sdk::serde")]
-#[archive(check_bytes)]
-#[archive(crate = "cell_sdk::rkyv")]
-enum ExchangeServiceProtocol {
-    PlaceOrder { symbol: String, amount: u64, side: u8 },
-    SubmitBatch { count: u32 },
-    IngestData { data: Vec<u8> },
-    Ping { seq: u64 },
-}
-
-#[derive(cell_sdk::serde::Serialize, cell_sdk::serde::Deserialize, cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize, cell_sdk::rkyv::Deserialize)]
-#[serde(crate = "cell_sdk::serde")]
-#[archive(check_bytes)]
-#[archive(crate = "cell_sdk::rkyv")]
-enum ExchangeServiceResponse {
-    PlaceOrder(Result<u64, String>),
-    SubmitBatch(Result<u64, String>),
-    IngestData(Result<u64, String>),
-    Ping(Result<u64, String>),
-}
-
-// --- Client Implementation ---
-impl ExchangeClient {
-    pub async fn submit_batch(&mut self, count: u32) -> Result<u64> {
-        let req = ExchangeServiceProtocol::SubmitBatch { count };
-        let resp = self.connection().fire::<ExchangeServiceProtocol, ExchangeServiceResponse>(&req).await?;
-        match resp.deserialize()? {
-            ExchangeServiceResponse::SubmitBatch(Ok(res)) => Ok(res),
-            ExchangeServiceResponse::SubmitBatch(Err(e)) => anyhow::bail!(e),
-            _ => anyhow::bail!("Invalid response type"),
-        }
-    }
-
-    pub async fn ingest_data(&mut self, data: Vec<u8>) -> Result<u64> {
-        let req = ExchangeServiceProtocol::IngestData { data };
-        let resp = self.connection().fire::<ExchangeServiceProtocol, ExchangeServiceResponse>(&req).await?;
-        match resp.deserialize()? {
-            ExchangeServiceResponse::IngestData(Ok(res)) => Ok(res),
-            ExchangeServiceResponse::IngestData(Err(e)) => anyhow::bail!(e),
-            _ => anyhow::bail!("Invalid response type"),
-        }
-    }
-
-    pub async fn ping(&mut self, seq: u64) -> Result<u64> {
-        let req = ExchangeServiceProtocol::Ping { seq };
-        let resp = self.connection().fire::<ExchangeServiceProtocol, ExchangeServiceResponse>(&req).await?;
-        match resp.deserialize()? {
-            ExchangeServiceResponse::Ping(Ok(res)) => Ok(res),
-            ExchangeServiceResponse::Ping(Err(e)) => anyhow::bail!(e),
-            _ => anyhow::bail!("Invalid response type"),
-        }
+// Helper to unwrap the double Result logic
+fn unwrap_response<T>(res: anyhow::Result<Result<T, String>>) -> Result<T> {
+    match res? {
+        Ok(val) => Ok(val),
+        Err(e) => anyhow::bail!("Service Error: {}", e),
     }
 }
 
@@ -86,7 +39,7 @@ enum Mode {
 }
 
 // --- Sharded Counters ---
-const SHARDS: usize = 64; // Power of two for fast masking
+const SHARDS: usize = 64; 
 
 struct ShardedCounter {
     shards: [AtomicU64; SHARDS],
@@ -163,7 +116,6 @@ async fn main() -> Result<()> {
     }
     println!("--------------------------------------------------");
 
-    // Replace global AtomicU64 with Arc<ShardedCounter>
     let req_count = Arc::new(ShardedCounter::new());
     let latency_sum_ns = Arc::new(ShardedCounter::new());
 
@@ -183,12 +135,10 @@ async fn main() -> Result<()> {
             let elapsed = now.duration_since(start_time).as_secs_f64();
             start_time = now;
 
-            // Load summed values from shards
             let curr_req = r_req.load();
             let curr_lat = r_lat.load();
 
             let delta_req = curr_req - last_req;
-            // Fix #8: Potential Overflow in Trader Metrics
             let delta_lat = curr_lat.saturating_sub(last_lat);
 
             let rps = delta_req as f64 / elapsed;
@@ -249,23 +199,24 @@ async fn main() -> Result<()> {
                 let res = match task_mode {
                     Mode::Ping => {
                         seq = seq.wrapping_add(1);
-                        let ret = client.ping(seq).await;
+                        // Call the generated method directly
+                        let val = unwrap_response(client.ping(seq).await);
                         
                         // INTEGRITY CHECK
-                        if let Ok(val) = ret {
-                            if val != seq {
-                                panic!("FATAL: Data corruption! Sent {} but got {}", seq, val);
+                        if let Ok(v) = val {
+                            if v != seq {
+                                panic!("FATAL: Data corruption! Sent {} but got {}", seq, v);
                             }
                             Ok(0)
                         } else {
-                            ret.map(|_| 0)
+                            val.map(|_| 0)
                         }
                     },
                     Mode::Batch(batch_size) => {
-                        client.submit_batch(batch_size).await.map(|_| 0)
+                        unwrap_response(client.submit_batch(batch_size).await).map(|_| 0)
                     },
                     Mode::Bytes(_) => {
-                        client.ingest_data(payload.clone().unwrap()).await
+                        unwrap_response(client.ingest_data(payload.clone().unwrap()).await)
                     }
                 };
 
@@ -273,7 +224,6 @@ async fn main() -> Result<()> {
 
                 match res {
                     Ok(_) => {
-                        // Use sharded inc
                         t_req.inc(1);
                         t_lat.inc(duration);
                     }

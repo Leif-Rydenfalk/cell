@@ -9,13 +9,13 @@ Run millions of zero-copy messages per second between sandboxed micro-services t
 t1:
 ```bash
 git clone https://github.com/Leif-Rydenfalk/cell
-cd cell/examples/cell-market/cells/exchange
+cd cell/examples/cell-market-bench/cells/exchange
 cargo run --release
 ```
 
 t2:
 ```bash
-cd cell/examples/cell-market/cells/trader
+cd cell/examples/cell-market-bench/cells/trader
 cargo run --release -- 1 ping
 ```
 
@@ -38,7 +38,7 @@ Cell is a **biologically-inspired** runtime for building **secure, high-throughp
 
 ## Performance (single core, Intel i5-4300U @ 2.6 GHz, Linux 6.2)
 
-| Metric               | cell-market demo |
+| Metric               | cell-market-bench demo |
 |----------------------|------------------|
 | messages per second  | **1.48 M**       |
 | median RTT (ping)    | **677 ns**       |
@@ -55,7 +55,7 @@ cell/
 ├── cell-consensus/    # Embeddable Raft + batched WAL
 ├── cell-macros/       # `#[protein]` and `signal_receptor!` for codegen
 └── examples/          # Living demos
-    └── cell-market/   # 9 M TPS market simulation
+    └── cell-market-bench/   # 9 M TPS market simulation
 ```
 
 ---
