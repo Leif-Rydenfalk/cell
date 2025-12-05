@@ -11,15 +11,12 @@ use syn::{parse_file, Item, Type};
 
 #[derive(Parser)]
 struct Cli {
-    /// The cell class name (e.g., "DadMsg")
     #[arg(short, long)]
     cell: String,
 
-    /// Target language (go, py)
     #[arg(short, long)]
     lang: String,
 
-    /// Output file
     #[arg(short, long)]
     out: PathBuf,
 }
@@ -40,17 +37,31 @@ fn main() -> Result<()> {
         );
     }
 
-    let content = fs::read_to_string(&schema_path)?;
-    let syntax = parse_file(&content)?;
+    // FIX: Use cell_build to flatten module structure
+    let file = cell_build::load_and_flatten_source(&schema_path)?;
 
-    let item = syntax
-        .items
-        .iter()
-        .find(|i| match i {
-            Item::Struct(s) => s.ident == args.cell,
-            Item::Enum(e) => e.ident == args.cell,
-            _ => false,
-        })
+    // Scan for struct/enum in flattened file
+    // Note: Items might be nested in mods now. 
+    // Simplified scan for top-level or first match
+    fn find_item<'a>(items: &'a [Item], name: &str) -> Option<&'a Item> {
+        for item in items {
+            match item {
+                Item::Struct(s) if s.ident == name => return Some(item),
+                Item::Enum(e) if e.ident == name => return Some(item),
+                Item::Mod(m) => {
+                    if let Some((_, content)) = &m.content {
+                        if let Some(found) = find_item(content, name) {
+                            return Some(found);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    let item = find_item(&file.items, &args.cell)
         .context("Schema definition not found in file")?;
 
     let ast_string = item.to_token_stream().to_string();

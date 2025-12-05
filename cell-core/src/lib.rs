@@ -53,18 +53,21 @@ pub trait Transport: Send + Sync {
     fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + Send + '_>>;
 }
 
-/// Server-side: Message Receiver.
-/// Replaces Stream to support metadata and zero-copy guards.
-pub trait Receiver: Send + Sync {
-    /// Returns (Channel ID, Payload)
-    /// Payload is a Vesicle which might be zero-copy (holding a guard) or owned.
+/// Server-side: Zero-Copy Bidirectional Connection.
+/// Replaces Stream/Receiver to allow zero-copy reads via Vesicle.
+pub trait Connection: Send + Sync {
+    /// Receive a message (Channel ID, Payload).
+    /// Returns a Vesicle which may be zero-copy (Guarded).
     fn recv(&mut self) -> Pin<Box<dyn Future<Output = Result<(u8, Vesicle<'static>), TransportError>> + Send + '_>>;
+    
+    /// Send a response.
+    fn send(&mut self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + '_>>;
 }
 
 /// Server-side: Listener.
-/// Abstract factory for incoming Receivers.
+/// Abstract factory for incoming Connections.
 pub trait Listener: Send + Sync {
-    fn accept(&mut self) -> Pin<Box<dyn Future<Output = Result<Box<dyn Receiver>, TransportError>> + Send + '_>>;
+    fn accept(&mut self) -> Pin<Box<dyn Future<Output = Result<Box<dyn Connection>, TransportError>> + Send + '_>>;
 }
 
 /// A container for payload data (Vesicle).

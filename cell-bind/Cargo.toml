@@ -12,3 +12,4 @@ blake3 = "1.5"
 convert_case = "0.6"
 proc-macro2 = "1.0"
 dirs = "5.0"
+cell-build = { path = "../cell-build", version = "0.1.0" }

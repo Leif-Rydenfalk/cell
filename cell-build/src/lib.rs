@@ -62,12 +62,8 @@ impl CellBuilder {
             }
         }
 
-        // Use the shared flattening logic
         let file = load_and_flatten_source(&dna_path)?;
 
-        // ... Extraction and Generation Logic (Same as before) ...
-        // Re-implementing for completeness as requested
-        
         let mut proteins = Vec::new();
         let mut handler_impl = None;
         let mut service_struct_name = String::new();
@@ -200,7 +196,6 @@ impl CellBuilder {
     }
 }
 
-// Helpers
 fn visit_items_for_dna<'a>(
     items: &'a [Item], 
     proteins: &mut Vec<&'a Item>, 

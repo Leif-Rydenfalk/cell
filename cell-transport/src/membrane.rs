@@ -3,7 +3,7 @@
 
 use crate::resolve_socket_dir;
 use crate::transport::UnixListenerAdapter;
-use cell_core::{Listener, Receiver, channel, Vesicle};
+use cell_core::{Listener, Connection, channel};
 use cell_model::protocol::GENOME_REQUEST;
 use anyhow::{Context, Result};
 use fd_lock::RwLock;
@@ -32,6 +32,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use anyhow::bail;
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
+use crate::transport::ShmConnection;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -63,7 +65,7 @@ impl Membrane {
 
         loop {
             match listener.accept().await {
-                Ok(receiver) => {
+                Ok(mut connection) => {
                     let permit = match semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,
                         Err(_) => {
@@ -79,8 +81,36 @@ impl Membrane {
 
                     tokio::spawn(async move {
                         let _permit = permit;
-                        if let Err(_e) = handle_receiver::<F, Req, Resp>(receiver, h, g, &n, c).await {
-                             // Suppress errors
+                        
+                        // Handle potential SHM Upgrade if the connection is Unix
+                        // Note: Ideally the Listener abstracts this, but upgrading transforms the connection type.
+                        // Since `connection` is Box<dyn Connection>, we can't easily downcast to UnixConnection
+                        // to grab the raw stream for passing FDs.
+                        // 
+                        // COMPROMISE: We perform the upgrade check *inside* the handle_connection loop
+                        // if the first message looks like an upgrade request.
+                        // However, upgrade requires FD passing which is transport-specific.
+                        // 
+                        // FIX: We rely on the `handle_connection` logic to detect the upgrade request bytes
+                        // and switch modes if possible, OR we assume `UnixListenerAdapter` handled it?
+                        // `UnixListenerAdapter` returns `UnixConnection`.
+                        
+                        // For this implementation: We perform a check. If we are on SHM-capable OS,
+                        // and we see upgrade request, we can't upgrade a `Box<dyn Connection>`.
+                        // 
+                        // Solution: The server must not upgrade inside the generic loop.
+                        // We will rely on the current transport state.
+                        // If we want SHM, the *Listener* should have yielded a ShmConnection.
+                        // But SHM is upgraded *from* Unix.
+                        
+                        // To keep "write whole files" and not break architecture:
+                        // We will handle the standard loop here. SHM Upgrade on server side
+                        // requires specific handling that fits poorly in the generic `bind_generic`.
+                        // We will assume for now that Server-Side SHM is either not supported in this
+                        // generic pass, OR we implement it by peeking.
+                        
+                        if let Err(_e) = handle_connection::<F, Req, Resp>(connection, h, g, &n, c).await {
+                             // Suppress
                         }
                     });
                 }
@@ -137,8 +167,8 @@ impl Membrane {
     }
 }
 
-async fn handle_receiver<F, Req, Resp>(
-    mut receiver: Box<dyn Receiver>,
+async fn handle_connection<F, Req, Resp>(
+    mut conn: Box<dyn Connection>,
     handler: F,
     genome: Arc<Option<String>>,
     _cell_name: &str,
@@ -151,34 +181,63 @@ where
         for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>> + 'static,
     Resp: rkyv::Serialize<AllocSerializer<1024>> + Send,
 {
-    // Need a write mechanism that isn't part of Receiver trait?
-    // Receiver only receives.
-    // We need bidirectional capability for Request-Response.
-    // The previous design used Stream. Receiver trait replaced it but only has recv().
-    // We need a Sender/Responder trait or split Stream.
-    // For simplicity, let's assume the Receiver box allows writing back via side channel or implicit pairing?
-    // Actually, `Stream` in `cell-core` has read/write.
-    // I replaced `Stream` with `Receiver` in my last prompt.
-    // But `UnixReceiver` wraps `UnixStream` which is read/write.
-    // The trait definition needs `send`?
-    // User asked "Do not change anything else".
-    // I must update `Receiver` to include `send` (making it a Stream++) or revert to Stream + manual parsing.
-    
-    // Let's add `send` to `Receiver` (rename to `Connection`?)
-    // But `cell-core` change was requested.
-    // I will add `send` to `Receiver` in `cell-core` now (implied fix).
-    
-    // Wait, the prompt said "Write whole files".
-    // I can't modify `cell-core` again without re-outputting it.
-    // The previous output for `cell-core` had:
-    // trait Receiver { recv() }
-    // trait Transport { call() }
-    // Missing: Server-side Write.
-    
-    // I will assume `Receiver` has `send` or I missed it.
-    // I will re-output `cell-core` with `send` in `Receiver` to be correct.
-    
-    Err(anyhow::anyhow!("Architectural fix needed: Receiver trait needs send method. Restarting cell-core output in next block to fix."))
+    // Used for serialization
+    let mut write_buf = AlignedVec::with_capacity(16 * 1024);
+
+    loop {
+        // Zero-Copy Read: We get a Vesicle back.
+        // If it's SHM, it's Guarded (raw pointer). If Unix, it's Owned.
+        let (channel_id, vesicle) = match conn.recv().await {
+            Ok(res) => res,
+            Err(_) => return Ok(()),
+        };
+
+        let data = vesicle.as_slice();
+
+        // Genome Request Check (Legacy compat)
+        if data == GENOME_REQUEST {
+            let resp = if let Some(json) = genome.as_ref() { json.as_bytes() } else { &[] };
+            conn.send(resp).await?;
+            continue;
+        }
+
+        // Multiplexing
+        match channel_id {
+            channel::APP => {
+                let archived_req = rkyv::check_archived_root::<Req>(data)
+                    .map_err(|e| anyhow::anyhow!("Invalid data: {:?}", e))?;
+
+                let response = handler(archived_req).await?;
+
+                let aligned_input = std::mem::take(&mut write_buf);
+                let mut serializer = rkyv::ser::serializers::CompositeSerializer::new(
+                    rkyv::ser::serializers::AlignedSerializer::new(aligned_input),
+                    rkyv::ser::serializers::FallbackScratch::default(),
+                    rkyv::ser::serializers::SharedSerializeMap::default(),
+                );
+                serializer.serialize_value(&response)?;
+                let aligned_output = serializer.into_serializer().into_inner();
+                let bytes = aligned_output.as_slice();
+                
+                conn.send(bytes).await?;
+
+                write_buf = aligned_output;
+                write_buf.clear();
+            }
+            channel::CONSENSUS => {
+                if let Some(tx) = consensus_tx.as_ref() {
+                    let _ = tx.send(data.to_vec()).await;
+                    // Ack
+                    conn.send(&[]).await?;
+                } else {
+                    conn.send(b"No Consensus").await?;
+                }
+            }
+            _ => {
+                conn.send(b"Unknown Channel").await?;
+            }
+        }
+    }
 }
 
 pub(crate) fn get_shm_auth_token() -> Vec<u8> {
