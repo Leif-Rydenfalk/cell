@@ -68,8 +68,6 @@ pub enum Primitive {
     Bool,
 }
 
-// --- LIFECYCLE PROTOCOL (Mitosis) ---
-
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[archive(check_bytes)]
 pub enum MitosisRequest {

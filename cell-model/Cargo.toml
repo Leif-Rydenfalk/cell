@@ -9,6 +9,6 @@ std = ["rkyv/std", "serde/std"]
 alloc = []
 
 [dependencies]
+cell-core = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
-# Removed: anyhow, thiserror, dirs (OS dependencies)

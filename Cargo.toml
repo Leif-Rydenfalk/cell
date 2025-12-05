@@ -1,12 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
+    "cell-core",
+    "cell-codec",
     "cell-model",
     "cell-transport",
+    "cell-discovery",
     "cell-axon",
     "cell-process",
     "cell-sdk",
-    "cell-macros"
+    "cell-macros",
+    "cell-consensus"
 ]
 exclude = ["examples"]
 
@@ -19,18 +23,21 @@ repository = "https://github.com/Leif-Rydenfalk/cell"
 description = "A biological distributed supercomputing substrate."
 
 [workspace.dependencies]
+cell-core = { path = "./cell-core", version = "0.4.0" }
+cell-codec = { path = "./cell-codec", version = "0.4.0" }
 cell-model = { path = "./cell-model", version = "0.4.0" }
 cell-transport = { path = "./cell-transport", version = "0.4.0" }
+cell-discovery = { path = "./cell-discovery", version = "0.4.0" }
 cell-axon = { path = "./cell-axon", version = "0.4.0" }
 cell-process = { path = "./cell-process", version = "0.4.0" }
 cell-sdk = { path = "./cell-sdk", version = "0.4.0" }
 cell-macros = { path = "./cell-macros", version = "0.3.0" }
+cell-consensus = { path = "./cell-consensus", version = "0.3.0" }
 
-anyhow = "1.0"
+anyhow = { version = "1.0", default-features = false }
 thiserror = "1.0"
-serde = { version = "1.0", features = ["derive", "alloc"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = "1.0"
-# Added "validation" here
 rkyv = { version = "0.7", default-features = false, features = ["size_32", "alloc", "validation"] }
 tokio = { version = "1.36", features = ["full"] }
 tracing = "0.1"
@@ -51,3 +58,4 @@ users = "0.11"
 futures = "0.3"
 webpki-roots = "0.25"
 rustls-pemfile = "1.0"
+clap = { version = "4.5", features = ["derive"] }

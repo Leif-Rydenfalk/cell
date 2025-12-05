@@ -116,3 +116,29 @@ The SDK guarantees:
 3.  **Vectorized Writes:** We use `write_all` (or vectored equivalent) to minimize syscalls.
 
 If you see `malloc` in your flamegraph during a benchmark, it should be in **your business logic**, not the transport layer.
+
+---
+
+This is my first supercomputer substrate, I'm 17 hehe, can you tell me if this is the right api design: 
+
+#[protein]
+pub enum Asset { USD, BTC }
+
+#[service]
+struct LedgerService { ... }
+
+#[handler]
+impl LedgerService {
+    async fn deposit(&self, user: u64, asset: Asset, amount: u64) -> Result<u64> {
+        ...
+    }
+}
+
+---
+
+cell_remote!(Ledger = "ledger");
+
+let mut ledger = Ledger::connect().await?;
+let balance = ledger.deposit(42, Ledger::Asset::USD, 100).await??;
+
+personally I love it and it will be much more powerful in the future but its a good start? what do you think?

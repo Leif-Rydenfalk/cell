@@ -9,20 +9,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
+use cell_discovery::lan::{Signal, LanDiscovery};
 
 const PORT: u16 = 9099;
 
-#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
-#[archive(check_bytes)]
-pub struct Signal {
-    pub cell_name: String,
-    pub ip: String,
-    pub port: u16,
-    pub timestamp: u64,
-}
-
 pub struct PheromoneSystem {
-    cache: Arc<RwLock<HashMap<String, Vec<Signal>>>>, 
+    // cache: Arc<RwLock<HashMap<String, Vec<Signal>>>>, // Deprecated in favor of LanDiscovery
     socket: Arc<UdpSocket>,
     local_signals: Arc<RwLock<Vec<Signal>>>, 
 }
@@ -33,7 +25,6 @@ impl PheromoneSystem {
         socket.set_broadcast(true)?;
 
         let sys = Arc::new(Self {
-            cache: Arc::new(RwLock::new(HashMap::new())),
             socket: Arc::new(socket),
             local_signals: Arc::new(RwLock::new(Vec::new())),
         });
@@ -42,14 +33,12 @@ impl PheromoneSystem {
         tokio::spawn(async move {
             let mut buf = [0u8; 1024];
             loop {
-                // 1. Receive Data
                 let (len, addr) = match sys_clone.socket.recv_from(&mut buf).await {
                     Ok(res) => res,
                     Err(_) => continue,
                 };
 
-                // 2. Synchronous Parsing Scope
-                // Explicitly annotate type `Signal` here to satisfy the compiler
+                // Explicitly annotate type Signal
                 let sig: Signal = {
                     let archived = match rkyv::check_archived_root::<Signal>(&buf[..len]) {
                         Ok(a) => a,
@@ -62,7 +51,6 @@ impl PheromoneSystem {
                     }
                 };
 
-                // 3. Async Logic
                 if let Ok(my_ip) = sys_clone.socket.local_addr() {
                     if addr.ip() == my_ip.ip() {
                         continue;
@@ -86,18 +74,8 @@ impl PheromoneSystem {
                         }
                     }
                 } else {
-                    // Advertisement
-                    crate::discovery::LanDiscovery::global()
-                        .update(sig.clone())
-                        .await;
-
-                    sys_clone
-                        .cache
-                        .write()
-                        .await
-                        .entry(sig.cell_name.clone())
-                        .or_insert_with(Vec::new)
-                        .push(sig);
+                    // Advertisement - Update Global Discovery
+                    LanDiscovery::global().update(sig.clone()).await;
                 }
             }
         });
@@ -141,18 +119,11 @@ impl PheromoneSystem {
 
     async fn broadcast_to_all_interfaces(&self, bytes: &[u8]) -> Result<()> {
         let interfaces = if_addrs::get_if_addrs()?;
-
         for iface in interfaces {
-            if iface.is_loopback() {
-                continue;
-            }
-
+            if iface.is_loopback() { continue; }
             match iface.addr {
                 if_addrs::IfAddr::V4(v4_addr) => {
-                    let broadcast = v4_addr
-                        .broadcast
-                        .unwrap_or_else(|| Ipv4Addr::new(255, 255, 255, 255));
-
+                    let broadcast = v4_addr.broadcast.unwrap_or_else(|| Ipv4Addr::new(255, 255, 255, 255));
                     let target = SocketAddr::new(IpAddr::V4(broadcast), PORT);
                     let _ = self.socket.send_to(bytes, target).await;
                 }
@@ -171,7 +142,6 @@ impl PheromoneSystem {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
-
                 let signals = sys.local_signals.read().await.clone();
                 for sig in signals {
                     if let Ok(bytes) = rkyv::to_bytes::<_, 256>(&sig) {
@@ -182,22 +152,10 @@ impl PheromoneSystem {
         });
     }
 
-    pub async fn lookup(&self, cell_name: &str) -> Option<Signal> {
-        self.cache
-            .read()
-            .await
-            .get(cell_name)
-            .and_then(|v| v.first())
-            .cloned()
-    }
-
     pub async fn lookup_all(&self, cell_name: &str) -> Vec<Signal> {
-        self.cache
-            .read()
-            .await
-            .get(cell_name)
-            .cloned()
-            .unwrap_or_default()
+        // Now queries the global discovery
+        let all = LanDiscovery::global().all().await;
+        all.into_iter().filter(|s| s.cell_name == cell_name).collect()
     }
 }
 
@@ -205,31 +163,8 @@ fn get_best_local_ip() -> String {
     if let Ok(ip) = std::env::var("CELL_IP") {
         return ip;
     }
-
     if let Ok(ip) = local_ip_address::local_ip() {
         return ip.to_string();
     }
-
-    if let Ok(interfaces) = if_addrs::get_if_addrs() {
-        for iface in interfaces {
-            if iface.is_loopback() {
-                continue;
-            }
-
-            if let if_addrs::IfAddr::V4(v4_addr) = iface.addr {
-                let ip = v4_addr.ip;
-
-                if ip.octets()[0] == 172 && ip.octets()[1] == 17 {
-                    continue;
-                }
-                if ip.octets()[0] == 169 && ip.octets()[1] == 254 {
-                    continue;
-                }
-
-                return ip.to_string();
-            }
-        }
-    }
-
     "127.0.0.1".to_string()
 }

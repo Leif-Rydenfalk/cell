@@ -11,6 +11,7 @@ use std::os::unix::io::AsRawFd;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::time::Duration;
 
 pub type ShmSerializer = AllocSerializer<1024>;
 
@@ -95,7 +96,7 @@ impl RingBuffer {
         use nix::sys::stat::Mode;
         use nix::unistd::ftruncate;
         use std::ffi::CString;
-        use std::os::unix::io::FromRawFd;
+        use std::os::unix::io::AsRawFd;
 
         let unique_name = format!("/{}_{}", name, rand::random::<u32>());
         let name_cstr = CString::new(unique_name)?;
@@ -213,6 +214,28 @@ impl RingBuffer {
         T::Archived:
             rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
+        // This method is for typed reading using ShmMessage wrapper
+        // Re-uses logic from try_read_raw but casts.
+        if let Some(raw) = self.try_read_raw() {
+            let archived_ref = unsafe {
+                // We trust the raw read logic provided a valid slice for the epoch
+                match rkyv::check_archived_root::<T>(raw.data) {
+                    Ok(a) => a,
+                    Err(_) => return None, // Should ideally invalidate slot, but SlotToken handles cleanup
+                }
+            };
+            let archived_static: &'static T::Archived = unsafe { std::mem::transmute(archived_ref) };
+            Some(ShmMessage {
+                archived: archived_static,
+                _token: raw._token,
+                _phantom: PhantomData,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn try_read_raw(&self) -> Option<RawShmMessage> {
         let read = unsafe { (*self.control).read_pos.load(Ordering::Acquire) };
         let write = unsafe { (*self.control).write_pos.load(Ordering::Acquire) };
 
@@ -274,28 +297,17 @@ impl RingBuffer {
         };
 
         let data_ptr = unsafe { self.data.add(data_offset) };
-        let archived_ref = unsafe {
-            let slice = std::slice::from_raw_parts(data_ptr, data_len as usize);
-            match rkyv::check_archived_root::<T>(slice) {
-                Ok(a) => a,
-                Err(_) => {
-                    header.refcount.store(0, Ordering::Release);
-                    return None;
-                }
-            }
-        };
+        
+        let slice = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
 
         let token = Arc::new(SlotToken {
             ring: self,
             total_consumed: actual_consumed,
         });
 
-        let archived_static: &'static T::Archived = unsafe { std::mem::transmute(archived_ref) };
-
-        Some(ShmMessage {
-            archived: archived_static,
+        Some(RawShmMessage {
+            data: slice,
             _token: token,
-            _phantom: PhantomData,
         })
     }
 
@@ -309,7 +321,6 @@ impl RingBuffer {
             if spin < 10000 {
                 std::hint::spin_loop();
             } else {
-                // Fixed: Explicit tokio usage
                 #[cfg(feature = "std")]
                 tokio::time::sleep(std::time::Duration::from_nanos(100)).await;
                 spin = 0;
@@ -366,6 +377,14 @@ impl Drop for SlotToken {
     }
 }
 
+pub struct RawShmMessage {
+    data: &'static [u8],
+    _token: Arc<SlotToken>,
+}
+impl RawShmMessage {
+    pub fn get_bytes(&self) -> &[u8] { self.data }
+}
+
 pub struct ShmMessage<T: Archive>
 where
     <T as Archive>::Archived: 'static,
@@ -383,7 +402,7 @@ where
         self.archived
     }
 
-    pub fn deserialize(&self) -> Result<T, rkyv::de::deserializers::SharedDeserializeMapError>
+    pub fn deserialize(&self) -> anyhow::Result<T, rkyv::de::deserializers::SharedDeserializeMapError>
     where
         T::Archived: Deserialize<T, rkyv::de::deserializers::SharedDeserializeMap>,
     {
@@ -418,23 +437,15 @@ impl ShmClient {
         Self { tx, rx }
     }
 
-    pub async fn request<Req, Resp>(&self, req: &Req) -> anyhow::Result<ShmMessage<Resp>>
-    where
-        Req: Serialize<ShmSerializer>,
-        Resp: Archive,
-        Resp::Archived:
-            rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
-    {
-        let bytes = rkyv::to_bytes::<_, 1024>(req)?.into_vec();
-        let size = bytes.len();
-
+    pub async fn request_raw(&self, req_bytes: &[u8]) -> anyhow::Result<RawShmMessage> {
+        let size = req_bytes.len();
         let mut slot = self.tx.wait_for_slot(size).await;
-        slot.write(&bytes);
+        slot.write(req_bytes);
         slot.commit(size);
 
         let mut spin = 0u32;
         loop {
-            if let Some(msg) = self.rx.try_read::<Resp>() {
+            if let Some(msg) = self.rx.try_read_raw() {
                 return Ok(msg);
             }
             spin += 1;
@@ -446,5 +457,31 @@ impl ShmClient {
                 spin = 0;
             }
         }
+    }
+
+    pub async fn request<Req, Resp>(&self, req: &Req) -> anyhow::Result<ShmMessage<Resp>>
+    where
+        Req: Serialize<ShmSerializer>,
+        Resp: Archive,
+        Resp::Archived:
+            rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
+    {
+        // Optimized path for typed clients that avoids the Vec<u8> copy of Transport trait
+        let bytes = rkyv::to_bytes::<_, 1024>(req)?.into_vec();
+        let msg = self.request_raw(&bytes).await?;
+        
+        let archived_ref = unsafe {
+             match rkyv::check_archived_root::<Resp>(msg.data) {
+                Ok(a) => a,
+                Err(_) => anyhow::bail!("SHM validation failed"),
+            }
+        };
+        let archived_static: &'static Resp::Archived = unsafe { std::mem::transmute(archived_ref) };
+
+        Ok(ShmMessage {
+            archived: archived_static,
+            _token: msg._token,
+            _phantom: PhantomData,
+        })
     }
 }

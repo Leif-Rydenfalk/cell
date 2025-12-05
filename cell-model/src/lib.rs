@@ -5,14 +5,14 @@
 
 extern crate alloc;
 
-pub mod vesicle;
+// We re-export Vesicle from Core to maintain API compatibility
+pub use cell_core::Vesicle;
+
 pub mod protocol;
 pub mod error;
 
-pub use vesicle::Vesicle;
 pub use protocol::*;
 pub use error::Error;
 
-// Re-export for macros/dependencies
 pub use rkyv;
 pub use serde;

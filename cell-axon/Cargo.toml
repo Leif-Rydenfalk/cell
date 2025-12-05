@@ -4,7 +4,9 @@ version = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+cell-core = { workspace = true }
 cell-model = { workspace = true }
+cell-discovery = { workspace = true }
 tokio = { workspace = true }
 quinn = "0.10"
 rustls = { version = "0.21", features = ["quic", "dangerous_configuration"] }

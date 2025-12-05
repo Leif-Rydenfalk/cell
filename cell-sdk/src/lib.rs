@@ -3,19 +3,28 @@
 
 extern crate self as cell_sdk;
 
-pub use cell_model::*;
-pub use cell_model::vesicle::Vesicle;
+// Core types
+pub use cell_core::*;
 
+// Model types (Protocol, Vesicle alias)
+pub use cell_model::*;
+// Explicitly re-export Vesicle from model to ensure macro compatibility
+pub use cell_model::Vesicle;
+
+// Macros
 pub use cell_macros::{cell_remote, handler, protein, service};
 
+// Transports and Runtime
 #[cfg(feature = "transport")]
 pub use cell_transport::{Membrane, Synapse, ShmClient, resolve_socket_dir};
 
 #[cfg(feature = "axon")]
-pub use cell_axon::{AxonServer, AxonClient, LanDiscovery};
+pub use cell_axon::{AxonServer, AxonClient};
 
 #[cfg(feature = "process")]
 pub use cell_process::{MyceliumRoot};
+
+pub use cell_discovery::{Discovery, LanDiscovery};
 
 pub use rkyv;
 pub use serde;

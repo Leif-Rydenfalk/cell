@@ -5,7 +5,6 @@ edition = { workspace = true }
 
 [dependencies]
 cell-model = { workspace = true }
-# Needed to resolve socket path
 cell-transport = { workspace = true, features = ["std"] }
 tokio = { workspace = true }
 anyhow = { workspace = true }

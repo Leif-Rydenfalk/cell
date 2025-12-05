@@ -1,0 +1,8 @@
+[package]
+name = "cell-codec"
+version = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+cell-core = { workspace = true }
+rkyv = { workspace = true }

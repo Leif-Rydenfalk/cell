@@ -72,6 +72,7 @@ impl MyceliumRoot {
         let mut buf = vec![0u8; len];
         stream.read_exact(&mut buf).await?;
 
+        // Note: Using cell-model logic here
         let req = cell_model::rkyv::check_archived_root::<MitosisRequest>(&buf)
             .map_err(|e| anyhow::anyhow!("Invalid Protocol: {}", e))?;
 

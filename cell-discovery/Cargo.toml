@@ -1,0 +1,13 @@
+[package]
+name = "cell-discovery"
+version = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+cell-core = { workspace = true }
+cell-model = { workspace = true }
+rkyv = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["fs", "net", "sync", "time"] }
+dirs = { workspace = true }
+tracing = { workspace = true }

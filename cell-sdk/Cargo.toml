@@ -14,11 +14,13 @@ process = ["dep:cell-process"]
 axon = ["dep:cell-axon"]
 
 [dependencies]
+cell-core = { workspace = true }
 cell-model = { workspace = true }
 cell-macros = { workspace = true }
 cell-transport = { workspace = true, optional = true, features = ["std"] }
 cell-axon = { workspace = true, optional = true }
 cell-process = { workspace = true, optional = true }
+cell-discovery = { workspace = true }
 
 # Re-exports
 serde = { workspace = true }
