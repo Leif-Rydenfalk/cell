@@ -2,7 +2,7 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -12,7 +12,8 @@ use tokio::sync::RwLock;
 
 const PORT: u16 = 9099;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+#[archive(check_bytes)]
 pub struct Signal {
     pub cell_name: String,
     pub ip: String,
@@ -41,43 +42,62 @@ impl PheromoneSystem {
         tokio::spawn(async move {
             let mut buf = [0u8; 1024];
             loop {
-                if let Ok((len, addr)) = sys_clone.socket.recv_from(&mut buf).await {
-                    if let Ok(sig) = serde_json::from_slice::<Signal>(&buf[..len]) {
-                        if let Ok(my_ip) = sys_clone.socket.local_addr() {
-                            if addr.ip() == my_ip.ip() {
-                                continue;
+                // 1. Receive Data
+                let (len, addr) = match sys_clone.socket.recv_from(&mut buf).await {
+                    Ok(res) => res,
+                    Err(_) => continue,
+                };
+
+                // 2. Synchronous Parsing Scope
+                // Explicitly annotate type `Signal` here to satisfy the compiler
+                let sig: Signal = {
+                    let archived = match rkyv::check_archived_root::<Signal>(&buf[..len]) {
+                        Ok(a) => a,
+                        Err(_) => continue, 
+                    };
+                    
+                    match archived.deserialize(&mut rkyv::Infallible) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    }
+                };
+
+                // 3. Async Logic
+                if let Ok(my_ip) = sys_clone.socket.local_addr() {
+                    if addr.ip() == my_ip.ip() {
+                        continue;
+                    }
+                }
+
+                if sig.port == 0 {
+                    // Query Request
+                    let local = sys_clone.local_signals.read().await;
+                    for my_sig in local.iter() {
+                        if my_sig.cell_name != sig.cell_name {
+                            let mut reply = my_sig.clone();
+                            reply.timestamp = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+
+                            if let Ok(bytes) = rkyv::to_bytes::<_, 256>(&reply) {
+                                let _ = sys_clone.socket.send_to(&bytes, addr).await;
                             }
-                        }
-
-                        if sig.port == 0 {
-                            let local = sys_clone.local_signals.read().await;
-                            for my_sig in local.iter() {
-                                if my_sig.cell_name != sig.cell_name {
-                                    let mut reply = my_sig.clone();
-                                    reply.timestamp = SystemTime::now()
-                                        .duration_since(UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_secs();
-
-                                    if let Ok(bytes) = serde_json::to_vec(&reply) {
-                                        let _ = sys_clone.socket.send_to(&bytes, addr).await;
-                                    }
-                                }
-                            }
-                        } else {
-                            crate::discovery::LanDiscovery::global()
-                                .update(sig.clone())
-                                .await;
-
-                            sys_clone
-                                .cache
-                                .write()
-                                .await
-                                .entry(sig.cell_name.clone())
-                                .or_insert_with(Vec::new)
-                                .push(sig);
                         }
                     }
+                } else {
+                    // Advertisement
+                    crate::discovery::LanDiscovery::global()
+                        .update(sig.clone())
+                        .await;
+
+                    sys_clone
+                        .cache
+                        .write()
+                        .await
+                        .entry(sig.cell_name.clone())
+                        .or_insert_with(Vec::new)
+                        .push(sig);
                 }
             }
         });
@@ -92,7 +112,7 @@ impl PheromoneSystem {
             port: 0,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         };
-        let bytes = serde_json::to_vec(&sig)?;
+        let bytes = rkyv::to_bytes::<_, 256>(&sig)?;
         self.broadcast_to_all_interfaces(&bytes).await
     }
 
@@ -110,7 +130,7 @@ impl PheromoneSystem {
             local.push(sig.clone());
         }
 
-        let bytes = serde_json::to_vec(&sig)?;
+        let bytes = rkyv::to_bytes::<_, 256>(&sig)?;
         self.broadcast_to_all_interfaces(&bytes).await
     }
 
@@ -136,7 +156,7 @@ impl PheromoneSystem {
                     let target = SocketAddr::new(IpAddr::V4(broadcast), PORT);
                     let _ = self.socket.send_to(bytes, target).await;
                 }
-                if_addrs::IfAddr::V6(_v6_addr) => { // Prefix with underscore
+                if_addrs::IfAddr::V6(_v6_addr) => {
                     let multicast = std::net::Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
                     let target = SocketAddr::new(IpAddr::V6(multicast), PORT);
                     let _ = self.socket.send_to(bytes, target).await;
@@ -154,7 +174,7 @@ impl PheromoneSystem {
 
                 let signals = sys.local_signals.read().await.clone();
                 for sig in signals {
-                    if let Ok(bytes) = serde_json::to_vec(&sig) {
+                    if let Ok(bytes) = rkyv::to_bytes::<_, 256>(&sig) {
                         let _ = sys.broadcast_to_all_interfaces(&bytes).await;
                     }
                 }
