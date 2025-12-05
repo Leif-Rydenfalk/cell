@@ -2,8 +2,10 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use alloc::vec::Vec;
-use core::marker::PhantomData;
 use core::ops::Deref;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use core::marker::PhantomData;
 
 /// A container for payload data.
 pub enum Vesicle<'a> {
@@ -11,13 +13,14 @@ pub enum Vesicle<'a> {
     Owned(Vec<u8>),
 
     /// Zero-copy reference (e.g. Ring Buffer or Direct DMA)
-    /// This variant is valid in no_std if the transport provides a slice
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Borrowed(&'a [u8]),
 
     /// Fallback
     Empty,
 
-    /// Ensures the lifetime parameter is used
+    /// Ensures the lifetime parameter is used on platforms without SHM
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     _Phantom(PhantomData<&'a ()>),
 }
 
@@ -33,8 +36,10 @@ impl<'a> Vesicle<'a> {
     pub fn as_slice(&self) -> &[u8] {
         match self {
             Self::Owned(vec) => vec.as_slice(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::Borrowed(slice) => slice,
             Self::Empty => &[],
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             Self::_Phantom(_) => &[],
         }
     }

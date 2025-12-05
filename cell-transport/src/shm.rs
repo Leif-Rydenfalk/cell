@@ -6,7 +6,7 @@ use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::fs::File;
 use std::marker::PhantomData;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::io::AsRawFd;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -89,7 +89,53 @@ impl RingBuffer {
         ))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "macos")]
+    pub fn create(name: &str) -> anyhow::Result<(Arc<Self>, std::os::unix::io::RawFd)> {
+        use nix::sys::mman::{shm_open, shm_unlink, ShmOFlag};
+        use nix::sys::stat::Mode;
+        use nix::unistd::ftruncate;
+        use std::ffi::CString;
+        use std::os::unix::io::FromRawFd;
+
+        let unique_name = format!("/{}_{}", name, rand::random::<u32>());
+        let name_cstr = CString::new(unique_name)?;
+
+        // Pass as &CStr
+        let owned_fd = shm_open(
+            name_cstr.as_c_str(),
+            ShmOFlag::O_CREAT | ShmOFlag::O_RDWR | ShmOFlag::O_EXCL,
+            Mode::S_IRUSR | Mode::S_IWUSR,
+        )?;
+
+        // Unlink using &CStr
+        let _ = shm_unlink(name_cstr.as_c_str());
+
+        // Set size
+        ftruncate(&owned_fd, RING_SIZE as i64)?;
+
+        // Wrap in File (OwnedFd converts directly)
+        let file = File::from(owned_fd);
+        let raw_fd = file.as_raw_fd();
+
+        let mut mmap = unsafe { MmapMut::map_mut(&file)? };
+        mmap[..DATA_OFFSET + 4096].fill(0);
+
+        let control = mmap.as_mut_ptr() as *mut RingControl;
+        let data = unsafe { mmap.as_mut_ptr().add(DATA_OFFSET) };
+
+        Ok((
+            Arc::new(Self {
+                control,
+                data,
+                capacity: DATA_CAPACITY,
+                _mmap: mmap,
+                _file: Some(file),
+            }),
+            raw_fd,
+        ))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub unsafe fn attach(fd: std::os::unix::io::RawFd) -> anyhow::Result<Arc<Self>> {
         use std::os::unix::io::FromRawFd;
         let owned_fd = std::os::unix::io::OwnedFd::from_raw_fd(fd);
@@ -263,6 +309,8 @@ impl RingBuffer {
             if spin < 10000 {
                 std::hint::spin_loop();
             } else {
+                // Fixed: Explicit tokio usage
+                #[cfg(feature = "std")]
                 tokio::time::sleep(std::time::Duration::from_nanos(100)).await;
                 spin = 0;
             }
@@ -393,6 +441,7 @@ impl ShmClient {
             if spin < 10000 {
                 std::hint::spin_loop();
             } else {
+                #[cfg(feature = "std")]
                 tokio::time::sleep(std::time::Duration::from_nanos(100)).await;
                 spin = 0;
             }

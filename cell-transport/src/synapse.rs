@@ -18,11 +18,11 @@ use socket2::SockRef;
 #[cfg(feature = "axon")]
 use cell_axon::AxonClient;
 
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use crate::shm::{ShmClient, RingBuffer, ShmSerializer};
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use std::os::unix::io::AsRawFd;
 
 const SOCKET_BUFFER_SIZE: usize = 8 * 1024 * 1024;
@@ -30,7 +30,7 @@ const SOCKET_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 enum Transport {
     Socket(UnixStream),
     
-    #[cfg(all(feature = "shm", target_os = "linux"))]
+    #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
     SharedMemory {
         client: ShmClient,
         _socket: UnixStream,
@@ -112,13 +112,11 @@ impl Synapse {
     pub async fn fire<'a, Req, Resp>(&'a mut self, request: &Req) -> Result<Response<'a, Resp>>
     where
         Req: Serialize<AllocSerializer<1024>>,
-        // Conditional bounds hack for SHM
-        // Req: Serialize<ShmSerializer> is only needed if shm enabled
         Resp: Archive + 'a,
         Resp::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
         // Try SHM Upgrade
-        #[cfg(all(feature = "shm", target_os = "linux"))]
+        #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
         if !self.upgrade_attempted {
             self.upgrade_attempted = true;
             if let Transport::Socket(_) = self.transport {
@@ -140,12 +138,8 @@ impl Synapse {
             match transport {
                 Transport::Socket(stream) => Self::fire_via_socket(r_buf, w_buf, stream, request).await,
                 
-                #[cfg(all(feature = "shm", target_os = "linux"))]
+                #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
                 Transport::SharedMemory { client, .. } => {
-                    // We must serialize using ShmSerializer here. 
-                    // To keep the trait bounds simple in the signature above, we perform a trick:
-                    // Since ShmSerializer is type aliased to AllocSerializer<1024>, they are actually the SAME type.
-                    // So Req already implements it.
                     let msg = client.request::<Req, Resp>(request).await?;
                     Ok(Response::ZeroCopy(msg))
                 },
@@ -211,7 +205,7 @@ impl Synapse {
         Ok(Response::Borrowed(read_buffer))
     }
 
-    #[cfg(all(feature = "shm", target_os = "linux"))]
+    #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
     async fn try_upgrade_to_shm(&mut self) -> Result<()> {
         let stream = match &mut self.transport {
             Transport::Socket(s) => s,
@@ -230,7 +224,6 @@ impl Synapse {
         let mut challenge = [0u8; 32];
         stream.read_exact(&mut challenge).await?;
         
-        // We need to access get_shm_auth_token from membrane module
         let auth_token = crate::membrane::get_shm_auth_token();
         let response = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
         stream.write_all(response.as_bytes()).await?;
@@ -270,7 +263,7 @@ impl Synapse {
     }
 }
 
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 fn recv_fds(socket_fd: std::os::unix::io::RawFd) -> Result<Vec<std::os::unix::io::RawFd>> {
     use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
     use std::io::IoSliceMut;

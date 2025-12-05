@@ -22,15 +22,15 @@ use rkyv::ser::serializers::AllocSerializer;
 #[cfg(feature = "axon")]
 use cell_axon::AxonServer;
 
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use crate::shm::{RingBuffer, ShmMessage, ShmSerializer};
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use std::os::unix::io::AsRawFd;
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use anyhow::bail;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -144,7 +144,7 @@ where
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("Failed to bind socket at {:?}", socket_path))?;
 
-    #[cfg(all(feature = "shm", target_os = "linux"))]
+    #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
     {
         let perm = std::fs::Permissions::from_mode(0o600);
         std::fs::set_permissions(&socket_path, perm)?;
@@ -237,7 +237,7 @@ where
             continue;
         }
 
-        #[cfg(all(feature = "shm", target_os = "linux"))]
+        #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
         if read_buf == SHM_UPGRADE_REQUEST {
             if std::env::var("CELL_DISABLE_SHM").is_ok() {
                 stream.write_all(&0u32.to_le_bytes()).await?;
@@ -245,7 +245,7 @@ where
             }
             return handle_shm_upgrade::<F, Req, Resp>(stream, handler, _cell_name).await;
         }
-        #[cfg(not(all(feature = "shm", target_os = "linux")))]
+        #[cfg(not(all(feature = "shm", any(target_os = "linux", target_os = "macos"))))]
         if read_buf == cell_model::protocol::SHM_UPGRADE_REQUEST {
              stream.write_all(&0u32.to_le_bytes()).await?;
              continue;
@@ -308,7 +308,7 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
         
         let new_token: [u8; 32] = rand::random();
         if std::fs::write(&token_path, &new_token).is_ok() {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
             {
                 use std::os::unix::fs::PermissionsExt;
                 let perms = std::fs::Permissions::from_mode(0o600);
@@ -318,13 +318,12 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
         }
     }
     
-    // Fallback: This is risky on shared systems but fine for MVP
     let uid = users::get_current_uid();
     blake3::hash(&uid.to_le_bytes()).as_bytes().to_vec()
 }
 
 
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 async fn handle_shm_upgrade<F, Req, Resp>(
     mut stream: UnixStream,
     handler: F,
@@ -374,7 +373,7 @@ where
     serve_zero_copy::<F, Req, Resp>(rx_ring, tx_ring, handler).await
 }
 
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 async fn serve_zero_copy<F, Req, Resp>(
     rx: Arc<RingBuffer>,
     tx: Arc<RingBuffer>,
@@ -416,7 +415,7 @@ where
     }
 }
 
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 fn send_fds(socket_fd: std::os::unix::io::RawFd, fds: &[std::os::unix::io::RawFd]) -> Result<()> {
     use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
     use std::io::IoSlice;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-#[cfg(all(feature = "shm", target_os = "linux"))]
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use crate::shm::ShmMessage;
 use rkyv::{Archive, Deserialize};
 use std::marker::PhantomData;
@@ -14,10 +14,10 @@ where
     Owned(Vec<u8>),
     Borrowed(&'a [u8]),
     
-    #[cfg(all(feature = "shm", target_os = "linux"))]
+    #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
     ZeroCopy(ShmMessage<T>),
     
-    #[cfg(not(all(feature = "shm", target_os = "linux")))]
+    #[cfg(not(all(feature = "shm", any(target_os = "linux", target_os = "macos"))))]
     _Phantom(PhantomData<&'a T>),
 }
 
@@ -50,10 +50,10 @@ where
             Response::Owned(bytes) => validate_root::<T>(bytes, "Response::get"),
             Response::Borrowed(bytes) => validate_root::<T>(bytes, "Response::get"),
             
-            #[cfg(all(feature = "shm", target_os = "linux"))]
+            #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
             Response::ZeroCopy(msg) => Ok(msg.get()),
             
-            #[cfg(not(all(feature = "shm", target_os = "linux")))]
+            #[cfg(not(all(feature = "shm", any(target_os = "linux", target_os = "macos"))))]
             Response::_Phantom(_) => anyhow::bail!("Invalid state"),
         }
     }

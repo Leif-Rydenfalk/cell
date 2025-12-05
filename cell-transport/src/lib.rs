@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-// Modules are gated to allow compilation on bare metal
 #[cfg(feature = "shm")]
 pub mod shm;
 
@@ -33,6 +32,7 @@ pub fn resolve_socket_dir() -> std::path::PathBuf {
     if container_dir.exists() {
         return container_dir.to_path_buf();
     }
+    // Using dirs crate which must be in Cargo.toml
     if let Some(home) = dirs::home_dir() {
         return home.join(".cell/run");
     }

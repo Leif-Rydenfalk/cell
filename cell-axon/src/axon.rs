@@ -4,10 +4,9 @@
 use crate::pheromones::PheromoneSystem;
 use cell_model::protocol::GENOME_REQUEST;
 use anyhow::{Result};
-// Fixed: Use cell_model::rkyv
 use cell_model::rkyv::ser::serializers::AllocSerializer;
 use cell_model::rkyv::{self, Archive, Serialize};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr}; // Added Ipv6Addr
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;

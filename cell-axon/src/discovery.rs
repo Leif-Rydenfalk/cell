@@ -3,7 +3,6 @@
 
 use crate::pheromones::Signal;
 use cell_model::protocol::GENOME_REQUEST;
-use cell_model::resolve_socket_dir;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -189,4 +188,18 @@ async fn scan_local_sockets() -> Vec<String> {
         }
     }
     names
+}
+
+fn resolve_socket_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
+        return PathBuf::from(p);
+    }
+    let container_dir = std::path::Path::new("/tmp/cell");
+    if container_dir.exists() {
+        return container_dir.to_path_buf();
+    }
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".cell/run");
+    }
+    PathBuf::from("/tmp/cell")
 }

@@ -30,7 +30,8 @@ anyhow = "1.0"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive", "alloc"] }
 serde_json = "1.0"
-rkyv = { version = "0.7", default-features = false, features = ["size_32", "alloc"] }
+# Added "validation" here
+rkyv = { version = "0.7", default-features = false, features = ["size_32", "alloc", "validation"] }
 tokio = { version = "1.36", features = ["full"] }
 tracing = "0.1"
 bytes = "1.5"

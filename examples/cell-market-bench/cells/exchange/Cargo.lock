@@ -195,6 +195,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "cell-model",
+ "dirs",
  "futures",
  "if-addrs",
  "local-ip-address",
@@ -227,11 +228,8 @@ dependencies = [
 name = "cell-model"
 version = "0.4.0"
 dependencies = [
- "anyhow",
- "dirs",
  "rkyv",
  "serde",
- "thiserror",
 ]
 
 [[package]]
@@ -241,6 +239,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "cell-model",
+ "cell-transport",
  "dirs",
  "fd-lock",
  "tokio",
@@ -272,16 +271,10 @@ dependencies = [
  "blake3",
  "cell-axon",
  "cell-model",
- "dirs",
- "fd-lock",
  "memmap2",
  "nix",
- "quinn",
  "rand",
  "rkyv",
- "socket2 0.5.10",
- "tokio",
- "tracing",
 ]
 
 [[package]]
