@@ -23,6 +23,9 @@ pub use cell_discovery::{Discovery, LanDiscovery};
 pub mod runtime;
 pub use runtime::Runtime;
 
+pub mod config;
+pub use config::CellConfig;
+
 #[cfg(feature = "consensus")]
 pub use cell_consensus;
 

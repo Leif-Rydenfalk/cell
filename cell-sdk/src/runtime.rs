@@ -4,6 +4,7 @@
 use anyhow::{Result, Context};
 use cell_transport::{Membrane, Synapse};
 use cell_model::protocol::CellGenome;
+use crate::config::CellConfig;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, error};
@@ -26,6 +27,10 @@ impl Runtime {
         Req::Archived: for<'a> cell_model::rkyv::CheckBytes<cell_model::rkyv::validation::validators::DefaultValidator<'a>> + 'static,
         Resp: cell_model::rkyv::Serialize<cell_model::rkyv::ser::serializers::AllocSerializer<1024>> + Send + 'static,
     {
+        // 0. Load Configuration
+        let config = CellConfig::from_env(name).context("Failed to load Cell configuration")?;
+        info!("[Runtime] Booting Cell '{}' (Node {})", name, config.node_id);
+
         #[cfg(feature = "axon")]
         let _ = cell_axon::PheromoneSystem::ignite().await?;
 
@@ -35,19 +40,14 @@ impl Runtime {
                 info!("[Runtime] Initializing Consensus Layer...");
                 let (tx, rx) = mpsc::channel(1000);
                 
-                let node_id = std::env::var("CELL_NODE_ID").unwrap_or("1".into()).parse().unwrap_or(1);
-                let storage_path = cell_discovery::resolve_socket_dir().join(format!("{}.wal", name));
-                let peers_str = std::env::var("CELL_PEERS").unwrap_or_default();
-                let peers = peers_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
-
-                let config = RaftConfig {
-                    id: node_id,
-                    storage_path,
-                    peers,
+                let raft_config = RaftConfig {
+                    id: config.node_id,
+                    storage_path: config.raft_storage_path.ok_or_else(|| anyhow::anyhow!("Raft storage path not configured"))?,
+                    peers: config.peers,
                 };
 
                 tokio::spawn(async move {
-                    if let Err(e) = RaftNode::ignite(config, sm, rx).await {
+                    if let Err(e) = RaftNode::ignite(raft_config, sm, rx).await {
                         error!("[Runtime] Raft died: {}", e);
                     }
                 });

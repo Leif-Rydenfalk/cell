@@ -38,9 +38,13 @@ pub fn load_and_flatten_source(entry_path: &Path) -> Result<File> {
 
 impl CellBuilder {
     pub fn configure() -> Self {
+        // Auto-detection logic for "Industrial One-Liner" support
+        let cell_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "unknown".to_string());
+        let source_path = PathBuf::from(".");
+        
         Self {
-            cell_name: "unknown".to_string(),
-            source_path: PathBuf::from("."),
+            cell_name,
+            source_path,
         }
     }
 
@@ -51,18 +55,23 @@ impl CellBuilder {
     }
 
     pub fn generate(self) -> Result<()> {
-        let out_dir = std::env::var("OUT_DIR").context("OUT_DIR not set")?;
+        // Ensure OUT_DIR exists
+        let out_dir = std::env::var("OUT_DIR").context("OUT_DIR not set. Are you running this from build.rs?")?;
         let dest_path = Path::new(&out_dir).join(format!("{}_client.rs", self.cell_name));
 
         let dna_path = self.source_path.join("src/main.rs");
-        if !dna_path.exists() {
+        let entry_point = if dna_path.exists() {
+            dna_path
+        } else {
             let lib_path = self.source_path.join("src/lib.rs");
             if !lib_path.exists() {
-                bail!("DNA entry point not found at {:?}", self.source_path);
+                bail!("DNA entry point (src/main.rs or src/lib.rs) not found at {:?}", self.source_path);
             }
-        }
+            lib_path
+        };
 
-        let file = load_and_flatten_source(&dna_path)?;
+        // Flatten source
+        let file = load_and_flatten_source(&entry_point)?;
 
         let mut proteins = Vec::new();
         let mut handler_impl = None;
@@ -196,6 +205,7 @@ impl CellBuilder {
     }
 }
 
+// Helpers
 fn visit_items_for_dna<'a>(
     items: &'a [Item], 
     proteins: &mut Vec<&'a Item>, 
