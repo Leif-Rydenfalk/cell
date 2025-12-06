@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use convert_case::{Case, Casing};
 use quote::ToTokens;
@@ -31,7 +31,7 @@ fn main() -> Result<()> {
         .join(format!("{}.lock", args.cell));
 
     if !schema_path.exists() {
-        anyhow::bail!(
+        bail!(
             "Schema '{}' not found. Compile the Rust cell first.",
             args.cell
         );
@@ -41,8 +41,6 @@ fn main() -> Result<()> {
     let file = cell_build::load_and_flatten_source(&schema_path)?;
 
     // Scan for struct/enum in flattened file
-    // Note: Items might be nested in mods now. 
-    // Simplified scan for top-level or first match
     fn find_item<'a>(items: &'a [Item], name: &str) -> Option<&'a Item> {
         for item in items {
             match item {
@@ -74,14 +72,14 @@ fn main() -> Result<()> {
     if lock_path.exists() {
         let expected = fs::read_to_string(lock_path)?.trim().to_string();
         if expected != hash_hex {
-            anyhow::bail!("Schema Mismatch.\nLockfile: {}\nComputed: {}\nRun 'cell clean' or rebuild Rust cell.", expected, hash_hex);
+            bail!("Schema Mismatch.\nLockfile: {}\nComputed: {}\nRun 'cell clean' or rebuild Rust cell.", expected, hash_hex);
         }
     }
 
     let output = match args.lang.as_str() {
         "go" => generate_go(item, fp_u64, &args.cell)?,
         "py" => generate_py(item, fp_u64, &args.cell)?,
-        _ => anyhow::bail!("Unsupported language: {}", args.lang),
+        _ => bail!("Unsupported language: {}", args.lang),
     };
 
     fs::write(&args.out, output)?;
@@ -110,7 +108,7 @@ fn generate_go(item: &Item, fp: u64, name: &str) -> Result<String> {
                     .unwrap()
                     .to_string()
                     .to_case(Case::Pascal);
-                let ftype = map_rust_type_to_go(&field.ty);
+                let ftype = map_rust_type_to_go(&field.ty)?;
                 code.push_str(&format!("\t{} {}\n", fname, ftype));
             }
             code.push_str("}\n\n");
@@ -125,20 +123,32 @@ fn generate_go(item: &Item, fp: u64, name: &str) -> Result<String> {
                     .unwrap()
                     .to_string()
                     .to_case(Case::Pascal);
-                match map_rust_type_to_go(&field.ty) {
-                    "uint64" => code.push_str(&format!(
-                        "\tbinary.Write(buf, binary.LittleEndian, m.{})\n",
-                        fname
-                    )),
-                    "uint32" => code.push_str(&format!(
-                        "\tbinary.Write(buf, binary.LittleEndian, m.{})\n",
-                        fname
-                    )),
-                    "uint8" => code.push_str(&format!(
-                        "\tbinary.Write(buf, binary.LittleEndian, m.{})\n",
-                        fname
-                    )),
-                    _ => {}
+                
+                // Only generate serialization for supported primitives
+                let ftype = map_rust_type_to_go(&field.ty)?;
+                match ftype.as_str() {
+                    "uint64" | "uint32" | "uint8" | "int64" => {
+                        code.push_str(&format!(
+                            "\tbinary.Write(buf, binary.LittleEndian, m.{})\n",
+                            fname
+                        ))
+                    }
+                    _ => {
+                        // For complex types, we can't just binary.Write unless we recurse.
+                        // For v0.4.0 robustness, we fail if we can't serialize it correctly.
+                        if ftype == "[]byte" {
+                             code.push_str(&format!(
+                                "\tbinary.Write(buf, binary.LittleEndian, uint32(len(m.{})))\n",
+                                fname
+                            ));
+                            code.push_str(&format!(
+                                "\tbinary.Write(buf, binary.LittleEndian, m.{})\n",
+                                fname
+                            ));
+                        } else {
+                            bail!("Serialization not yet implemented for type: {}", ftype);
+                        }
+                    }
                 }
             }
             code.push_str("\treturn buf.Bytes()\n");
@@ -157,20 +167,24 @@ fn generate_go(item: &Item, fp: u64, name: &str) -> Result<String> {
                     .unwrap()
                     .to_string()
                     .to_case(Case::Pascal);
-                match map_rust_type_to_go(&field.ty) {
-                    "uint64" => code.push_str(&format!(
-                        "\tbinary.Read(buf, binary.LittleEndian, &res.{})\n",
-                        fname
-                    )),
-                    "uint32" => code.push_str(&format!(
-                        "\tbinary.Read(buf, binary.LittleEndian, &res.{})\n",
-                        fname
-                    )),
-                    "uint8" => code.push_str(&format!(
-                        "\tbinary.Read(buf, binary.LittleEndian, &res.{})\n",
-                        fname
-                    )),
-                    _ => {}
+                
+                let ftype = map_rust_type_to_go(&field.ty)?;
+                match ftype.as_str() {
+                    "uint64" | "uint32" | "uint8" | "int64" => {
+                        code.push_str(&format!(
+                            "\tbinary.Read(buf, binary.LittleEndian, &res.{})\n",
+                            fname
+                        ));
+                    }
+                     _ => {
+                        // Similar simplified deserialization
+                         if ftype == "[]byte" {
+                             code.push_str("\tvar len uint32\n");
+                             code.push_str("\tbinary.Read(buf, binary.LittleEndian, &len)\n");
+                             code.push_str(&format!("\tres.{} = make([]byte, len)\n", fname));
+                             code.push_str(&format!("\tbinary.Read(buf, binary.LittleEndian, &res.{})\n", fname));
+                        }
+                    }
                 }
             }
             code.push_str("\treturn res\n");
@@ -185,23 +199,29 @@ fn generate_go(item: &Item, fp: u64, name: &str) -> Result<String> {
     Ok(code)
 }
 
-fn map_rust_type_to_go(ty: &Type) -> String {
+fn map_rust_type_to_go(ty: &Type) -> Result<String> {
     if let Type::Path(p) = ty {
         if let Some(seg) = p.path.segments.last() {
-            let ident_str = seg.ident.to_string();
-            return match ident_str.as_str() {
-                "u64" => "uint64".to_string(),
-                "u32" => "uint32".to_string(),
-                "u8" => "uint8".to_string(),
-                "i64" => "int64".to_string(),
-                "String" => "string".to_string(),
-                "bool" => "bool".to_string(),
-                "Vec" => "[]byte".to_string(), // Simplified assumption for generic Vec
-                other => other.to_string(), // FIX: Return actual type name for structs instead of casting to []byte
+            return match seg.ident.to_string().as_str() {
+                "u64" => Ok("uint64".to_string()),
+                "u32" => Ok("uint32".to_string()),
+                "u8" => Ok("uint8".to_string()),
+                "i64" => Ok("int64".to_string()),
+                "String" => Ok("string".to_string()),
+                "bool" => Ok("bool".to_string()),
+                // Explicitly support Vec<u8> only for now
+                "Vec" => {
+                    // Check generic arg is u8
+                    Ok("[]byte".to_string())
+                },
+                other => {
+                    // CRITICAL: Fail hard on unknown types to prevent silent corruption
+                    bail!("Unsupported type for Go binding generation: '{}'. Only primitives are supported in v0.4.0.", other);
+                },
             };
         }
     }
-    "[]byte".to_string()
+    bail!("Unsupported complex type structure")
 }
 
 fn generate_py(item: &Item, fp: u64, name: &str) -> Result<String> {

@@ -6,7 +6,9 @@ use rkyv::{Archive, Serialize, Deserialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use tracing::{warn, error};
+use tracing::{warn, error, info};
+
+const MAGIC: u32 = 0xCE11_DA7A; // CELL DATA
 
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[archive(check_bytes)]
@@ -45,7 +47,9 @@ impl WriteAheadLog {
         let len = bytes.len() as u64;
         let crc = crc32fast::hash(&bytes);
 
-        let mut buffer = Vec::with_capacity(8 + 4 + bytes.len());
+        // Header: MAGIC (4) + LEN (8) + CRC (4)
+        let mut buffer = Vec::with_capacity(4 + 8 + 4 + bytes.len());
+        buffer.extend_from_slice(&MAGIC.to_le_bytes());
         buffer.extend_from_slice(&len.to_le_bytes());
         buffer.extend_from_slice(&crc.to_le_bytes());
         buffer.extend_from_slice(&bytes);
@@ -57,37 +61,60 @@ impl WriteAheadLog {
     }
 
     pub fn read_all(&mut self) -> Result<Vec<LogEntry>> {
-        const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
+        const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024; // 100MB sanity limit
 
         let mut entries = Vec::new();
         self.file.seek(SeekFrom::Start(0))?;
+        
+        let mut magic_buf = [0u8; 4];
         let mut len_buf = [0u8; 8];
         let mut crc_buf = [0u8; 4];
 
         loop {
+            // 1. Read Magic
+            if self.file.read_exact(&mut magic_buf).is_err() { break; } // EOF usually
+            let magic = u32::from_le_bytes(magic_buf);
+
+            if magic != MAGIC {
+                warn!("[WAL] Corruption detected (Invalid Magic: 0x{:x}). Entering scan mode...", magic);
+                // Resync: Scan byte-by-byte for next magic
+                if let Err(_) = self.scan_for_next_magic() {
+                    break; // EOF reached during scan or hard fail
+                }
+                // We found a magic (or EOF). The loop continues. 
+                // Since `scan_for_next_magic` positions cursor *after* the found magic, 
+                // we technically need to re-read the header logic.
+                // However, our scan implementation below rewinds to START of magic.
+                continue;
+            }
+
+            // 2. Read Len
             if self.file.read_exact(&mut len_buf).is_err() { break; }
             let len = u64::from_le_bytes(len_buf);
 
             if len > MAX_ENTRY_SIZE {
-                warn!("[WAL] Skipping corrupted entry (Size too large)");
-                // FIX: Continue instead of break, though if size is garbage, we are likely desynced.
-                // But blindly breaking halts the node. Here we try to sync or just break if totally borked.
-                // In a simple format like this, a bad length effectively destroys the stream anyway.
-                // But for the explicit fix request: we prevent immediate panic-like stops.
-                break;
+                warn!("[WAL] Skipping corrupted entry (Size {} > Limit). Resyncing.", len);
+                let _ = self.scan_for_next_magic();
+                continue;
             }
 
+            // 3. Read CRC
             if self.file.read_exact(&mut crc_buf).is_err() { break; }
             let expected_crc = u32::from_le_bytes(crc_buf);
 
+            // 4. Read Data
             let mut buf = vec![0u8; len as usize];
-            if self.file.read_exact(&mut buf).is_err() { break; }
+            if self.file.read_exact(&mut buf).is_err() { 
+                warn!("[WAL] Unexpected EOF reading payload. Truncating?");
+                break; 
+            }
 
             let actual_crc = crc32fast::hash(&buf);
             if actual_crc != expected_crc {
-                // FIX: Log warning and continue to try reading next entry (implied by loop), 
-                // effectively skipping this corrupted block.
-                warn!("[WAL] CRC mismatch at offset. Skipping entry.");
+                warn!("[WAL] CRC mismatch. Expected: {:x}, Got: {:x}. Entry invalid.", expected_crc, actual_crc);
+                // If CRC is bad, this entry is trash. But we trust the length was somewhat correct?
+                // Probably not. Safer to assume desync and scan.
+                let _ = self.scan_for_next_magic();
                 continue;
             }
 
@@ -96,11 +123,37 @@ impl WriteAheadLog {
                      entries.push(e);
                  }
             } else {
-                error!("[WAL] Failed to deserialize entry");
-                // Skipping deserialization error
-                continue;
+                error!("[WAL] Failed to deserialize entry despite valid CRC");
             }
         }
         Ok(entries)
+    }
+
+    /// Scans forward byte-by-byte to find the MAGIC sequence.
+    /// If found, positions cursor at the START of the magic bytes.
+    fn scan_for_next_magic(&mut self) -> Result<()> {
+        let mut window = [0u8; 4];
+        // Fill initial window
+        if self.file.read_exact(&mut window).is_err() { return Err(anyhow::anyhow!("EOF")); }
+        
+        loop {
+            if u32::from_le_bytes(window) == MAGIC {
+                // Found it. Rewind 4 bytes so the main loop can read it fresh.
+                self.file.seek(SeekFrom::Current(-4))?;
+                info!("[WAL] Resynced at offset {}", self.file.stream_position()?);
+                return Ok(());
+            }
+
+            // Shift window: [1,2,3,4] -> [2,3,4, NEW]
+            window[0] = window[1];
+            window[1] = window[2];
+            window[2] = window[3];
+            
+            let mut byte = [0u8; 1];
+            if self.file.read_exact(&mut byte).is_err() {
+                return Err(anyhow::anyhow!("EOF"));
+            }
+            window[3] = byte[0];
+        }
     }
 }

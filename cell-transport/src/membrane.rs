@@ -6,7 +6,7 @@ use crate::transport::{UnixListenerAdapter, UnixConnection};
 use cell_core::{Listener, Connection, channel};
 use cell_model::protocol::GENOME_REQUEST;
 use cell_model::ops::{OpsRequest, OpsResponse, ArchivedOpsRequest};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use fd_lock::RwLock;
 use rkyv::ser::Serializer;
 use rkyv::{Archive, Serialize};
@@ -40,21 +40,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use crate::transport::ShmConnection;
-
-// Placeholder for Global Metrics - In a real scenario this would be injected or a proper singleton
-// For now, we instantiate a static lazy one in the SDK, but we can't access it here easily without circular deps.
-// We will assume cell_sdk manages the metrics and passed somehow, or we simply construct a fresh one to satisfy the type system.
-// Wait, the requirement was "production-grade".
-// Let's rely on cell-sdk metrics if possible. But cell-transport is below cell-sdk.
-// We'll define a simple metrics interface or placeholder here since cell-transport shouldn't depend on cell-sdk.
-// Actually, cell-transport depends on cell-core/model.
-// We will construct empty metrics for now in the response if cell-sdk is not present.
-// However, the OpsResponse::Metrics variant expects a cell_sdk::metrics::MetricsSnapshot...
-// But OpsResponse is in cell-model.
-// We need to move MetricsSnapshot to cell-model or re-export it.
-// I will assume MetricsSnapshot is in cell-sdk::metrics, but OpsResponse depends on it.
-// This implies cell-model must depend on cell-sdk (Cycle!) or MetricsSnapshot must be in cell-model.
-// CORRECT APPROACH: Move MetricsSnapshot definition to cell-model (or define equivalent there).
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -204,7 +189,8 @@ where
                 let mut response = [0u8; 32];
                 stream.read_exact(&mut response).await?;
                 
-                let auth_token = get_shm_auth_token();
+                // CRITICAL: Panic if SHM token is compromised/missing rather than continuing insecurely
+                let auth_token = get_shm_auth_token().context("CRITICAL: Failed to retrieve secure SHM token")?;
                 let expected = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
                 
                 if response != expected.as_bytes()[..32] {
@@ -284,8 +270,6 @@ where
                         }
                     }
                     ArchivedOpsRequest::Metrics => {
-                         // Placeholder since we don't have global metrics instance here
-                         // In a full impl this connects to cell-sdk metrics
                          OpsResponse::Metrics(cell_model::ops::MetricsSnapshot {
                              requests_total: 0,
                              requests_success: 0,
@@ -325,46 +309,69 @@ where
     }
 }
 
-pub(crate) fn get_shm_auth_token() -> Vec<u8> {
+pub(crate) fn get_shm_auth_token() -> Result<Vec<u8>> {
+    // 1. Env Override (Dev only, but supported)
     if let Ok(token) = std::env::var("CELL_SHM_TOKEN") {
-        return blake3::hash(token.as_bytes()).as_bytes().to_vec();
+        return Ok(blake3::hash(token.as_bytes()).as_bytes().to_vec());
     }
-    if let Some(home) = dirs::home_dir() {
-        let token_path = home.join(".cell/shm.token");
-        if let Ok(token) = std::fs::read(&token_path) {
-            return blake3::hash(&token).as_bytes().to_vec();
-        }
-        
-        // FIX: Secure token generation. Do NOT fallback to UID hashing.
-        let new_token: [u8; 32] = rand::random();
-        
-        // Attempt to write with restrictive permissions first
-        #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
+
+    let home = dirs::home_dir().context("Cannot determine home directory for SHM token storage")?;
+    let token_path = home.join(".cell/shm.token");
+
+    // 2. Read Existing
+    if token_path.exists() {
+        // SECURITY: Strict Permission Check
+        #[cfg(unix)]
         {
-            // Best effort to create directory if missing, though typically handled by runtime
-            if let Some(parent) = token_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(&token_path).context("Failed to stat SHM token")?;
+            let mode = meta.mode() & 0o777;
+            let uid = meta.uid();
+            let current_uid = nix::unistd::getuid().as_raw();
+
+            if uid != current_uid {
+                bail!("SECURITY VIOLATION: SHM token owned by UID {}, expected {}", uid, current_uid);
             }
-            
-            // Write and chmod
-            if std::fs::write(&token_path, &new_token).is_ok() {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = std::fs::Permissions::from_mode(0o600);
-                if std::fs::set_permissions(&token_path, perms).is_ok() {
-                     return blake3::hash(&new_token).as_bytes().to_vec();
-                }
+            if mode != 0o600 {
+                bail!("SECURITY VIOLATION: SHM token permissions are {:o}, expected 0600 (rw-------)", mode);
             }
         }
-        
-        // If we cannot persist a secure token, we return the random one for this session only.
-        // This breaks persistence across restarts but maintains security.
-        return blake3::hash(&new_token).as_bytes().to_vec();
+
+        let token = std::fs::read(&token_path).context("Failed to read SHM token")?;
+        return Ok(blake3::hash(&token).as_bytes().to_vec());
     }
+
+    // 3. Create New (Atomic)
+    let new_token: [u8; 32] = rand::random();
+    let tmp_path = token_path.with_extension("tmp");
     
-    // Fallback for systems without home dir: strictly random, no persistence.
-    // Never hash UID/predictable values.
-    let ephemeral: [u8; 32] = rand::random();
-    blake3::hash(&ephemeral).as_bytes().to_vec()
+    if let Some(parent) = token_path.parent() {
+        std::fs::create_dir_all(parent).context("Failed to create .cell directory")?;
+    }
+
+    {
+        // Write to tmp file first
+        use std::os::unix::fs::PermissionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .context("Failed to create temporary SHM token file")?;
+        
+        // Enforce permissions BEFORE writing sensitive data if possible, or immediately after
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .context("Failed to set 0600 permissions on SHM token")?;
+            
+        use std::io::Write;
+        file.write_all(&new_token).context("Failed to write SHM token data")?;
+        file.sync_all().context("Failed to sync SHM token to disk")?;
+    }
+
+    // Atomic Rename
+    std::fs::rename(&tmp_path, &token_path).context("Failed to atomically install SHM token")?;
+
+    Ok(blake3::hash(&new_token).as_bytes().to_vec())
 }
 
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
