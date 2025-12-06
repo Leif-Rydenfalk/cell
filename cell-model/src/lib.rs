@@ -11,8 +11,10 @@ pub use cell_core::Vesicle;
 pub mod protocol;
 pub mod error;
 pub mod vesicle;
+pub mod ops;
 
 pub use protocol::*;
+pub use ops::*;
 pub use error::Error;
 
 pub use rkyv;

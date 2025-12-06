@@ -5,6 +5,7 @@ use crate::resolve_socket_dir;
 use crate::transport::UnixListenerAdapter;
 use cell_core::{Listener, Connection, channel};
 use cell_model::protocol::GENOME_REQUEST;
+use cell_model::ops::{OpsRequest, OpsResponse};
 use anyhow::{Context, Result};
 use fd_lock::RwLock;
 use rkyv::ser::Serializer;
@@ -18,6 +19,7 @@ use rkyv::ser::serializers::AllocSerializer;
 use tracing::{info, warn};
 use rkyv::AlignedVec;
 use tokio::sync::mpsc::Sender;
+use std::time::SystemTime;
 
 #[cfg(feature = "axon")]
 use cell_axon::AxonServer;
@@ -32,8 +34,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use anyhow::bail;
-#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
-use crate::transport::ShmConnection;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -62,6 +62,7 @@ impl Membrane {
         let g_shared = Arc::new(genome_json);
         let name_owned = cell_name.to_string();
         let c_shared = Arc::new(consensus_tx);
+        let start_time = SystemTime::now();
 
         loop {
             match listener.accept().await {
@@ -81,8 +82,8 @@ impl Membrane {
 
                     tokio::spawn(async move {
                         let _permit = permit;
-                        if let Err(_e) = handle_connection::<F, Req, Resp>(connection, h, g, &n, c).await {
-                             // Suppress
+                        if let Err(_e) = handle_connection::<F, Req, Resp>(connection, h, g, &n, c, start_time).await {
+                             // Suppress errors
                         }
                     });
                 }
@@ -143,8 +144,9 @@ async fn handle_connection<F, Req, Resp>(
     mut conn: Box<dyn Connection>,
     handler: F,
     genome: Arc<Option<String>>,
-    _cell_name: &str,
+    cell_name: &str,
     consensus_tx: Arc<Option<Sender<Vec<u8>>>>,
+    start_time: SystemTime,
 ) -> Result<()>
 where
     F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>> + Send + Sync + 'static,
@@ -156,7 +158,6 @@ where
     let mut write_buf = AlignedVec::with_capacity(16 * 1024);
 
     loop {
-        // Zero-Copy Read
         let (channel_id, vesicle) = match conn.recv().await {
             Ok(res) => res,
             Err(_) => return Ok(()),
@@ -199,6 +200,37 @@ where
                 } else {
                     conn.send(b"No Consensus").await?;
                 }
+            }
+            channel::OPS => {
+                let req = rkyv::check_archived_root::<OpsRequest>(data)
+                    .map_err(|e| anyhow::anyhow!("Invalid Ops data: {:?}", e))?;
+                
+                let resp = match req {
+                    cell_model::rkyv::Archived::<OpsRequest>::Ping => OpsResponse::Pong,
+                    cell_model::rkyv::Archived::<OpsRequest>::Status => {
+                        let uptime = SystemTime::now().duration_since(start_time).unwrap_or_default().as_secs();
+                        OpsResponse::Status {
+                            name: cell_name.to_string(),
+                            uptime_secs: uptime,
+                            memory_usage: 0, // Placeholder
+                            consensus_role: if consensus_tx.is_some() { "Enabled".into() } else { "Disabled".into() },
+                        }
+                    }
+                };
+
+                let aligned_input = std::mem::take(&mut write_buf);
+                let mut serializer = rkyv::ser::serializers::CompositeSerializer::new(
+                    rkyv::ser::serializers::AlignedSerializer::new(aligned_input),
+                    rkyv::ser::serializers::FallbackScratch::default(),
+                    rkyv::ser::serializers::SharedSerializeMap::default(),
+                );
+                serializer.serialize_value(&resp)?;
+                let aligned_output = serializer.into_serializer().into_inner();
+                let bytes = aligned_output.as_slice();
+                
+                conn.send(bytes).await?;
+                write_buf = aligned_output;
+                write_buf.clear();
             }
             _ => {
                 conn.send(b"Unknown Channel").await?;

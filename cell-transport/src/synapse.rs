@@ -18,7 +18,8 @@ use rkyv::{Archive, Serialize};
 use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::info;
+use tracing::{info, warn, error};
+use std::time::Duration;
 
 #[cfg(feature = "axon")]
 use cell_axon::AxonClient;
@@ -29,6 +30,9 @@ use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
 use std::os::unix::io::AsRawFd;
 
 pub struct Synapse {
+    // Stored for healing/regrowing
+    cell_name: String,
+    
     transport: Box<dyn Transport>,
     
     #[cfg(feature = "shm")]
@@ -50,6 +54,7 @@ impl Synapse {
                 if let Ok(client) = Self::try_upgrade_to_shm(&mut stream).await {
                     info!("[Synapse] ✓ Upgraded to Shared Memory");
                     return Ok(Self {
+                        cell_name: cell_name.to_string(),
                         transport: Box::new(ShmTransport::new(
                             ShmClient::new(client.tx.clone(), client.rx.clone())
                         )),
@@ -59,6 +64,7 @@ impl Synapse {
             }
             
             return Ok(Self {
+                cell_name: cell_name.to_string(),
                 transport: Box::new(UnixTransport::new(stream)),
                 #[cfg(feature = "shm")]
                 shm_client: None,
@@ -69,6 +75,7 @@ impl Synapse {
         {
             if let Some(conn) = AxonClient::connect(cell_name).await? {
                 return Ok(Self {
+                    cell_name: cell_name.to_string(),
                     transport: Box::new(QuicTransport::new(conn)),
                     #[cfg(feature = "shm")]
                     shm_client: None,
@@ -133,21 +140,72 @@ impl Synapse {
         Ok(fds)
     }
 
-    pub async fn fire_on_channel(&mut self, channel_id: u8, data: &[u8]) -> Result<Response<Vec<u8>>> {
-        #[cfg(feature = "shm")]
-        if let Some(client) = &self.shm_client {
-             let msg = client.request_raw(data, channel_id).await?;
-             return Ok(Response::Owned(msg.get_bytes().to_vec()));
-        }
-
-        let mut frame = Vec::with_capacity(1 + data.len());
-        frame.push(channel_id);
-        frame.extend_from_slice(data);
+    // HEALING LOGIC
+    async fn heal(&mut self) -> Result<()> {
+        warn!("[Synapse] Connection lost to '{}'. Healing...", self.cell_name);
         
-        let resp_bytes = self.transport.call(&frame).await
-            .map_err(|e| anyhow::anyhow!("Transport Error: {:?}", e))?;
+        const RECONNECT_ATTEMPTS: usize = 5;
+        const BASE_DELAY: u64 = 200;
+
+        for i in 0..RECONNECT_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(BASE_DELAY * (1 << i))).await;
             
-        Ok(Response::Owned(resp_bytes))
+            match Synapse::grow(&self.cell_name).await {
+                Ok(new_syn) => {
+                    info!("[Synapse] Reconnected to '{}'.", self.cell_name);
+                    self.transport = new_syn.transport;
+                    #[cfg(feature = "shm")]
+                    { self.shm_client = new_syn.shm_client; }
+                    return Ok(());
+                },
+                Err(e) => {
+                    warn!("[Synapse] Reconnect attempt {}/{} failed: {}", i+1, RECONNECT_ATTEMPTS, e);
+                }
+            }
+        }
+        
+        bail!("Failed to heal connection to '{}' after {} attempts", self.cell_name, RECONNECT_ATTEMPTS);
+    }
+
+    pub async fn fire_on_channel(&mut self, channel_id: u8, data: &[u8]) -> Result<Response<Vec<u8>>> {
+        let mut retries = 0;
+        loop {
+            // Raw Shm Path (Note: healing might change this option)
+            #[cfg(feature = "shm")]
+            if let Some(client) = &self.shm_client {
+                 match client.request_raw(data, channel_id).await {
+                     Ok(msg) => return Ok(Response::Owned(msg.get_bytes().to_vec())),
+                     Err(_) => {
+                         // SHM Failure (e.g. ring corruption or peer death)
+                         // Fallthrough to heal
+                     }
+                 }
+            }
+
+            // Generic Transport Path
+            // We construct the frame here. Note: If using SHM transport but no client optimization,
+            // we use call(). 
+            let mut frame = Vec::with_capacity(1 + data.len());
+            frame.push(channel_id);
+            frame.extend_from_slice(data);
+            
+            match self.transport.call(&frame).await {
+                Ok(resp_bytes) => return Ok(Response::Owned(resp_bytes)),
+                Err(e) => {
+                    match e {
+                        TransportError::Io | TransportError::ConnectionClosed | TransportError::Timeout => {
+                            if retries > 0 { return Err(anyhow::anyhow!("Transport Error: {:?}", e)); }
+                            if let Err(heal_err) = self.heal().await {
+                                return Err(anyhow::anyhow!("Transport Error: {:?}, Healing Failed: {}", e, heal_err));
+                            }
+                            retries += 1;
+                            continue;
+                        },
+                        _ => return Err(anyhow::anyhow!("Transport Error: {:?}", e)),
+                    }
+                }
+            }
+        }
     }
 
     pub async fn fire<'a, Req, Resp>(&'a mut self, request: &Req) -> Result<Response<'a, Resp>>
@@ -157,22 +215,44 @@ impl Synapse {
         Resp::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
         let channel = channel::APP;
+        let mut retries = 0;
 
-        #[cfg(feature = "shm")]
-        if let Some(client) = &self.shm_client {
-             let msg = client.request::<Req, Resp>(request, channel).await?;
-             return Ok(Response::ZeroCopy(msg));
-        }
+        loop {
+            #[cfg(feature = "shm")]
+            if let Some(client) = &self.shm_client {
+                 match client.request::<Req, Resp>(request, channel).await {
+                     Ok(msg) => return Ok(Response::ZeroCopy(msg)),
+                     Err(_) => {
+                         // Fallthrough to heal
+                     }
+                 }
+            }
 
-        let req_bytes = rkyv::to_bytes::<_, 1024>(request)?.into_vec();
-        
-        let mut frame = Vec::with_capacity(1 + req_bytes.len());
-        frame.push(channel);
-        frame.extend_from_slice(&req_bytes);
-        
-        let resp_bytes = self.transport.call(&frame).await
-            .map_err(|e| anyhow::anyhow!("Transport Error: {:?}", e))?;
+            let req_bytes = match rkyv::to_bytes::<_, 1024>(request) {
+                Ok(b) => b.into_vec(),
+                Err(e) => return Err(anyhow::anyhow!("Serialization error: {}", e)),
+            };
             
-        Ok(Response::Owned(resp_bytes))
+            let mut frame = Vec::with_capacity(1 + req_bytes.len());
+            frame.push(channel);
+            frame.extend_from_slice(&req_bytes);
+            
+            match self.transport.call(&frame).await {
+                Ok(resp_bytes) => return Ok(Response::Owned(resp_bytes)),
+                Err(e) => {
+                    match e {
+                        TransportError::Io | TransportError::ConnectionClosed | TransportError::Timeout => {
+                            if retries > 0 { return Err(anyhow::anyhow!("Transport Error: {:?}", e)); }
+                            if let Err(heal_err) = self.heal().await {
+                                return Err(anyhow::anyhow!("Transport Error: {:?}, Healing Failed: {}", e, heal_err));
+                            }
+                            retries += 1;
+                            continue;
+                        },
+                        _ => return Err(anyhow::anyhow!("Transport Error: {:?}", e)),
+                    }
+                }
+            }
+        }
     }
 }
