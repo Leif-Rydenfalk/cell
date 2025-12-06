@@ -8,11 +8,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, error};
 
-// Consolidate consensus imports to be available for the function signature
 #[cfg(feature = "consensus")]
 use cell_consensus::{RaftConfig, RaftNode, StateMachine};
 
-// Dummy trait if consensus is disabled to allow compiling the signature
 #[cfg(not(feature = "consensus"))]
 pub trait StateMachine: Send + Sync + 'static {
     fn apply(&self, _command: &[u8]) {}
@@ -38,7 +36,10 @@ impl Runtime {
         info!("[Runtime] Booting Cell '{}' (Node {})", name, config.node_id);
 
         #[cfg(feature = "axon")]
-        let _ = cell_axon::pheromones::PheromoneSystem::ignite().await?;
+        {
+            // Fix: Pass node_id to pheromones to allow unique identification in Tissue/Swarm
+            let _ = cell_axon::pheromones::PheromoneSystem::ignite(config.node_id).await?;
+        }
 
         let consensus_tx = if let Some(sm) = raft_sm {
             #[cfg(feature = "consensus")]

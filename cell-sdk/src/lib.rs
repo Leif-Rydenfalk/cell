@@ -29,6 +29,9 @@ pub use config::CellConfig;
 pub mod metrics;
 pub mod logging;
 
+pub mod tissue;
+pub use tissue::Tissue;
+
 #[cfg(feature = "consensus")]
 pub use cell_consensus;
 

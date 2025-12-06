@@ -17,16 +17,18 @@ const PORT: u16 = 9099;
 pub struct PheromoneSystem {
     socket: Arc<UdpSocket>,
     local_signals: Arc<RwLock<Vec<Signal>>>, 
+    node_id: u64,
 }
 
 impl PheromoneSystem {
-    pub async fn ignite() -> Result<Arc<Self>> {
+    pub async fn ignite(node_id: u64) -> Result<Arc<Self>> {
         let socket = UdpSocket::bind(format!("0.0.0.0:{}", PORT)).await?;
         socket.set_broadcast(true)?;
 
         let sys = Arc::new(Self {
             socket: Arc::new(socket),
             local_signals: Arc::new(RwLock::new(Vec::new())),
+            node_id,
         });
 
         let sys_clone = sys.clone();
@@ -60,7 +62,8 @@ impl PheromoneSystem {
                     // Query Request
                     let local = sys_clone.local_signals.read().await;
                     for my_sig in local.iter() {
-                        if my_sig.cell_name != sig.cell_name {
+                        // Respond if we match the queried name
+                        if my_sig.cell_name == sig.cell_name {
                             let mut reply = my_sig.clone();
                             reply.timestamp = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -85,6 +88,7 @@ impl PheromoneSystem {
     pub async fn query(&self, target_cell_name: &str) -> Result<()> {
         let sig = Signal {
             cell_name: target_cell_name.into(),
+            instance_id: self.node_id, // Sender's ID
             ip: get_best_local_ip(),
             port: 0,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
@@ -96,6 +100,7 @@ impl PheromoneSystem {
     pub async fn secrete_specific(&self, cell_name: &str, ip: &str, port: u16) -> Result<()> {
         let sig = Signal {
             cell_name: cell_name.into(),
+            instance_id: self.node_id,
             ip: ip.to_string(),
             port,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
@@ -152,8 +157,7 @@ impl PheromoneSystem {
     }
 
     pub async fn lookup_all(&self, cell_name: &str) -> Vec<Signal> {
-        let all = LanDiscovery::global().all().await;
-        all.into_iter().filter(|s| s.cell_name == cell_name).collect()
+        LanDiscovery::global().find_all(cell_name).await
     }
 }
 

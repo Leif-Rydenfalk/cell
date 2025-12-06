@@ -97,7 +97,6 @@ impl Synapse {
             }
             
             if transport.is_none() {
-                // Re-connect to ensure clean stream state after potential failed upgrade
                 if let Ok(clean_stream) = UnixStream::connect(&socket_path).await {
                     transport = Some(Box::new(UnixTransport::new(clean_stream)));
                 }
@@ -128,6 +127,31 @@ impl Synapse {
             })
         } else {
             bail!("Cell '{}' not found", cell_name);
+        }
+    }
+
+    // New: Grow to a specific target signal (Used by Tissue)
+    #[cfg(feature = "axon")]
+    pub async fn grow_to_signal(sig: &cell_discovery::lan::Signal) -> Result<Self> {
+        let config = SynapseConfig::default();
+        
+        // Skip local checks for explicit signal connection to avoid ambiguity
+        if let Some(conn) = AxonClient::connect_to_signal(sig).await? {
+            let t = Box::new(QuicTransport::new(conn));
+            Ok(Self {
+                cell_name: sig.cell_name.clone(),
+                transport: t,
+                retry_policy: config.retry_policy,
+                circuit_breaker: CircuitBreaker::new(
+                    config.circuit_breaker_threshold,
+                    config.circuit_breaker_timeout,
+                ),
+                default_deadline: Deadline::new(config.default_timeout),
+                #[cfg(feature = "shm")]
+                shm_client: None, // Remote connections don't use SHM
+            })
+        } else {
+            bail!("Failed to connect to signal instance {}", sig.instance_id);
         }
     }
     
@@ -204,10 +228,7 @@ impl Synapse {
                     self.transport = new_syn.transport;
                     #[cfg(feature = "shm")]
                     { self.shm_client = new_syn.shm_client; }
-                    
-                    // Also transfer resilience state
                     self.circuit_breaker = new_syn.circuit_breaker;
-                    
                     return Ok(());
                 },
                 Err(e) => {
@@ -215,7 +236,6 @@ impl Synapse {
                 }
             }
         }
-        
         bail!("Failed to heal connection to '{}' after {} attempts", self.cell_name, RECONNECT_ATTEMPTS);
     }
 
@@ -223,13 +243,11 @@ impl Synapse {
          match self.transport.call(data).await {
              Ok(resp) => Ok(resp),
              Err(e) => {
-                 // Try healing once on connection issues
                  match e {
                      TransportError::Io | TransportError::ConnectionClosed | TransportError::Timeout => {
                          if let Err(heal_err) = self.heal().await {
                              return Err(anyhow::anyhow!("Transport Error: {:?}, Healing Failed: {}", e, heal_err));
                          }
-                         // Retry once after heal
                          self.transport.call(data).await.map_err(|e2| anyhow::anyhow!("Retry after heal failed: {:?}", e2))
                      },
                      _ => Err(anyhow::anyhow!("Transport Error: {:?}", e)),
@@ -245,13 +263,9 @@ impl Synapse {
 
         #[cfg(feature = "shm")]
         if let Some(client) = &self.shm_client {
-             // SHM is usually robust, but we wrap it too
-             // For SHM we skip the standard Retry/CircuitBreaker loop for performance,
-             // assuming if SHM exists it is stable locally.
              if let Ok(msg) = client.request_raw(data, channel_id).await {
                  return Ok(Response::Owned(msg.get_bytes().to_vec()));
              }
-             // Fallthrough to transport
         }
 
         let data_vec = data.to_vec();
@@ -266,14 +280,11 @@ impl Synapse {
                 let data_ref = &data_vec;
                 let breaker = self.circuit_breaker.clone();
                 
-                // FIX: async move ensures breaker is moved into the Future, extending its lifetime
                 async move {
-                   breaker.call(|| { Ok(()) }).map_err(|e| anyhow::anyhow!("{}", e))?; // Check breaker
-                   
+                   breaker.call(|| { Ok(()) }).map_err(|e| anyhow::anyhow!("{}", e))?; 
                    let mut frame = Vec::with_capacity(1 + data_ref.len());
                    frame.push(channel_id);
                    frame.extend_from_slice(data_ref);
-                   
                    Ok(frame)
                 }
             }).await;
@@ -288,7 +299,6 @@ impl Synapse {
                 }
             };
             
-            // Execute transport call
             match self.call_transport(&frame).await {
                 Ok(resp_bytes) => return Ok(Response::Owned(resp_bytes)),
                 Err(e) => {
@@ -306,7 +316,6 @@ impl Synapse {
         Resp: Archive + 'a,
         Resp::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
-        // Serialization check
         let req_bytes = match rkyv::to_bytes::<_, 1024>(request) {
             Ok(b) => b.into_vec(),
             Err(e) => return Err(anyhow::anyhow!("Serialization error: {}", e)),
@@ -314,13 +323,11 @@ impl Synapse {
 
         #[cfg(feature = "shm")]
         if let Some(client) = &self.shm_client {
-             // Try zero-copy path
              if let Ok(msg) = client.request::<Req, Resp>(request, channel::APP).await {
                  return Ok(Response::ZeroCopy(msg));
              }
         }
 
-        // Delegate to resilient channel fire
         match self.fire_on_channel(channel::APP, &req_bytes).await? {
             Response::Owned(vec) => Ok(Response::Owned(vec)),
             _ => Err(anyhow::anyhow!("Unexpected response type")),

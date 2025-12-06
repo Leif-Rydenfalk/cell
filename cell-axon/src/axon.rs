@@ -19,8 +19,8 @@ pub struct AxonServer {
 }
 
 impl AxonServer {
-    pub async fn ignite(cell_name: &str) -> Result<Self> {
-        let pheromones = PheromoneSystem::ignite().await?;
+    pub async fn ignite(cell_name: &str, node_id: u64) -> Result<Self> {
+        let pheromones = PheromoneSystem::ignite(node_id).await?;
         let addrs = get_all_local_addresses().await?;
 
         let mut endpoints = Vec::new();
@@ -73,7 +73,6 @@ impl AxonServer {
         }
     }
     
-    // Helper used by Membrane logic if using Axon features
     pub async fn handle_rpc_stream<F, Req, Resp>(
         mut send: quinn::SendStream,
         mut recv: quinn::RecvStream,
@@ -121,9 +120,12 @@ impl AxonServer {
 pub struct AxonClient;
 
 impl AxonClient {
+    // Legacy connect: Connects to ANY instance
     pub async fn connect(cell_name: &str) -> Result<Option<quinn::Connection>> {
+        // Use 0 as node_id for ephemeral client; or reuse a global ID if we had one.
+        // For simple clients, 0 is acceptable as they don't advertise.
+        let pheromones = PheromoneSystem::ignite(0).await?;
         info!("[Axon] Discovering cell '{}'...", cell_name);
-        let pheromones = PheromoneSystem::ignite().await?;
         let _ = pheromones.query(cell_name).await;
         
         let max_attempts = 30; 
@@ -131,16 +133,24 @@ impl AxonClient {
             let signals = pheromones.lookup_all(cell_name).await;
             if !signals.is_empty() {
                 for sig in signals {
-                    let addrs = expand_signal_to_candidates(&sig);
-                    for addr in addrs {
-                        if let Ok(Some(conn)) = try_connect(addr).await {
-                            info!("[Axon] ✓ Connected to '{}'", cell_name);
-                            return Ok(Some(conn));
-                        }
+                    if let Ok(Some(conn)) = Self::connect_to_signal(&sig).await {
+                         info!("[Axon] ✓ Connected to '{}' (ID: {})", cell_name, sig.instance_id);
+                         return Ok(Some(conn));
                     }
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        Ok(None)
+    }
+
+    // Direct connect to specific signal (Used by Tissue)
+    pub async fn connect_to_signal(sig: &cell_discovery::lan::Signal) -> Result<Option<quinn::Connection>> {
+        let addrs = expand_signal_to_candidates(sig);
+        for addr in addrs {
+            if let Ok(Some(conn)) = try_connect(addr).await {
+                return Ok(Some(conn));
+            }
         }
         Ok(None)
     }
@@ -217,7 +227,6 @@ fn make_client_endpoint() -> Result<quinn::Endpoint> {
         rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(ta.subject, ta.spki, ta.name_constraints)
     }));
     
-    // Dev Mode relaxed verification
     struct DevVerifier;
     impl rustls::client::ServerCertVerifier for DevVerifier {
         fn verify_server_cert(

@@ -15,6 +15,7 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct CellNode {
     pub name: String,
+    pub instance_id: u64,
     pub lan_address: Option<String>,
     pub local_socket: Option<PathBuf>,
     pub status: CellStatus,
@@ -41,39 +42,42 @@ pub struct Discovery;
 
 impl Discovery {
     pub async fn scan() -> Vec<CellNode> {
-        let lan_map = lan::LanDiscovery::global().all().await;
+        let lan_signals = lan::LanDiscovery::global().all().await;
         let local_names = local::scan_local_sockets().await;
 
-        let mut map = std::collections::HashMap::new();
+        let mut nodes = Vec::new();
 
-        for sig in lan_map {
-            map.insert(
-                sig.cell_name.clone(),
-                CellNode {
-                    name: sig.cell_name.clone(),
-                    lan_address: Some(format!("{}:{}", sig.ip, sig.port)),
-                    local_socket: None,
-                    status: CellStatus::default(),
-                },
-            );
+        // Add LAN nodes
+        for sig in lan_signals {
+            nodes.push(CellNode {
+                name: sig.cell_name,
+                instance_id: sig.instance_id,
+                lan_address: Some(format!("{}:{}", sig.ip, sig.port)),
+                local_socket: None,
+                status: CellStatus::default(),
+            });
         }
 
+        // Add Local nodes
+        // Note: For local nodes, we might not know the instance_id without connecting.
+        // We assume 0 or derive from hash for now to distinguish them if needed.
         let socket_dir = resolve_socket_dir();
         for name in local_names {
             let path = socket_dir.join(format!("{}.sock", name));
-            map.entry(name.clone())
-                .and_modify(|node| node.local_socket = Some(path.clone()))
-                .or_insert(CellNode {
-                    name,
-                    lan_address: None,
-                    local_socket: Some(path),
-                    status: CellStatus::default(),
-                });
+            
+            // Check if we already have this node via LAN (unlikely if loopback is filtered, but possible)
+            // For now, treat local sockets as distinct "instances" of the cell name.
+            nodes.push(CellNode {
+                name,
+                instance_id: 0, // Unknown without handshake
+                lan_address: None,
+                local_socket: Some(path),
+                status: CellStatus::default(),
+            });
         }
 
-        let mut list: Vec<CellNode> = map.into_values().collect();
-        list.sort_by(|a, b| a.name.cmp(&b.name));
-        list
+        nodes.sort_by(|a, b| a.name.cmp(&b.name).then(a.instance_id.cmp(&b.instance_id)));
+        nodes
     }
 }
 

@@ -12,13 +12,15 @@ const MAX_CACHE_SIZE: usize = 10_000;
 #[archive(check_bytes)]
 pub struct Signal {
     pub cell_name: String,
+    pub instance_id: u64,
     pub ip: String,
     pub port: u16,
     pub timestamp: u64,
 }
 
 pub struct LanDiscovery {
-    cache: Arc<RwLock<HashMap<String, Signal>>>,
+    // Key: Cell Name -> Key: Instance ID -> Signal
+    cache: Arc<RwLock<HashMap<String, HashMap<u64, Signal>>>>,
 }
 
 impl LanDiscovery {
@@ -36,18 +38,37 @@ impl LanDiscovery {
     pub async fn update(&self, sig: Signal) {
         let mut cache = self.cache.write().await;
         
+        // Pruning logic if too large (simplified for map-of-maps)
         if cache.len() >= MAX_CACHE_SIZE {
             cache.clear();
         }
-        cache.insert(sig.cell_name.clone(), sig);
+
+        cache
+            .entry(sig.cell_name.clone())
+            .or_insert_with(HashMap::new)
+            .insert(sig.instance_id, sig);
     }
 
     pub async fn all(&self) -> Vec<Signal> {
-        self.cache.read().await.values().cloned().collect()
+        let cache = self.cache.read().await;
+        cache.values()
+            .flat_map(|inner| inner.values())
+            .cloned()
+            .collect()
     }
 
-    pub async fn find(&self, name: &str) -> Option<Signal> {
-        self.cache.read().await.get(name).cloned()
+    pub async fn find_any(&self, name: &str) -> Option<Signal> {
+        let cache = self.cache.read().await;
+        cache.get(name)
+            .and_then(|inner| inner.values().next())
+            .cloned()
+    }
+
+    pub async fn find_all(&self, name: &str) -> Vec<Signal> {
+        let cache = self.cache.read().await;
+        cache.get(name)
+            .map(|inner| inner.values().cloned().collect())
+            .unwrap_or_default()
     }
 
     fn start_pruning(&self) {
@@ -59,8 +80,14 @@ impl LanDiscovery {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
+                
                 let mut guard = cache.write().await;
-                guard.retain(|_, v| now - v.timestamp < 60);
+                // Prune stale signals inside the inner maps
+                for inner in guard.values_mut() {
+                    inner.retain(|_, v| now - v.timestamp < 60);
+                }
+                // Remove empty keys
+                guard.retain(|_, v| !v.is_empty());
             }
         });
     }
