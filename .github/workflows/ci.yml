@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+
+    - name: Check Formatting
+      run: cargo fmt -- --check
+
+    - name: Clippy
+      run: cargo clippy -- -D warnings
+
+    - name: Build Workspace
+      run: cargo build --release --verbose
+
+    - name: Run Tests
+      run: cargo test --verbose
+
+    - name: Smoketest (Exchange & Trader)
+      run: |
+        # Build examples
+        cargo build --release --examples
+        
+        # Start Exchange
+        ./target/release/examples/exchange &
+        EXCHANGE_PID=$!
+        
+        # Give it a moment to boot
+        sleep 2
+        
+        # Run Trader (Smoketest: 1 concurrency, ping mode)
+        # We expect a clean exit code. In a real scenario, we might parse output for QPS.
+        echo "Running trader smoketest..."
+        timeout 5s ./target/release/examples/trader 1 ping || {
+          echo "Trader timed out or failed"
+          kill $EXCHANGE_PID
+          exit 1
+        }
+        
+        # Cleanup
+        kill $EXCHANGE_PID
+        echo "Smoketest Passed"

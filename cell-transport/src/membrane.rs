@@ -334,26 +334,37 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
         if let Ok(token) = std::fs::read(&token_path) {
             return blake3::hash(&token).as_bytes().to_vec();
         }
+        
+        // FIX: Secure token generation. Do NOT fallback to UID hashing.
         let new_token: [u8; 32] = rand::random();
-        if std::fs::write(&token_path, &new_token).is_ok() {
-            #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
-            {
+        
+        // Attempt to write with restrictive permissions first
+        #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
+        {
+            // Best effort to create directory if missing, though typically handled by runtime
+            if let Some(parent) = token_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            
+            // Write and chmod
+            if std::fs::write(&token_path, &new_token).is_ok() {
                 use std::os::unix::fs::PermissionsExt;
                 let perms = std::fs::Permissions::from_mode(0o600);
-                let _ = std::fs::set_permissions(&token_path, perms);
+                if std::fs::set_permissions(&token_path, perms).is_ok() {
+                     return blake3::hash(&new_token).as_bytes().to_vec();
+                }
             }
-            return blake3::hash(&new_token).as_bytes().to_vec();
         }
+        
+        // If we cannot persist a secure token, we return the random one for this session only.
+        // This breaks persistence across restarts but maintains security.
+        return blake3::hash(&new_token).as_bytes().to_vec();
     }
-    #[cfg(feature = "users")]
-    {
-        let uid = users::get_current_uid();
-        blake3::hash(&uid.to_le_bytes()).as_bytes().to_vec()
-    }
-    #[cfg(not(feature = "users"))]
-    {
-        blake3::hash(b"fallback").as_bytes().to_vec()
-    }
+    
+    // Fallback for systems without home dir: strictly random, no persistence.
+    // Never hash UID/predictable values.
+    let ephemeral: [u8; 32] = rand::random();
+    blake3::hash(&ephemeral).as_bytes().to_vec()
 }
 
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]

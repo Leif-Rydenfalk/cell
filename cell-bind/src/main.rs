@@ -185,21 +185,23 @@ fn generate_go(item: &Item, fp: u64, name: &str) -> Result<String> {
     Ok(code)
 }
 
-fn map_rust_type_to_go(ty: &Type) -> &'static str {
+fn map_rust_type_to_go(ty: &Type) -> String {
     if let Type::Path(p) = ty {
         if let Some(seg) = p.path.segments.last() {
-            return match seg.ident.to_string().as_str() {
-                "u64" => "uint64",
-                "u32" => "uint32",
-                "u8" => "uint8",
-                "i64" => "int64",
-                "String" => "string",
-                "bool" => "bool",
-                _ => "[]byte",
+            let ident_str = seg.ident.to_string();
+            return match ident_str.as_str() {
+                "u64" => "uint64".to_string(),
+                "u32" => "uint32".to_string(),
+                "u8" => "uint8".to_string(),
+                "i64" => "int64".to_string(),
+                "String" => "string".to_string(),
+                "bool" => "bool".to_string(),
+                "Vec" => "[]byte".to_string(), // Simplified assumption for generic Vec
+                other => other.to_string(), // FIX: Return actual type name for structs instead of casting to []byte
             };
         }
     }
-    "[]byte"
+    "[]byte".to_string()
 }
 
 fn generate_py(item: &Item, fp: u64, name: &str) -> Result<String> {

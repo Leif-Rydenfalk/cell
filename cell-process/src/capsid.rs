@@ -40,9 +40,19 @@ impl Capsid {
             .arg("--cap-drop")
             .arg("ALL")
             
-            .arg("--ro-bind")
-            .arg("/")
-            .arg("/")
+            // FIX: Selective binding instead of root bind
+            // We do not bind / recursively. We bind only what is necessary for a standard Linux binary.
+            .arg("--ro-bind").arg("/usr").arg("/usr")
+            .arg("--ro-bind").arg("/bin").arg("/bin")
+            .arg("--ro-bind").arg("/sbin").arg("/sbin")
+            .arg("--ro-bind").arg("/lib").arg("/lib")
+            // Try to bind lib64 if it exists, otherwise ignore (bwrap fails if source missing, so this is risky without check)
+            // But for a generic impl we assume FHS. If these don't exist, the host is weird.
+            // Ideally we'd check existence first. For "One-Liner" robustness we assume standard distros.
+            
+            // Bind /etc for config/ssl/dns
+            .arg("--ro-bind").arg("/etc").arg("/etc")
+            
             .arg("--dev")
             .arg("/dev")
             .arg("--proc")
@@ -60,6 +70,11 @@ impl Capsid {
             .arg("/tmp/dna")
             .arg("/tmp/dna")
             .args(args);
+
+        // Conditional bindings for 64-bit libs if they exist on host
+        if Path::new("/lib64").exists() {
+            cmd.arg("--ro-bind").arg("/lib64").arg("/lib64");
+        }
 
         let child = cmd.spawn().context("Failed to spawn Capsid (bwrap)")?;
         Ok(child)
