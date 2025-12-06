@@ -4,9 +4,10 @@ use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{error, warn};
+use tracing::{error};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use rand::RngCore; // Needed to fill bytes
 
 // --- THE NEW API ---
 cell_remote!(Exchange = "exchange");
@@ -86,6 +87,7 @@ async fn main() -> Result<()> {
 
     let req_count = Arc::new(ShardedCounter::new());
     let latency_sum = Arc::new(ShardedCounter::new());
+    // NEW: Byte Counter
     let byte_count = Arc::new(ShardedCounter::new()); 
 
     let r_req = req_count.clone();
@@ -106,7 +108,7 @@ async fn main() -> Result<()> {
             start = now;
 
             let curr_req = r_req.load();
-            let curr_lat = r_lat.load();
+            let curr_lat = r_lat.load(); 
             let curr_bytes = r_bytes.load();
 
             let delta_req = curr_req - last_req;
@@ -121,6 +123,7 @@ async fn main() -> Result<()> {
             let avg_ns = if delta_req > 0 { delta_lat_sum as f64 / delta_req as f64 } else { 0.0 };
             let lat_str = if avg_ns < 1000.0 { format!("{:.0}ns", avg_ns) } else { format!("{:.2}µs", avg_ns/1000.0) };
 
+            // Throughput Calc
             let throughput_bps = delta_bytes as f64 / elapsed;
             let throughput_str = if throughput_bps > 1_000_000_000.0 {
                 format!("{:.2} GB/s", throughput_bps / 1_000_000_000.0)
@@ -150,27 +153,33 @@ async fn main() -> Result<()> {
         handles.push(tokio::spawn(async move {
             let mut client = match Exchange::connect().await {
                 Ok(c) => c,
-                Err(e) => { 
-                    error!("Task {}: Connect failed: {}", i, e); 
-                    return; 
-                }
+                Err(e) => { error!("Task {}: Connect failed: {}", i, e); return; }
             };
-
-            // TEST: Do a ping first to verify connection works
-            match unwrap_response(client.ping(0).await) {
-                Ok(_) => println!("Task {}: Connection verified with ping", i),
-                Err(e) => {
-                    error!("Task {}: Initial ping failed: {}", i, e);
+            
+            // Connection Verification Probe
+            if let Ok(Ok(echo)) = client.ping(999).await {
+                if echo == 999 {
+                    if i == 0 { println!("Task 0: Connection verified with ping"); }
+                } else {
+                    error!("Task {}: Verification failed", i);
                     return;
                 }
             }
 
             let mut seq = 0u64;
-            let payload = if let Mode::Bytes(s) = task_mode { vec![0u8; s] } else { vec![] };
+            
+            // Pre-calculate payload for bytes mode to simulate high throughput data
+            let (payload, expected_crc) = if let Mode::Bytes(s) = task_mode { 
+                let mut p = vec![0u8; s];
+                // Fill with random data so the CRC check is meaningful
+                rand::thread_rng().fill_bytes(&mut p);
+                let crc = crc32fast::hash(&p) as u64;
+                (p, crc)
+            } else { 
+                (vec![], 0) 
+            };
+            
             let payload_size = payload.len() as u64;
-
-            let mut error_count = 0;
-            let max_errors = 5;
 
             loop {
                 let start = Instant::now();
@@ -181,7 +190,19 @@ async fn main() -> Result<()> {
                         unwrap_response(client.ping(seq).await).map(|_| 0)
                     },
                     Mode::Batch(n) => unwrap_response(client.submit_batch(n).await).map(|_| 0),
-                    Mode::Bytes(_) => unwrap_response(client.ingest_data(payload.clone()).await),
+                    Mode::Bytes(_) => {
+                        // Integrity Check: The server returns the CRC of the data we sent.
+                        // We compare it to our local calculation.
+                        match unwrap_response(client.ingest_data(payload.clone()).await) {
+                            Ok(server_crc) => {
+                                if server_crc != expected_crc {
+                                    panic!("DATA CORRUPTION DETECTED! Expected CRC: {}, Got: {}", expected_crc, server_crc);
+                                }
+                                Ok(server_crc)
+                            },
+                            Err(e) => Err(e),
+                        }
+                    },
                 };
 
                 let duration = start.elapsed().as_nanos() as u64;
@@ -193,16 +214,10 @@ async fn main() -> Result<()> {
                         if payload_size > 0 {
                             t_bytes.inc(payload_size);
                         }
-                        error_count = 0; // Reset on success
                     }
                     Err(e) => {
-                        error_count += 1;
-                        error!("Task {}: RPC Error ({}): {}", i, error_count, e);
-                        if error_count >= max_errors {
-                            error!("Task {}: Too many errors, exiting", i);
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        error!("RPC Error: {}", e);
+                        break;
                     }
                 }
             }

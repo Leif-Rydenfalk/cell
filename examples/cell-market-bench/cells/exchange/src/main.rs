@@ -40,11 +40,14 @@ impl ExchangeService {
     // Changed &Archived<Vec<u8>> to Vec<u8> to match macro expectations
     async fn ingest_data(&self, data: Vec<u8>) -> Result<u64> {
         let len = data.len() as u64;
-        if len > 0 { 
-            let _ = data[0]; 
-        }
         self.state.bytes_received.fetch_add(len, Ordering::Relaxed);
-        Ok(len)
+        
+        // INTEGRITY CHECK: Calculate CRC32 of the incoming data
+        // If the transport (SHM/Unix) corrupted even a single bit, this hash will change.
+        let crc = crc32fast::hash(&data);
+        
+        // Return the CRC so the client can verify we received exactly what they sent
+        Ok(crc as u64)
     }
     
     async fn ping(&self, seq: u64) -> Result<u64> {
