@@ -2,8 +2,7 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use anyhow::{Result, Context};
-use cell_transport::{Membrane, Synapse};
-use cell_model::protocol::CellGenome;
+use cell_transport::{Membrane};
 use crate::config::CellConfig;
 use std::sync::Arc;
 use tokio::sync::mpsc;

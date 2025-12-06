@@ -2,6 +2,7 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 use rkyv::{Archive, Serialize as RkyvSerialize, Deserialize as RkyvDeserialize};
 
@@ -12,6 +13,8 @@ pub enum OpsRequest {
     Ping,
     /// Request internal status (uptime, stats)
     Status,
+    /// Request Metrics Snapshot
+    Metrics,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, Debug, Clone)]
@@ -24,4 +27,17 @@ pub enum OpsResponse {
         memory_usage: u64,
         consensus_role: String,
     },
+    Metrics(MetricsSnapshot),
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, Debug, Clone)]
+#[archive(check_bytes)]
+pub struct MetricsSnapshot {
+    pub requests_total: u64,
+    pub requests_success: u64,
+    pub requests_failed: u64,
+    pub latency_histogram: Vec<u64>,
+    pub connections_active: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
 }

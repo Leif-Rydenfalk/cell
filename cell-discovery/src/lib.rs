@@ -3,9 +3,11 @@
 
 pub mod lan;
 pub mod local;
+pub mod health;
 
 // Re-export LanDiscovery for SDK convenience
 pub use lan::LanDiscovery;
+pub use health::HealthChecker;
 
 use std::path::PathBuf;
 use std::time::Duration;

@@ -26,6 +26,9 @@ pub use runtime::Runtime;
 pub mod config;
 pub use config::CellConfig;
 
+pub mod metrics;
+pub mod logging;
+
 #[cfg(feature = "consensus")]
 pub use cell_consensus;
 

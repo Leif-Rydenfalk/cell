@@ -13,6 +13,13 @@ pub mod synapse;
 #[cfg(feature = "std")]
 pub mod membrane;
 
+// Resilience Modules
+pub mod retry;
+pub mod circuit_breaker;
+pub mod deadline;
+pub mod load_balancer;
+pub mod pool;
+
 pub use response::Response;
 
 #[cfg(feature = "std")]
