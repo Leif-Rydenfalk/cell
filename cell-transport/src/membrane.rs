@@ -15,7 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-// Explicit imports for Rkyv types
+// Fix: AllocBox doesn't exist, remove it. Ensure AllocSerializer is imported.
 use rkyv::ser::serializers::{
     CompositeSerializer, 
     AlignedSerializer, 
@@ -134,6 +134,7 @@ impl Membrane {
 
         info!("[{}] Membrane Active at {:?}", name, socket_path);
 
+        // Fix: Explicit generic parameters to help type inference
         Self::bind_generic::<UnixListenerAdapter, F, Req, Resp>(listener, handler, genome_json, name, consensus_tx).await
     }
 }
@@ -178,7 +179,7 @@ where
 
                 let aligned_input = std::mem::take(&mut write_buf);
                 
-                // Explicitly typed serializer
+                // Fix: Correct types for Rkyv 0.7 composite serializer
                 let mut serializer: CompositeSerializer<
                     AlignedSerializer<AlignedVec>,
                     FallbackScratch<HeapScratch<1024>, AllocScratch>,
@@ -270,7 +271,7 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
             return blake3::hash(&new_token).as_bytes().to_vec();
         }
     }
-    // Users requires std/shm feature
+    // Fallback if users crate not available or other issue
     #[cfg(feature = "users")]
     {
         let uid = users::get_current_uid();
@@ -278,6 +279,7 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
     }
     #[cfg(not(feature = "users"))]
     {
-        blake3::hash(b"fallback").as_bytes().to_vec()
+        // Safe fallback for compilation, though SHM requires UID matching usually
+        blake3::hash(b"no-users-crate").as_bytes().to_vec()
     }
 }
