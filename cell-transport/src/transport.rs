@@ -117,10 +117,12 @@ impl ShmTransport {
 impl Transport for ShmTransport {
     fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + Send + '_>> {
         let channel = data[0];
-        let payload = &data[1..];
+        let payload = data[1..].to_vec();
+        // Clone client to satisfy lifetime 'static for the future
+        let client = self.client.clone();
         
         Box::pin(async move {
-            let resp_msg = self.client.request_raw(payload, channel).await.map_err(|_| TransportError::Io)?;
+            let resp_msg = client.request_raw(&payload, channel).await.map_err(|_| TransportError::Io)?;
             Ok(resp_msg.get_bytes().to_vec())
         })
     }
@@ -147,10 +149,11 @@ impl Connection for ShmConnection {
             loop {
                 if let Some(msg) = self.rx.try_read_raw() {
                     let channel = msg.channel();
+                    let data_ptr = msg.get_bytes();
                     let guard = Box::new(msg.token()) as Box<dyn core::any::Any + Send + Sync>;
                     
                     return Ok((channel, Vesicle::Guarded {
-                        data: msg.get_bytes(),
+                        data: data_ptr,
                         _guard: guard,
                     }));
                 }

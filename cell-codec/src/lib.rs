@@ -5,10 +5,9 @@
 
 extern crate alloc;
 
-use cell_core::Codec;
 use rkyv::ser::serializers::AllocSerializer;
 use rkyv::ser::Serializer;
-use rkyv::{Archive, Serialize};
+use rkyv::Serialize;
 use alloc::vec::Vec;
 
 pub struct RkyvCodec;

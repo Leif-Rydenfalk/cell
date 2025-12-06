@@ -4,12 +4,12 @@
 pub mod wal;
 
 use anyhow::Result;
-use cell_model::rkyv::{self, Archive, Serialize, Deserialize};
+use rkyv::{Archive, Serialize, Deserialize};
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use wal::{LogEntry, WriteAheadLog};
-use tracing::{info, warn, error};
-use cell_sdk::Synapse;
+use tracing::{info, warn};
+use cell_transport::Synapse;
 use cell_core::channel;
 
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]

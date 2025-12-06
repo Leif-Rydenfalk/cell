@@ -4,5 +4,9 @@ version = { workspace = true }
 edition = { workspace = true }
 description = "The absolute minimum no_std primitives for Cell."
 
+[features]
+default = []
+std = []
+
 [dependencies]
 # No standard library dependencies by default

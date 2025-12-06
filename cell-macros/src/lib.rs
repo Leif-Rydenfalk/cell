@@ -11,6 +11,8 @@ use syn::{
 use convert_case::{Case, Casing};
 use std::path::PathBuf;
 use std::fs;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 // Helpers
 fn normalize_ty(ty: &Type) -> Type {
@@ -43,6 +45,18 @@ fn sanitize_return_type(ty: &Type) -> Type {
         }
     }
     ty.clone()
+}
+
+fn is_zero_copy_ref(ty: &Type) -> bool {
+    if let Type::Reference(type_ref) = ty {
+        if let Type::Path(type_path) = &*type_ref.elem {
+            if let Some(segment) = type_path.path.segments.last() {
+                let s = segment.ident.to_string();
+                return s == "Archived" || s.starts_with("Archived");
+            }
+        }
+    }
+    false
 }
 
 fn has_attr(attrs: &[Attribute], name: &str) -> bool {
@@ -90,6 +104,7 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
              for arg in &m.sig.inputs {
                 if let FnArg::Typed(pat) = arg {
                     if let Pat::Ident(id) = &*pat.pat {
+                        // We store the original type for signature matching logic
                         args.push((id.ident.clone(), *pat.ty.clone()));
                     }
                 }
@@ -109,6 +124,7 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let req_variants = methods.iter().map(|(n, args, _, _)| {
         let vname = format_ident!("{}", n.to_string().to_case(Case::Pascal));
         let fields = args.iter().map(|(an, at)| {
+             // Protocol fields are normalized (e.g. Vec<u8>, not &Archived<Vec<u8>>)
              let norm = normalize_ty(at);
              quote! { #an: #norm }
         });
@@ -123,8 +139,25 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let dispatch_arms = methods.iter().map(|(n, args, _, _)| {
         let vname = format_ident!("{}", n.to_string().to_case(Case::Pascal));
         let field_names: Vec<_> = args.iter().map(|(an, _)| an).collect();
+        
+        let arg_preps = args.iter().map(|(an, at)| {
+            if is_zero_copy_ref(at) {
+                // Zero-copy: Pass the reference directly
+                quote! { let #an = #an; }
+            } else {
+                // Owned/Standard: Deserialize
+                quote! {
+                    let #an = ::cell_sdk::rkyv::Deserialize::deserialize(
+                        #an, 
+                        &mut ::cell_sdk::rkyv::de::deserializers::SharedDeserializeMap::new()
+                    ).map_err(|e| ::anyhow::anyhow!("Deserialization failed for argument '{}': {:?}", stringify!(#an), e))?;
+                }
+            }
+        });
+
         quote! {
             ArchivedProtocol::#vname { #(#field_names),* } => {
+                #(#arg_preps)*
                 let result = self.#n(#(#field_names),*).await;
                 let wire_result = match result {
                     Ok(val) => Ok(val),
@@ -134,6 +167,14 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     });
+
+    // Generate Fingerprint
+    let mut hasher = DefaultHasher::new();
+    service_name.to_string().hash(&mut hasher);
+    for (n, _, _, _) in &methods {
+        n.to_string().hash(&mut hasher);
+    }
+    let fingerprint = hasher.finish();
 
     let expanded = quote! {
         #input
@@ -163,9 +204,11 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         impl #service_name {
+            pub const SCHEMA_FINGERPRINT: u64 = #fingerprint;
+
             pub async fn serve(self, name: &str) -> ::anyhow::Result<()> {
                 let service = std::sync::Arc::new(self);
-                ::cell_sdk::Runtime::ignite(
+                ::cell_sdk::Runtime::ignite::<_, #protocol_name, #response_name>(
                     move |archived_req| {
                         let svc = service.clone();
                         Box::pin(async move {
@@ -213,6 +256,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     }
 
     let dna_path = locate_dna(cell_name);
+    let dna_path_str = dna_path.to_str().expect("Invalid path");
     
     let file = match cell_build::load_and_flatten_source(&dna_path) {
         Ok(f) => f,
@@ -286,7 +330,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         quote! { #vname(#wret) }
     });
 
-    let client_methods = methods.iter().map(|(n, args, _, wret)| {
+    let client_methods = methods.iter().map(|(n, args, wret)| {
         let vname = format_ident!("{}", n.to_string().to_case(Case::Pascal));
         let args_sig = args.iter().map(|(an, at)| quote! { #an: #at });
         let args_struct = args.iter().map(|(an, _)| quote! { #an });

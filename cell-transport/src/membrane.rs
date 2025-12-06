@@ -15,25 +15,23 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use rkyv::ser::serializers::AllocSerializer;
+// Explicit imports for Rkyv types
+use rkyv::ser::serializers::{
+    CompositeSerializer, 
+    AlignedSerializer, 
+    FallbackScratch, 
+    SharedSerializeMap, 
+    HeapScratch, 
+    AllocScratch,
+    AllocSerializer 
+};
 use tracing::{info, warn};
 use rkyv::AlignedVec;
 use tokio::sync::mpsc::Sender;
 use std::time::SystemTime;
 
-#[cfg(feature = "axon")]
-use cell_axon::AxonServer;
-
-#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
-use crate::shm::{RingBuffer, ShmSerializer};
-#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
-use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
-use std::os::unix::io::AsRawFd;
-#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
-use anyhow::bail;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -66,7 +64,7 @@ impl Membrane {
 
         loop {
             match listener.accept().await {
-                Ok(mut connection) => {
+                Ok(connection) => {
                     let permit = match semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,
                         Err(_) => {
@@ -136,7 +134,7 @@ impl Membrane {
 
         info!("[{}] Membrane Active at {:?}", name, socket_path);
 
-        Self::bind_generic(listener, handler, genome_json, name, consensus_tx).await
+        Self::bind_generic::<UnixListenerAdapter, F, Req, Resp>(listener, handler, genome_json, name, consensus_tx).await
     }
 }
 
@@ -167,7 +165,7 @@ where
 
         if data == GENOME_REQUEST {
             let resp = if let Some(json) = genome.as_ref() { json.as_bytes() } else { &[] };
-            conn.send(resp).await?;
+            conn.send(resp).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
             continue;
         }
 
@@ -179,16 +177,23 @@ where
                 let response = handler(archived_req).await?;
 
                 let aligned_input = std::mem::take(&mut write_buf);
-                let mut serializer = rkyv::ser::serializers::CompositeSerializer::new(
-                    rkyv::ser::serializers::AlignedSerializer::new(aligned_input),
-                    rkyv::ser::serializers::FallbackScratch::default(),
-                    rkyv::ser::serializers::SharedSerializeMap::default(),
+                
+                // Explicitly typed serializer
+                let mut serializer: CompositeSerializer<
+                    AlignedSerializer<AlignedVec>,
+                    FallbackScratch<HeapScratch<1024>, AllocScratch>,
+                    SharedSerializeMap
+                > = CompositeSerializer::new(
+                    AlignedSerializer::new(aligned_input),
+                    FallbackScratch::default(),
+                    SharedSerializeMap::default(),
                 );
+
                 serializer.serialize_value(&response)?;
                 let aligned_output = serializer.into_serializer().into_inner();
                 let bytes = aligned_output.as_slice();
                 
-                conn.send(bytes).await?;
+                conn.send(bytes).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
                 write_buf = aligned_output;
                 write_buf.clear();
@@ -196,9 +201,9 @@ where
             channel::CONSENSUS => {
                 if let Some(tx) = consensus_tx.as_ref() {
                     let _ = tx.send(data.to_vec()).await;
-                    conn.send(&[]).await?;
+                    conn.send(&[]).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
                 } else {
-                    conn.send(b"No Consensus").await?;
+                    conn.send(b"No Consensus").await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
                 }
             }
             channel::OPS => {
@@ -212,28 +217,34 @@ where
                         OpsResponse::Status {
                             name: cell_name.to_string(),
                             uptime_secs: uptime,
-                            memory_usage: 0, // Placeholder
+                            memory_usage: 0,
                             consensus_role: if consensus_tx.is_some() { "Enabled".into() } else { "Disabled".into() },
                         }
                     }
                 };
 
                 let aligned_input = std::mem::take(&mut write_buf);
-                let mut serializer = rkyv::ser::serializers::CompositeSerializer::new(
-                    rkyv::ser::serializers::AlignedSerializer::new(aligned_input),
-                    rkyv::ser::serializers::FallbackScratch::default(),
-                    rkyv::ser::serializers::SharedSerializeMap::default(),
+                
+                let mut serializer: CompositeSerializer<
+                    AlignedSerializer<AlignedVec>,
+                    FallbackScratch<HeapScratch<1024>, AllocScratch>,
+                    SharedSerializeMap
+                > = CompositeSerializer::new(
+                    AlignedSerializer::new(aligned_input),
+                    FallbackScratch::default(),
+                    SharedSerializeMap::default(),
                 );
+
                 serializer.serialize_value(&resp)?;
                 let aligned_output = serializer.into_serializer().into_inner();
                 let bytes = aligned_output.as_slice();
                 
-                conn.send(bytes).await?;
+                conn.send(bytes).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
                 write_buf = aligned_output;
                 write_buf.clear();
             }
             _ => {
-                conn.send(b"Unknown Channel").await?;
+                conn.send(b"Unknown Channel").await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
             }
         }
     }
@@ -259,6 +270,14 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
             return blake3::hash(&new_token).as_bytes().to_vec();
         }
     }
-    let uid = users::get_current_uid();
-    blake3::hash(&uid.to_le_bytes()).as_bytes().to_vec()
+    // Users requires std/shm feature
+    #[cfg(feature = "users")]
+    {
+        let uid = users::get_current_uid();
+        blake3::hash(&uid.to_le_bytes()).as_bytes().to_vec()
+    }
+    #[cfg(not(feature = "users"))]
+    {
+        blake3::hash(b"fallback").as_bytes().to_vec()
+    }
 }

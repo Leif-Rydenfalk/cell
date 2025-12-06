@@ -95,7 +95,8 @@ impl RingBuffer {
 
     #[cfg(target_os = "macos")]
     pub fn create(name: &str) -> anyhow::Result<(Arc<Self>, std::os::unix::io::RawFd)> {
-        use nix::sys::mman::{shm_open, shm_unlink, ShmOFlag};
+        use nix::fcntl::OFlag;
+        use nix::sys::mman::{shm_open, shm_unlink};
         use nix::sys::stat::Mode;
         use nix::unistd::ftruncate;
         use std::ffi::CString;
@@ -106,7 +107,7 @@ impl RingBuffer {
 
         let owned_fd = shm_open(
             name_cstr.as_c_str(),
-            ShmOFlag::O_CREAT | ShmOFlag::O_RDWR | ShmOFlag::O_EXCL,
+            OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_EXCL,
             Mode::S_IRUSR | Mode::S_IWUSR,
         )?;
 
@@ -198,7 +199,6 @@ impl RingBuffer {
                     }
                 }
 
-                // Set owner PID immediately
                 let header_ptr = unsafe { self.data.add(offset) as *mut SlotHeader };
                 unsafe {
                     (*header_ptr).owner_pid.store(std::process::id(), Ordering::Release);
@@ -219,11 +219,9 @@ impl RingBuffer {
             rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
         if let Some(raw) = self.try_read_raw() {
-            let archived_ref = unsafe {
-                match rkyv::check_archived_root::<T>(raw.data) {
-                    Ok(a) => a,
-                    Err(_) => return None,
-                }
+            let archived_ref = match rkyv::check_archived_root::<T>(raw.data) {
+                Ok(a) => a,
+                Err(_) => return None,
             };
             let archived_static: &'static T::Archived = unsafe { std::mem::transmute(archived_ref) };
             Some(ShmMessage {
@@ -276,7 +274,6 @@ impl RingBuffer {
 
         let mut rc = header.refcount.load(Ordering::Acquire);
         
-        // Robustness: Check if locked by dead process
         if rc > 0 {
             let pid = header.owner_pid.load(Ordering::Acquire);
             if pid > 0 && !is_process_alive(pid) {
@@ -300,6 +297,7 @@ impl RingBuffer {
 
         let channel = header.channel.load(Ordering::Acquire);
         let data_ptr = unsafe { self.data.add(data_offset) };
+        
         let slice = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
         let aligned_len = (data_len as usize + ALIGNMENT - 1) & !(ALIGNMENT - 1);
         let actual_consumed = total_consumed + aligned_len;
@@ -309,8 +307,10 @@ impl RingBuffer {
             total_consumed: actual_consumed,
         });
 
+        let static_slice: &'static [u8] = unsafe { std::mem::transmute(slice) };
+
         Some(RawShmMessage {
-            data: slice,
+            data: static_slice,
             channel,
             _token: token,
         })
@@ -391,7 +391,7 @@ pub struct RawShmMessage {
     _token: Arc<SlotToken>,
 }
 impl RawShmMessage {
-    pub fn get_bytes(&self) -> &[u8] { self.data }
+    pub fn get_bytes(&self) -> &'static [u8] { self.data }
     pub fn channel(&self) -> u8 { self.channel }
     pub fn token(&self) -> Arc<SlotToken> { self._token.clone() }
 }
@@ -438,9 +438,10 @@ where
     }
 }
 
+#[derive(Clone)]
 pub struct ShmClient {
-    tx: Arc<RingBuffer>,
-    rx: Arc<RingBuffer>,
+    pub tx: Arc<RingBuffer>,
+    pub rx: Arc<RingBuffer>,
 }
 
 impl ShmClient {
@@ -480,11 +481,9 @@ impl ShmClient {
         let bytes = rkyv::to_bytes::<_, 1024>(req)?.into_vec();
         let msg = self.request_raw(&bytes, channel).await?;
         
-        let archived_ref = unsafe {
-             match rkyv::check_archived_root::<Resp>(msg.data) {
-                Ok(a) => a,
-                Err(_) => anyhow::bail!("SHM validation failed"),
-            }
+        let archived_ref = match rkyv::check_archived_root::<Resp>(msg.data) {
+            Ok(a) => a,
+            Err(_) => anyhow::bail!("SHM validation failed"),
         };
         let archived_static: &'static Resp::Archived = unsafe { std::mem::transmute(archived_ref) };
 
@@ -497,10 +496,20 @@ impl ShmClient {
 }
 
 fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as i32, 0) == 0 || *libc::__errno_location() == libc::EPERM
+    #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
+    {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        // Kill with signal 0 checks for existence. Using None as signal 0.
+        match kill(Pid::from_raw(pid as i32), None) {
+            Ok(_) => true,
+            Err(nix::errno::Errno::ESRCH) => false,
+            Err(_) => true, // Permission denied or other error -> assume alive
+        }
     }
-    #[cfg(not(unix))]
-    true
+    #[cfg(not(all(unix, any(target_os = "linux", target_os = "macos"))))]
+    {
+        let _ = pid;
+        true
+    }
 }

@@ -4,6 +4,9 @@
 pub mod lan;
 pub mod local;
 
+// Re-export LanDiscovery for SDK convenience
+pub use lan::LanDiscovery;
+
 use std::path::PathBuf;
 use std::time::Duration;
 

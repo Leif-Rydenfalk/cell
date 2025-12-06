@@ -22,7 +22,11 @@ pub use membrane::Membrane;
 
 pub use transport::{UnixTransport};
 #[cfg(feature = "shm")]
-pub use transport::ShmTransport;
+pub use transport::{ShmTransport, ShmConnection};
+// Re-export ShmClient for SDK usage
+#[cfg(feature = "shm")]
+pub use shm::ShmClient;
+
 #[cfg(feature = "axon")]
 pub use transport::QuicTransport;
 

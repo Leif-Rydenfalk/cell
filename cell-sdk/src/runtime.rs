@@ -9,8 +9,15 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, error};
 
+// Consolidate consensus imports to be available for the function signature
 #[cfg(feature = "consensus")]
 use cell_consensus::{RaftConfig, RaftNode, StateMachine};
+
+// Dummy trait if consensus is disabled to allow compiling the signature
+#[cfg(not(feature = "consensus"))]
+pub trait StateMachine: Send + Sync + 'static {
+    fn apply(&self, _command: &[u8]) {}
+}
 
 pub struct Runtime;
 
@@ -32,7 +39,7 @@ impl Runtime {
         info!("[Runtime] Booting Cell '{}' (Node {})", name, config.node_id);
 
         #[cfg(feature = "axon")]
-        let _ = cell_axon::PheromoneSystem::ignite().await?;
+        let _ = cell_axon::pheromones::PheromoneSystem::ignite().await?;
 
         let consensus_tx = if let Some(sm) = raft_sm {
             #[cfg(feature = "consensus")]
@@ -64,6 +71,6 @@ impl Runtime {
         };
 
         info!("[Runtime] Membrane binding to {}", name);
-        Membrane::bind(name, service, None, consensus_tx).await
+        Membrane::bind::<S, Req, Resp>(name, service, None, consensus_tx).await
     }
 }

@@ -9,6 +9,7 @@ use alloc::boxed::Box;
 use core::future::Future;
 use core::pin::Pin;
 use core::any::Any;
+use core::fmt;
 
 /// The 20-byte immutable header.
 #[repr(C, packed)]
@@ -47,6 +48,21 @@ pub enum TransportError {
     Serialization,
     Other(&'static str),
 }
+
+impl fmt::Display for TransportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TransportError::Io => write!(f, "IO Error"),
+            TransportError::Timeout => write!(f, "Timeout"),
+            TransportError::ConnectionClosed => write!(f, "Connection Closed"),
+            TransportError::Serialization => write!(f, "Serialization Error"),
+            TransportError::Other(msg) => write!(f, "Transport Error: {}", msg),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for TransportError {}
 
 /// Client-side: Request/Response pattern.
 pub trait Transport: Send + Sync {

@@ -2,7 +2,7 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use anyhow::Result;
-use cell_model::rkyv::{self, Archive, Serialize, Deserialize};
+use rkyv::{Archive, Serialize, Deserialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
