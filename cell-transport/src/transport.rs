@@ -7,6 +7,7 @@ use std::pin::Pin;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use std::sync::Arc;
+use core::any::Any;
 
 // --- Unix Domain Socket Implementation ---
 
@@ -53,6 +54,12 @@ pub struct UnixConnection {
     inner: tokio::net::UnixStream,
 }
 
+impl UnixConnection {
+    pub fn into_inner(self) -> tokio::net::UnixStream {
+        self.inner
+    }
+}
+
 impl Connection for UnixConnection {
     fn recv(&mut self) -> Pin<Box<dyn Future<Output = Result<(u8, Vesicle<'static>), TransportError>> + Send + '_>> {
         Box::pin(async move {
@@ -80,6 +87,14 @@ impl Connection for UnixConnection {
             self.inner.write_all(&data_vec).await.map_err(|_| TransportError::Io)?;
             Ok(())
         })
+    }
+
+    fn as_any(&mut self) -> &mut (dyn Any + Send) {
+        self
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+        self
     }
 }
 
@@ -118,7 +133,6 @@ impl Transport for ShmTransport {
     fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + Send + '_>> {
         let channel = data[0];
         let payload = data[1..].to_vec();
-        // Clone client to satisfy lifetime 'static for the future
         let client = self.client.clone();
         
         Box::pin(async move {
@@ -180,6 +194,9 @@ impl Connection for ShmConnection {
             Ok(())
         })
     }
+
+    fn as_any(&mut self) -> &mut (dyn Any + Send) { self }
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> { self }
 }
 
 // --- QUIC Implementation ---

@@ -33,9 +33,14 @@ pub async fn probe_unix_socket(path: &PathBuf) -> Option<Duration> {
     let start = Instant::now();
     let mut stream = tokio::net::UnixStream::connect(path).await.ok()?;
 
-    let req_len = GENOME_REQUEST.len() as u32;
+    // Fix: Prepend dummy byte for channel framing
+    let mut frame = Vec::with_capacity(1 + GENOME_REQUEST.len());
+    frame.push(0x00);
+    frame.extend_from_slice(GENOME_REQUEST);
+
+    let req_len = frame.len() as u32;
     stream.write_all(&req_len.to_le_bytes()).await.ok()?;
-    stream.write_all(GENOME_REQUEST).await.ok()?;
+    stream.write_all(&frame).await.ok()?;
 
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await.ok()?;

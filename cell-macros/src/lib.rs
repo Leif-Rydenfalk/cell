@@ -47,12 +47,31 @@ fn sanitize_return_type(ty: &Type) -> Type {
     ty.clone()
 }
 
+// Improved detection logic as requested
 fn is_zero_copy_ref(ty: &Type) -> bool {
     if let Type::Reference(type_ref) = ty {
         if let Type::Path(type_path) = &*type_ref.elem {
             if let Some(segment) = type_path.path.segments.last() {
                 let s = segment.ident.to_string();
-                return s == "Archived" || s.starts_with("Archived");
+                // Only treat as zero-copy if it's a reference to an Archived type
+                if s == "Archived" {
+                    // Add validation: Vec<u8> should NOT be zero-copy via this path
+                    if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(GenericArgument::Type(inner)) = args.args.first() {
+                            if let Type::Path(inner_path) = inner {
+                                if let Some(inner_seg) = inner_path.path.segments.last() {
+                                    // Vec, String, etc. should always deserialize because
+                                    // their normalized client type (Vec<u8>) creates a nested
+                                    // serialization structure that doesn't match the simple reference.
+                                    if inner_seg.ident == "Vec" || inner_seg.ident == "String" {
+                                        return false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return true;
+                }
             }
         }
     }
@@ -256,6 +275,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     }
 
     let dna_path = locate_dna(cell_name);
+    // Explicitly stringify the path for inclusion
     let dna_path_str = dna_path.to_str().expect("Invalid path");
     
     let file = match cell_build::load_and_flatten_source(&dna_path) {
@@ -310,6 +330,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
                 ReturnType::Type(_, ty) => *ty.clone(),
              };
              let wire_ret = sanitize_return_type(&ret);
+             // Cell Remote stores 3 elements: name, args, wire_ret
              methods.push((name, args, wire_ret));
         }
     }

@@ -30,9 +30,7 @@ use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
 use std::os::unix::io::AsRawFd;
 
 pub struct Synapse {
-    // Stored for healing/regrowing
     cell_name: String,
-    
     transport: Box<dyn Transport>,
     
     #[cfg(feature = "shm")]
@@ -51,24 +49,32 @@ impl Synapse {
             
             #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
             if std::env::var("CELL_DISABLE_SHM").is_err() {
-                if let Ok(client) = Self::try_upgrade_to_shm(&mut stream).await {
-                    info!("[Synapse] ✓ Upgraded to Shared Memory");
-                    return Ok(Self {
-                        cell_name: cell_name.to_string(),
-                        transport: Box::new(ShmTransport::new(
-                            ShmClient::new(client.tx.clone(), client.rx.clone())
-                        )),
-                        shm_client: Some(client),
-                    });
+                match Self::try_upgrade_to_shm(&mut stream).await {
+                    Ok(client) => {
+                        info!("[Synapse] ✓ Upgraded to Shared Memory");
+                        return Ok(Self {
+                            cell_name: cell_name.to_string(),
+                            transport: Box::new(ShmTransport::new(
+                                ShmClient::new(client.tx.clone(), client.rx.clone())
+                            )),
+                            shm_client: Some(client),
+                        });
+                    }
+                    Err(e) => {
+                        warn!("[Synapse] SHM Upgrade failed ({}), falling back...", e);
+                    }
                 }
             }
             
-            return Ok(Self {
-                cell_name: cell_name.to_string(),
-                transport: Box::new(UnixTransport::new(stream)),
-                #[cfg(feature = "shm")]
-                shm_client: None,
-            });
+            // Re-connect to ensure clean stream state after potential failed upgrade
+            if let Ok(clean_stream) = UnixStream::connect(&socket_path).await {
+                return Ok(Self {
+                    cell_name: cell_name.to_string(),
+                    transport: Box::new(UnixTransport::new(clean_stream)),
+                    #[cfg(feature = "shm")]
+                    shm_client: None,
+                });
+            }
         }
 
         #[cfg(feature = "axon")]
@@ -92,8 +98,14 @@ impl Synapse {
         let my_uid = nix::unistd::getuid().as_raw();
         if cred.uid() != my_uid { bail!("UID mismatch"); }
 
-        stream.write_all(&(SHM_UPGRADE_REQUEST.len() as u32).to_le_bytes()).await?;
-        stream.write_all(SHM_UPGRADE_REQUEST).await?;
+        // Fix: Prepend dummy channel byte so UnixConnection on server strips it 
+        // and leaves the payload intact.
+        let mut frame = Vec::with_capacity(1 + SHM_UPGRADE_REQUEST.len());
+        frame.push(0x00); 
+        frame.extend_from_slice(SHM_UPGRADE_REQUEST);
+
+        stream.write_all(&(frame.len() as u32).to_le_bytes()).await?;
+        stream.write_all(&frame).await?;
 
         let mut challenge = [0u8; 32];
         stream.read_exact(&mut challenge).await?;
@@ -140,7 +152,6 @@ impl Synapse {
         Ok(fds)
     }
 
-    // HEALING LOGIC
     async fn heal(&mut self) -> Result<()> {
         warn!("[Synapse] Connection lost to '{}'. Healing...", self.cell_name);
         
@@ -170,21 +181,14 @@ impl Synapse {
     pub async fn fire_on_channel(&mut self, channel_id: u8, data: &[u8]) -> Result<Response<Vec<u8>>> {
         let mut retries = 0;
         loop {
-            // Raw Shm Path (Note: healing might change this option)
             #[cfg(feature = "shm")]
             if let Some(client) = &self.shm_client {
                  match client.request_raw(data, channel_id).await {
                      Ok(msg) => return Ok(Response::Owned(msg.get_bytes().to_vec())),
-                     Err(_) => {
-                         // SHM Failure (e.g. ring corruption or peer death)
-                         // Fallthrough to heal
-                     }
+                     Err(_) => {} // Fallthrough to heal
                  }
             }
 
-            // Generic Transport Path
-            // We construct the frame here. Note: If using SHM transport but no client optimization,
-            // we use call(). 
             let mut frame = Vec::with_capacity(1 + data.len());
             frame.push(channel_id);
             frame.extend_from_slice(data);
@@ -222,9 +226,7 @@ impl Synapse {
             if let Some(client) = &self.shm_client {
                  match client.request::<Req, Resp>(request, channel).await {
                      Ok(msg) => return Ok(Response::ZeroCopy(msg)),
-                     Err(_) => {
-                         // Fallthrough to heal
-                     }
+                     Err(_) => {} 
                  }
             }
 

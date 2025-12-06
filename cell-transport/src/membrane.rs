@@ -2,7 +2,7 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use crate::resolve_socket_dir;
-use crate::transport::UnixListenerAdapter;
+use crate::transport::{UnixListenerAdapter, UnixConnection};
 use cell_core::{Listener, Connection, channel};
 use cell_model::protocol::GENOME_REQUEST;
 use cell_model::ops::{OpsRequest, OpsResponse};
@@ -15,7 +15,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-// Fix: AllocBox doesn't exist, remove it. Ensure AllocSerializer is imported.
 use rkyv::ser::serializers::{
     CompositeSerializer, 
     AlignedSerializer, 
@@ -29,9 +28,18 @@ use tracing::{info, warn};
 use rkyv::AlignedVec;
 use tokio::sync::mpsc::Sender;
 use std::time::SystemTime;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
+use crate::shm::RingBuffer;
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
+use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
+use std::os::unix::io::AsRawFd;
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
+use crate::transport::ShmConnection;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -64,7 +72,7 @@ impl Membrane {
 
         loop {
             match listener.accept().await {
-                Ok(connection) => {
+                Ok(mut connection) => {
                     let permit = match semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,
                         Err(_) => {
@@ -134,7 +142,6 @@ impl Membrane {
 
         info!("[{}] Membrane Active at {:?}", name, socket_path);
 
-        // Fix: Explicit generic parameters to help type inference
         Self::bind_generic::<UnixListenerAdapter, F, Req, Resp>(listener, handler, genome_json, name, consensus_tx).await
     }
 }
@@ -164,6 +171,46 @@ where
 
         let data = vesicle.as_slice();
 
+        #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
+        if data == SHM_UPGRADE_REQUEST {
+            // Note: Since we are in an async block spawn, downcasting the Box<dyn Connection> 
+            // inside the async block is safe regarding Send if Connection is Send.
+            // cell_core::Connection requires Send + Sync.
+            if let Ok(unix_conn_box) = conn.into_any().downcast::<UnixConnection>() {
+                let mut stream = unix_conn_box.into_inner();
+                
+                let cred = stream.peer_cred()?;
+                let my_uid = nix::unistd::getuid().as_raw();
+                if cred.uid() != my_uid { return Err(anyhow::anyhow!("UID mismatch")); }
+
+                let challenge: [u8; 32] = rand::random();
+                stream.write_all(&challenge).await?;
+                
+                let mut response = [0u8; 32];
+                stream.read_exact(&mut response).await?;
+                
+                let auth_token = get_shm_auth_token();
+                let expected = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
+                
+                if response != expected.as_bytes()[..32] {
+                    return Err(anyhow::anyhow!("Auth failed"));
+                }
+
+                let (rx_ring, rx_fd) = RingBuffer::create(&format!("{}_server_rx", cell_name))?;
+                let (tx_ring, tx_fd) = RingBuffer::create(&format!("{}_server_tx", cell_name))?;
+
+                stream.write_all(&(SHM_UPGRADE_ACK.len() as u32).to_le_bytes()).await?;
+                stream.write_all(SHM_UPGRADE_ACK).await?;
+
+                send_fds(stream.as_raw_fd(), &[rx_fd, tx_fd])?;
+
+                conn = Box::new(ShmConnection::new(rx_ring, tx_ring));
+                continue;
+            } else {
+                return Err(anyhow::anyhow!("SHM request on non-upgradeable transport"));
+            }
+        }
+
         if data == GENOME_REQUEST {
             let resp = if let Some(json) = genome.as_ref() { json.as_bytes() } else { &[] };
             conn.send(resp).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
@@ -179,7 +226,6 @@ where
 
                 let aligned_input = std::mem::take(&mut write_buf);
                 
-                // Fix: Correct types for Rkyv 0.7 composite serializer
                 let mut serializer: CompositeSerializer<
                     AlignedSerializer<AlignedVec>,
                     FallbackScratch<HeapScratch<1024>, AllocScratch>,
@@ -271,7 +317,6 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
             return blake3::hash(&new_token).as_bytes().to_vec();
         }
     }
-    // Fallback if users crate not available or other issue
     #[cfg(feature = "users")]
     {
         let uid = users::get_current_uid();
@@ -279,7 +324,18 @@ pub(crate) fn get_shm_auth_token() -> Vec<u8> {
     }
     #[cfg(not(feature = "users"))]
     {
-        // Safe fallback for compilation, though SHM requires UID matching usually
-        blake3::hash(b"no-users-crate").as_bytes().to_vec()
+        blake3::hash(b"fallback").as_bytes().to_vec()
     }
+}
+
+#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
+fn send_fds(socket_fd: std::os::unix::io::RawFd, fds: &[std::os::unix::io::RawFd]) -> Result<()> {
+    use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
+    use std::io::IoSlice;
+
+    let dummy = [0u8; 1];
+    let iov = [IoSlice::new(&dummy)];
+    let cmsg = ControlMessage::ScmRights(fds);
+    sendmsg::<()>(socket_fd, &iov, &[cmsg], MsgFlags::empty(), None)?;
+    Ok(())
 }

@@ -4,7 +4,7 @@ use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{error};
+use tracing::{error, warn};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -86,7 +86,6 @@ async fn main() -> Result<()> {
 
     let req_count = Arc::new(ShardedCounter::new());
     let latency_sum = Arc::new(ShardedCounter::new());
-    // NEW: Byte Counter
     let byte_count = Arc::new(ShardedCounter::new()); 
 
     let r_req = req_count.clone();
@@ -107,7 +106,7 @@ async fn main() -> Result<()> {
             start = now;
 
             let curr_req = r_req.load();
-            let curr_lat = r_lat.load(); // Note: Latency isn't strictly monotonic in calculation, but we track count
+            let curr_lat = r_lat.load();
             let curr_bytes = r_bytes.load();
 
             let delta_req = curr_req - last_req;
@@ -115,22 +114,6 @@ async fn main() -> Result<()> {
 
             let rps = delta_req as f64 / elapsed;
             
-            // Calculate Latency (Approximate avg of this window)
-            // We can't easily get delta_lat because we'd need to track sum of latencies in the window. 
-            // For simple reporting, we track global average or just assume stable.
-            // Let's rely on the counter accumulation.
-            // Actually, `latency_sum` is monotonic total nanos. 
-            // So we CAN calculate window average.
-            // We need `last_lat` to be the sum from previous tick.
-            // Let's fix that logic:
-            
-            // We need a way to track delta latency. 
-            // Since `r_lat` is monotonic sum, we can diff it.
-            // But we didn't store `last_lat_sum`. Let's assume `last_lat` variable above tracks requests, not time.
-            // Let's add a state variable for it.
-            // (Simulated here for brevity, assuming `curr_lat` works as a monotonic sum)
-            
-            // Re-fetching robustly:
             static mut LAST_LAT_SUM: u64 = 0;
             let delta_lat_sum = curr_lat - unsafe { LAST_LAT_SUM };
             unsafe { LAST_LAT_SUM = curr_lat };
@@ -138,7 +121,6 @@ async fn main() -> Result<()> {
             let avg_ns = if delta_req > 0 { delta_lat_sum as f64 / delta_req as f64 } else { 0.0 };
             let lat_str = if avg_ns < 1000.0 { format!("{:.0}ns", avg_ns) } else { format!("{:.2}µs", avg_ns/1000.0) };
 
-            // Throughput Calc
             let throughput_bps = delta_bytes as f64 / elapsed;
             let throughput_str = if throughput_bps > 1_000_000_000.0 {
                 format!("{:.2} GB/s", throughput_bps / 1_000_000_000.0)
@@ -168,12 +150,27 @@ async fn main() -> Result<()> {
         handles.push(tokio::spawn(async move {
             let mut client = match Exchange::connect().await {
                 Ok(c) => c,
-                Err(e) => { error!("Task {}: Connect failed: {}", i, e); return; }
+                Err(e) => { 
+                    error!("Task {}: Connect failed: {}", i, e); 
+                    return; 
+                }
             };
+
+            // TEST: Do a ping first to verify connection works
+            match unwrap_response(client.ping(0).await) {
+                Ok(_) => println!("Task {}: Connection verified with ping", i),
+                Err(e) => {
+                    error!("Task {}: Initial ping failed: {}", i, e);
+                    return;
+                }
+            }
 
             let mut seq = 0u64;
             let payload = if let Mode::Bytes(s) = task_mode { vec![0u8; s] } else { vec![] };
             let payload_size = payload.len() as u64;
+
+            let mut error_count = 0;
+            let max_errors = 5;
 
             loop {
                 let start = Instant::now();
@@ -196,10 +193,16 @@ async fn main() -> Result<()> {
                         if payload_size > 0 {
                             t_bytes.inc(payload_size);
                         }
+                        error_count = 0; // Reset on success
                     }
                     Err(e) => {
-                        error!("RPC Error: {}", e);
-                        break;
+                        error_count += 1;
+                        error!("Task {}: RPC Error ({}): {}", i, error_count, e);
+                        if error_count >= max_errors {
+                            error!("Task {}: Too many errors, exiting", i);
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
             }

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use cell_sdk as cell;
-use cell_sdk::rkyv::Archived;
+// Removed unused Archive import to clean up, using Vec<u8> now
+// use cell_sdk::rkyv::Archived; 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::signal;
@@ -36,7 +37,8 @@ impl ExchangeService {
         Ok(self.state.trade_count.load(Ordering::Relaxed))
     }
 
-    async fn ingest_data(&self, data: &Archived<Vec<u8>>) -> Result<u64> {
+    // Changed &Archived<Vec<u8>> to Vec<u8> to match macro expectations
+    async fn ingest_data(&self, data: Vec<u8>) -> Result<u64> {
         let len = data.len() as u64;
         if len > 0 { 
             let _ = data[0]; 
