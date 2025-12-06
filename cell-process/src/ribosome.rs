@@ -84,6 +84,22 @@ impl Ribosome {
         let mut hasher = blake3::Hasher::new();
         let mut files = Vec::new();
 
+        // Include Toolchain Version in Hash for Reproducibility
+        let rustc_version = Command::new("rustc")
+            .arg("--version")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        hasher.update(rustc_version.as_bytes());
+
+        // Include Cargo.lock if present
+        let lockfile = path.join("Cargo.lock");
+        if lockfile.exists() {
+             if let Ok(content) = fs::read(&lockfile) {
+                 hasher.update(&content);
+             }
+        }
+
         fn visit_dirs(dir: &Path, cb: &mut dyn FnMut(&Path)) -> std::io::Result<()> {
             if dir.is_dir() {
                 for entry in fs::read_dir(dir)? {

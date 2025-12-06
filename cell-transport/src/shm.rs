@@ -25,12 +25,13 @@ const HEADER_SIZE: usize = std::mem::size_of::<SlotHeader>();
 
 #[repr(C)]
 struct SlotHeader {
-    refcount: AtomicU32, // 4
-    len: AtomicU32,      // 4
-    epoch: AtomicU64,    // 8
-    owner_pid: AtomicU32,// 4
-    channel: AtomicU8,   // 1
-    _pad: [u8; 3],       // 3 (Padding to 24 bytes)
+    refcount: AtomicU32,   // 4
+    len: AtomicU32,        // 4
+    epoch: AtomicU64,      // 8
+    generation: AtomicU64, // 8 - Added for ABA / Stale read detection
+    owner_pid: AtomicU32,  // 4
+    channel: AtomicU8,     // 1
+    _pad: [u8; 3],         // 3 (Padding to 32 bytes)
 }
 
 #[repr(C, align(64))]
@@ -39,6 +40,16 @@ struct RingControl {
     _pad1: [u8; CACHE_LINE - 8],
     read_pos: AtomicU64,
     _pad2: [u8; CACHE_LINE - 8],
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ShmError {
+    #[error("Shared memory error")]
+    Io(#[from] std::io::Error),
+    #[error("Slot was reclaimed during read (Stale)")]
+    Stale,
+    #[error("Serialization error")]
+    Serialization(String),
 }
 
 pub struct RingBuffer {
@@ -213,33 +224,33 @@ impl RingBuffer {
         }
     }
 
-    pub fn try_read<T: Archive>(&self) -> Option<ShmMessage<T>>
+    pub fn try_read<T: Archive>(&self) -> Result<Option<ShmMessage<T>>, ShmError>
     where
         T::Archived:
             rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
-        if let Some(raw) = self.try_read_raw() {
+        if let Some(raw) = self.try_read_raw()? {
             let archived_ref = match rkyv::check_archived_root::<T>(raw.data) {
                 Ok(a) => a,
-                Err(_) => return None,
+                Err(e) => return Err(ShmError::Serialization(e.to_string())),
             };
             let archived_static: &'static T::Archived = unsafe { std::mem::transmute(archived_ref) };
-            Some(ShmMessage {
+            Ok(Some(ShmMessage {
                 archived: archived_static,
                 _token: raw._token,
                 _phantom: PhantomData,
-            })
+            }))
         } else {
-            None
+            Ok(None)
         }
     }
 
-    pub fn try_read_raw(&self) -> Option<RawShmMessage> {
+    pub fn try_read_raw(&self) -> Result<Option<RawShmMessage>, ShmError> {
         let read = unsafe { (*self.control).read_pos.load(Ordering::Acquire) };
         let write = unsafe { (*self.control).write_pos.load(Ordering::Acquire) };
 
         if read == write {
-            return None;
+            return Ok(None);
         }
 
         let read_idx = (read % self.capacity as u64) as usize;
@@ -263,13 +274,15 @@ impl RingBuffer {
             read
         };
 
+        // 1. Check generation before locking
+        let gen_before = header.generation.load(Ordering::Acquire);
         if header.epoch.load(Ordering::Acquire) != expected_epoch {
-            return None;
+            return Ok(None);
         }
 
         let data_len = header.len.load(Ordering::Acquire);
         if data_len == 0 {
-            return None;
+            return Ok(None);
         }
 
         let mut rc = header.refcount.load(Ordering::Acquire);
@@ -284,7 +297,7 @@ impl RingBuffer {
 
         loop {
             if rc != 0 {
-                return None;
+                return Ok(None);
             }
             match header
                 .refcount
@@ -293,6 +306,15 @@ impl RingBuffer {
                 Ok(_) => break,
                 Err(curr) => rc = curr,
             }
+        }
+
+        // 2. Check generation AGAIN after locking to detect wrap-around race
+        let gen_after = header.generation.load(Ordering::Acquire);
+        if gen_before != gen_after {
+            // Writer overwrote this slot while we were trying to lock it.
+            // Release lock and fail safely.
+            header.refcount.store(0, Ordering::Release);
+            return Err(ShmError::Stale);
         }
 
         let channel = header.channel.load(Ordering::Acquire);
@@ -309,11 +331,11 @@ impl RingBuffer {
 
         let static_slice: &'static [u8] = unsafe { std::mem::transmute(slice) };
 
-        Some(RawShmMessage {
+        Ok(Some(RawShmMessage {
             data: static_slice,
             channel,
             _token: token,
-        })
+        }))
     }
 
     pub async fn wait_for_slot(&self, size: usize) -> WriteSlot {
@@ -357,6 +379,9 @@ impl<'a> WriteSlot<'a> {
             (*header_ptr).refcount.store(0, Ordering::Release);
             (*header_ptr).len.store(actual_size as u32, Ordering::Release);
             std::sync::atomic::compiler_fence(Ordering::Release);
+            
+            // Bump generation after commit so readers can detect the change
+            (*header_ptr).generation.fetch_add(1, Ordering::Release);
             (*header_ptr).epoch.store(self.epoch_claim, Ordering::Release);
         }
     }
@@ -457,9 +482,20 @@ impl ShmClient {
 
         let mut spin = 0u32;
         loop {
-            if let Some(msg) = self.rx.try_read_raw() {
-                return Ok(msg);
+            match self.rx.try_read_raw() {
+                Ok(Some(msg)) => return Ok(msg),
+                Ok(None) => {
+                     // Keep spinning/sleeping
+                },
+                Err(ShmError::Stale) => {
+                    // Stale read implies race condition; back off slightly and retry reading loop
+                    // In a real scenario, this means we missed the message or it was corrupted/overwritten
+                    // For a Request/Response pattern, we should probably timeout if we miss it.
+                    // But here we just continue loop to try catch next valid state.
+                }
+                Err(e) => return Err(e.into()),
             }
+            
             spin += 1;
             if spin < 10000 {
                 std::hint::spin_loop();

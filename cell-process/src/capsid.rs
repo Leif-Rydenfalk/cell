@@ -35,6 +35,11 @@ impl Capsid {
         cmd.arg("--unshare-all")
             .arg("--share-net")
             .arg("--die-with-parent")
+            // Security Hardening
+            .arg("--new-session")
+            .arg("--cap-drop")
+            .arg("ALL")
+            
             .arg("--ro-bind")
             .arg("/")
             .arg("/")

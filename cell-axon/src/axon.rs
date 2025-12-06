@@ -217,7 +217,14 @@ fn make_server_config() -> Result<quinn::ServerConfig> {
     let priv_key = rustls::PrivateKey(key_der);
     let cert_chain = vec![rustls::Certificate(cert_der)];
     let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, priv_key)?;
-    Arc::get_mut(&mut server_config.transport).unwrap().max_concurrent_uni_streams(0_u8.into());
+    
+    // Hardening: QUIC Flow Control
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.max_concurrent_uni_streams(0u8.into());
+    transport_config.max_concurrent_bidi_streams(128u8.into());
+    
+    server_config.transport_config(Arc::new(transport_config));
+    
     Ok(server_config)
 }
 
@@ -245,5 +252,10 @@ fn make_client_endpoint() -> Result<quinn::Endpoint> {
     let client_config = quinn::ClientConfig::new(Arc::new(crypto));
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
+    
+    // Note: client flow control limits are negotiated during handshake based on server preference,
+    // but we can set local transport limits for our receiving side too if needed via EndpointConfig,
+    // though usually handled by connect().
+    
     Ok(endpoint)
 }
