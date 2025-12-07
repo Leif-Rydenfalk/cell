@@ -5,8 +5,6 @@ use tracing::{info, error};
 
 // --- SYMBIOSIS ---
 // We define the remote cell we want to talk to.
-// Note: We don't care how many there are or where they are.
-// Fixed: Point to "worker" directory where the source code lives.
 cell_remote!(Compute = "worker");
 
 #[tokio::main]
@@ -18,11 +16,10 @@ async fn main() -> Result<()> {
     info!("Scanning for 'compute' cells...");
 
     // 1. Connect to the Tissue (Swarm)
-    // This connects to ALL available instances of "compute".
     let mut tissue = match Tissue::connect("compute").await {
         Ok(t) => t,
-        Err(e) => {
-            error!("No workers found! Run some worker' instances first.");
+        Err(_e) => {
+            error!("No workers found! Run 'worker' instances first.");
             return Ok(());
         }
     };
@@ -34,11 +31,29 @@ async fn main() -> Result<()> {
     for i in 1..=10 {
         let task = Compute::ComputeTask { id: i, val: i * 10 };
         
-        // .distribute() picks ONE worker (Round Robin)
-        // Note: We manually deserialize here because Tissue returns raw Response wrapper
-        // In the future, codegen handles this wrapper too.
-        let resp_wrapper = tissue.distribute::<_, Compute::ComputeResult>(&task).await?;
-        let result = resp_wrapper.deserialize()?;
+        // Wrap the task in the generated Protocol Enum
+        // The macro generates 'WorkerServiceProtocol' based on the struct name 'WorkerService'
+        let req = Compute::WorkerServiceProtocol::Compute { task };
+        
+        // .distribute() sends the request
+        // We expect a WorkerServiceResponse back, not just the result struct
+        let resp_wrapper = tissue.distribute::<_, Compute::WorkerServiceResponse>(&req).await?;
+        let response_enum = resp_wrapper.deserialize()?;
+
+        // Unwrap the Response Enum -> Result<ComputeResult, String> -> ComputeResult
+        let result = match response_enum {
+            Compute::WorkerServiceResponse::Compute(inner_result) => match inner_result {
+                Ok(val) => val,
+                Err(e) => {
+                    error!("Task {} Failed: {}", i, e);
+                    continue;
+                }
+            },
+            _ => {
+                error!("Unexpected response variant");
+                continue;
+            }
+        };
 
         info!(
             "Task {:<2} -> Worker {:<4} | Result: {}", 
@@ -50,8 +65,11 @@ async fn main() -> Result<()> {
     info!("\n>>> Broadcasting Global Update (Multicast) <<<");
     let update = Compute::StatusUpdate { msg: "System Shutdown Imminent".to_string() };
     
+    // Wrap in Protocol Enum
+    let req = Compute::WorkerServiceProtocol::UpdateStatus { update };
+    
     // .broadcast() sends to ALL workers
-    let results = tissue.broadcast::<_, bool>(&update).await;
+    let results = tissue.broadcast::<_, Compute::WorkerServiceResponse>(&req).await;
     
     info!("Broadcast sent to {} workers.", results.len());
 
