@@ -338,8 +338,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let protocol_name = format_ident!("{}Protocol", service_struct_name);
     let response_name = format_ident!("{}Response", service_struct_name);
     let client_struct = format_ident!("Client");
-    let internal_mod_name = format_ident!("__{}_internal", module_name);
-
+    
     let req_variants = methods.iter().map(|(n, args, _)| {
         let vname = format_ident!("{}", n.to_string().to_case(Case::Pascal));
         let fields = args.iter().map(|(an, at)| quote! { #an: #at });
@@ -370,7 +369,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #[allow(non_snake_case, dead_code)]
-        pub mod #internal_mod_name {
+        pub mod #module_name {
             use super::*;
             use cell_sdk::protein;
             use ::cell_sdk::serde::{Deserialize, Serialize};
@@ -413,8 +412,11 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
                 pub fn connection(&mut self) -> &mut ::cell_sdk::Synapse { &mut self.conn }
                 #(#client_methods)*
             }
+
+            pub async fn connect() -> ::anyhow::Result<#client_struct> {
+                #client_struct::connect().await
+            }
         }
-        pub use #internal_mod_name::#client_struct as #module_name; 
     };
 
     TokenStream::from(expanded)

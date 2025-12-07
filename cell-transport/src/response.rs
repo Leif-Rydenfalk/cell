@@ -67,4 +67,19 @@ where
         let mut deserializer = rkyv::de::deserializers::SharedDeserializeMap::new();
         Ok(archived.deserialize(&mut deserializer)?)
     }
+
+    /// Converts the response into an owned version with a static lifetime.
+    /// This is useful when the response needs to outlive the connection lock.
+    pub fn into_owned(self) -> Response<'static, T> {
+        match self {
+            Response::Owned(v) => Response::Owned(v),
+            Response::Borrowed(b) => Response::Owned(b.to_vec()),
+            
+            #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
+            Response::ZeroCopy(m) => Response::ZeroCopy(m),
+            
+            #[cfg(not(all(feature = "shm", any(target_os = "linux", target_os = "macos"))))]
+            Response::_Phantom(_) => panic!("Cannot detach phantom response"),
+        }
+    }
 }

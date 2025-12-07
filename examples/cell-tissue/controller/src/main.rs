@@ -6,7 +6,8 @@ use tracing::{info, error};
 // --- SYMBIOSIS ---
 // We define the remote cell we want to talk to.
 // Note: We don't care how many there are or where they are.
-cell_remote!(Compute = "compute");
+// Fixed: Point to "worker" directory where the source code lives.
+cell_remote!(Compute = "worker");
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,7 +22,7 @@ async fn main() -> Result<()> {
     let mut tissue = match Tissue::connect("compute").await {
         Ok(t) => t,
         Err(e) => {
-            error!("No workers found! Run some 'tissue-worker' instances first.");
+            error!("No workers found! Run some worker' instances first.");
             return Ok(());
         }
     };

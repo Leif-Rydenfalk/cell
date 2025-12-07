@@ -21,6 +21,7 @@ rkyv = { workspace = true }
 rand = { workspace = true }
 blake3 = { workspace = true }
 anyhow = { workspace = true }
+thiserror = "1.0"
 
 tokio = { workspace = true, optional = true }
 nix = { workspace = true, optional = true }

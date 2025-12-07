@@ -171,7 +171,7 @@ impl Synapse {
         let mut challenge = [0u8; 32];
         stream.read_exact(&mut challenge).await?;
         
-        let auth_token = crate::membrane::get_shm_auth_token();
+        let auth_token = crate::membrane::get_shm_auth_token()?;
         let response = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
         stream.write_all(response.as_bytes()).await?;
 

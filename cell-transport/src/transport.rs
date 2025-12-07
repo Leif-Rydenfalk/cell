@@ -161,7 +161,7 @@ impl Connection for ShmConnection {
         Box::pin(async move {
             let mut spin = 0u32;
             loop {
-                if let Some(msg) = self.rx.try_read_raw() {
+                if let Ok(Some(msg)) = self.rx.try_read_raw() {
                     let channel = msg.channel();
                     let data_ptr = msg.get_bytes();
                     let guard = Box::new(msg.token()) as Box<dyn core::any::Any + Send + Sync>;

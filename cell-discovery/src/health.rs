@@ -104,7 +104,7 @@ impl HealthChecker {
         }
         
         // For LAN:
-        if let Some(sig) = crate::lan::LanDiscovery::global().find(cell_name).await {
+        if let Some(sig) = crate::lan::LanDiscovery::global().find_any(cell_name).await {
              // Simple TCP Connect check to the IP/Port
              if tokio::net::TcpStream::connect(format!("{}:{}", sig.ip, sig.port)).await.is_ok() {
                  return Ok(());

@@ -73,13 +73,18 @@ impl Tissue {
         // A proper LoadBalancer would return an index.
         // We'll just rotate the Vec for simplicity or pick 0 and rotate.
         
-        let synapse = guard.first_mut().unwrap(); 
-        let res = synapse.fire(request).await;
+        let result = {
+            let synapse = guard.first_mut().unwrap(); 
+            synapse.fire(request).await
+        };
+
+        // Detach lifetime from the guard by converting to owned/static response
+        let detached = result.map(|r| r.into_owned());
         
         // Rotate for next time
         guard.rotate_left(1);
         
-        res
+        detached
     }
 
     /// Broadcast a request to ALL instances in the tissue (Multicast)
@@ -94,7 +99,8 @@ impl Tissue {
         let mut results = Vec::new();
 
         for syn in guard.iter_mut() {
-            results.push(syn.fire(request).await);
+            let res = syn.fire(request).await;
+            results.push(res.map(|r| r.into_owned()));
         }
         results
     }
