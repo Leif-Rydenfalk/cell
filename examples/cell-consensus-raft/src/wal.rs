@@ -81,10 +81,6 @@ impl WriteAheadLog {
                 if let Err(_) = self.scan_for_next_magic() {
                     break; // EOF reached during scan or hard fail
                 }
-                // We found a magic (or EOF). The loop continues. 
-                // Since `scan_for_next_magic` positions cursor *after* the found magic, 
-                // we technically need to re-read the header logic.
-                // However, our scan implementation below rewinds to START of magic.
                 continue;
             }
 
@@ -112,8 +108,6 @@ impl WriteAheadLog {
             let actual_crc = crc32fast::hash(&buf);
             if actual_crc != expected_crc {
                 warn!("[WAL] CRC mismatch. Expected: {:x}, Got: {:x}. Entry invalid.", expected_crc, actual_crc);
-                // If CRC is bad, this entry is trash. But we trust the length was somewhat correct?
-                // Probably not. Safer to assume desync and scan.
                 let _ = self.scan_for_next_magic();
                 continue;
             }
@@ -129,22 +123,17 @@ impl WriteAheadLog {
         Ok(entries)
     }
 
-    /// Scans forward byte-by-byte to find the MAGIC sequence.
-    /// If found, positions cursor at the START of the magic bytes.
     fn scan_for_next_magic(&mut self) -> Result<()> {
         let mut window = [0u8; 4];
-        // Fill initial window
         if self.file.read_exact(&mut window).is_err() { return Err(anyhow::anyhow!("EOF")); }
         
         loop {
             if u32::from_le_bytes(window) == MAGIC {
-                // Found it. Rewind 4 bytes so the main loop can read it fresh.
                 self.file.seek(SeekFrom::Current(-4))?;
                 info!("[WAL] Resynced at offset {}", self.file.stream_position()?);
                 return Ok(());
             }
 
-            // Shift window: [1,2,3,4] -> [2,3,4, NEW]
             window[0] = window[1];
             window[1] = window[2];
             window[2] = window[3];

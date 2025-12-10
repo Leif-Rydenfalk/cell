@@ -5,12 +5,11 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
-    parse_macro_input, DeriveInput, Item, ItemImpl, Type, FnArg, Pat, ReturnType,
-    spanned::Spanned, Attribute, GenericArgument, PathArguments
+    parse_macro_input, DeriveInput, Item, ItemImpl, Type, FnArg, Pat, 
+    ReturnType, spanned::Spanned, Attribute, GenericArgument, PathArguments, File
 };
 use convert_case::{Case, Casing};
 use std::path::PathBuf;
-use std::fs;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -47,22 +46,16 @@ fn sanitize_return_type(ty: &Type) -> Type {
     ty.clone()
 }
 
-// Improved detection logic as requested
 fn is_zero_copy_ref(ty: &Type) -> bool {
     if let Type::Reference(type_ref) = ty {
         if let Type::Path(type_path) = &*type_ref.elem {
             if let Some(segment) = type_path.path.segments.last() {
                 let s = segment.ident.to_string();
-                // Only treat as zero-copy if it's a reference to an Archived type
                 if s == "Archived" {
-                    // Add validation: Vec<u8> should NOT be zero-copy via this path
                     if let PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(GenericArgument::Type(inner)) = args.args.first() {
                             if let Type::Path(inner_path) = inner {
                                 if let Some(inner_seg) = inner_path.path.segments.last() {
-                                    // Vec, String, etc. should always deserialize because
-                                    // their normalized client type (Vec<u8>) creates a nested
-                                    // serialization structure that doesn't match the simple reference.
                                     if inner_seg.ident == "Vec" || inner_seg.ident == "String" {
                                         return false;
                                     }
@@ -104,7 +97,46 @@ fn locate_dna(cell_name: &str) -> PathBuf {
     panic!("Could not locate DNA for '{}'", cell_name);
 }
 
-// Macros
+// NEW: Extract cell_macro definitions from a file
+fn extract_cell_macros(file: &File) -> Vec<(String, String, String)> {
+    let mut macros = Vec::new();
+    
+    fn visit_items(items: &[Item], macros: &mut Vec<(String, String, String)>) {
+        for item in items {
+            match item {
+                Item::Macro(m) if has_attr(&m.attrs, "cell_macro") => {
+                    let name = m.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                    let source = m.to_token_stream().to_string();
+                    macros.push((name, "declarative".to_string(), source));
+                }
+                Item::Fn(f) if has_attr(&f.attrs, "cell_macro") => {
+                    let name = f.sig.ident.to_string();
+                    let source = f.to_token_stream().to_string();
+                    
+                    // Detect proc macro type by signature
+                    let kind = if f.attrs.iter().any(|a| a.path().is_ident("proc_macro_attribute")) {
+                        "attribute"
+                    } else if f.attrs.iter().any(|a| a.path().is_ident("proc_macro_derive")) {
+                        "derive"
+                    } else {
+                        "function"
+                    };
+                    
+                    macros.push((name, kind.to_string(), source));
+                }
+                Item::Mod(m) => {
+                    if let Some((_, items)) = &m.content {
+                        visit_items(items, macros);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    visit_items(&file.items, &mut macros);
+    macros
+}
 
 #[proc_macro_attribute]
 pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -123,7 +155,6 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
              for arg in &m.sig.inputs {
                 if let FnArg::Typed(pat) = arg {
                     if let Pat::Ident(id) = &*pat.pat {
-                        // We store the original type for signature matching logic
                         args.push((id.ident.clone(), *pat.ty.clone()));
                     }
                 }
@@ -143,7 +174,6 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let req_variants = methods.iter().map(|(n, args, _, _)| {
         let vname = format_ident!("{}", n.to_string().to_case(Case::Pascal));
         let fields = args.iter().map(|(an, at)| {
-             // Protocol fields are normalized (e.g. Vec<u8>, not &Archived<Vec<u8>>)
              let norm = normalize_ty(at);
              quote! { #an: #norm }
         });
@@ -161,10 +191,8 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         
         let arg_preps = args.iter().map(|(an, at)| {
             if is_zero_copy_ref(at) {
-                // Zero-copy: Pass the reference directly
                 quote! { let #an = #an; }
             } else {
-                // Owned/Standard: Deserialize
                 quote! {
                     let #an = ::cell_sdk::rkyv::Deserialize::deserialize(
                         #an, 
@@ -187,7 +215,6 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     });
 
-    // Generate Fingerprint
     let mut hasher = DefaultHasher::new();
     service_name.to_string().hash(&mut hasher);
     for (n, _, _, _) in &methods {
@@ -235,7 +262,6 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         })
                     },
                     name,
-                    None 
                 ).await
             }
 
@@ -258,13 +284,23 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn cell_remote(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
     let parts: Vec<&str> = input_str.split('=').collect();
-    if parts.len() != 2 { panic!("Usage: cell_remote!(Module = \"cell_name\")"); }
+    if parts.len() != 2 { panic!("Usage: cell_remote!(Module = \"cell_name\") or cell_remote!(Module = \"cell_name\", import_macros = true)"); }
     
     let module_name = format_ident!("{}", parts[0].trim());
-    let cell_name = parts[1].trim().trim_matches(|c| c == '"' || c == ' ');
+    let cell_name_part = parts[1].trim();
+    
+    // Parse cell_name and flags
+    let import_macros = cell_name_part.contains("import_macros");
+    let cell_name = cell_name_part
+        .split(',')
+        .next()
+        .unwrap()
+        .trim()
+        .trim_matches(|c| c == '"' || c == ' ');
 
-    if let Ok(out_dir) = std::env::var("OUT_DIR") {
-        let path = PathBuf::from(out_dir).join(format!("{}_client.rs", cell_name));
+    let out_dir = std::env::var("OUT_DIR").ok();
+    if let Some(ref dir) = out_dir {
+        let path = PathBuf::from(dir).join(format!("{}_client.rs", cell_name));
         if path.exists() {
             let path_str = path.to_str().unwrap();
             return TokenStream::from(quote! {
@@ -275,7 +311,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     }
 
     let dna_path = locate_dna(cell_name);
-    // Explicitly stringify the path for inclusion
     let dna_path_str = dna_path.to_str().expect("Invalid path");
     
     let file = match cell_build::load_and_flatten_source(&dna_path) {
@@ -312,6 +347,14 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
 
     if handler_impl.is_none() { panic!("No #[handler] found in cell '{}'", cell_name); }
 
+    // Extract macros if requested
+    let macro_defs = if import_macros {
+        let macros = extract_cell_macros(&file);
+        generate_macro_code(&macros, &module_name)
+    } else {
+        quote! {}
+    };
+
     let mut methods = Vec::new();
     for item in handler_impl.unwrap().items.iter() {
         if let syn::ImplItem::Fn(m) = item {
@@ -330,7 +373,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
                 ReturnType::Type(_, ty) => *ty.clone(),
              };
              let wire_ret = sanitize_return_type(&ret);
-             // Cell Remote stores 3 elements: name, args, wire_ret
              methods.push((name, args, wire_ret));
         }
     }
@@ -378,6 +420,9 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
 
             #(#proteins)*
 
+            // NEW: Injected macros
+            #macro_defs
+
             #[derive(
                 ::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize,
                 ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize,
@@ -422,6 +467,34 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+fn generate_macro_code(macros: &[(String, String, String)], _module: &syn::Ident) -> proc_macro2::TokenStream {
+    let mut defs = Vec::new();
+    
+    for (name, kind, source) in macros {
+        if kind == "declarative" {
+            // Parse and re-emit macro_rules!
+            let tokens: proc_macro2::TokenStream = source.parse().unwrap();
+            defs.push(quote! {
+                #tokens
+                pub(crate) use #name;
+            });
+        } else {
+            // Proc macros need build.rs compilation
+            // For now, emit a TODO comment
+            let name_ident = format_ident!("{}", name);
+            defs.push(quote! {
+                // TODO: Proc macro '#name' requires build.rs compilation
+                // This will be implemented in Phase 2
+                pub use __cell_macro_shim::#name_ident;
+            });
+        }
+    }
+    
+    quote! {
+        #(#defs)*
+    }
+}
+
 #[proc_macro_attribute]
 pub fn protein(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
@@ -446,4 +519,11 @@ pub fn protein(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     TokenStream::from(quote! { #input })
+}
+
+// NEW: Mark macros for export
+#[proc_macro_attribute]
+pub fn cell_macro(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Just pass through - the extraction happens in handler
+    item
 }

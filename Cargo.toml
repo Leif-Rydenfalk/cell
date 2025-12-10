@@ -10,7 +10,6 @@ members = [
     "cell-process",
     "cell-sdk",
     "cell-macros",
-    "cell-consensus",
     "cell-build"
 ]
 exclude = ["examples"]
@@ -33,7 +32,6 @@ cell-axon = { path = "./cell-axon", version = "0.4.0" }
 cell-process = { path = "./cell-process", version = "0.4.0" }
 cell-sdk = { path = "./cell-sdk", version = "0.4.0" }
 cell-macros = { path = "./cell-macros", version = "0.3.0" }
-cell-consensus = { path = "./cell-consensus", version = "0.3.0" }
 cell-build = { path = "./cell-build", version = "0.1.0" }
 
 anyhow = { version = "1.0", default-features = false }

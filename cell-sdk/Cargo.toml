@@ -8,11 +8,10 @@ description = "Zero-copy RPC framework and runtime SDK."
 repository = { workspace = true }
 
 [features]
-default = ["transport", "process", "axon", "consensus"]
+default = ["transport", "process", "axon"]
 transport = ["dep:cell-transport"]
 process = ["dep:cell-process"]
 axon = ["dep:cell-axon"]
-consensus = ["dep:cell-consensus"]
 
 [dependencies]
 cell-core = { workspace = true }
@@ -22,12 +21,8 @@ cell-transport = { workspace = true, optional = true, features = ["std"] }
 cell-axon = { workspace = true, optional = true }
 cell-process = { workspace = true, optional = true }
 cell-discovery = { workspace = true }
-cell-consensus = { workspace = true, optional = true }
 
-# Dependencies needed for runtime
 tokio = { workspace = true }
-
-# Re-exports
 serde = { workspace = true }
 rkyv = { workspace = true }
 anyhow = { workspace = true }

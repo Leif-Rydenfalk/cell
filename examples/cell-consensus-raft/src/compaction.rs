@@ -2,8 +2,8 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use anyhow::Result;
-use std::path::{Path, PathBuf};
-use crate::wal::{WriteAheadLog};
+use std::path::Path;
+use crate::wal::WriteAheadLog;
 
 pub struct Compactor {
     snapshot_threshold: u64,

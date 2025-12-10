@@ -7,7 +7,7 @@ pub use cell_core::*;
 pub use cell_model::*;
 pub use cell_model::Vesicle;
 
-pub use cell_macros::{cell_remote, handler, protein, service};
+pub use cell_macros::{cell_remote, handler, protein, service, cell_macro};
 
 #[cfg(feature = "transport")]
 pub use cell_transport::{Membrane, Synapse, ShmClient, resolve_socket_dir};
@@ -31,9 +31,6 @@ pub mod logging;
 
 pub mod tissue;
 pub use tissue::Tissue;
-
-#[cfg(feature = "consensus")]
-pub use cell_consensus;
 
 pub use rkyv;
 pub use serde;

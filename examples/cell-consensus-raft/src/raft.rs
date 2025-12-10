@@ -1,23 +1,19 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-pub mod wal;
-pub mod compaction;
-pub mod snapshot;
-pub mod membership;
-
 use anyhow::Result;
 use rkyv::{Archive, Serialize, Deserialize};
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
-use wal::{LogEntry, WriteAheadLog};
-use compaction::Compactor;
-use snapshot::Snapshot;
-use membership::{MembershipManager, MembershipChange};
 use tracing::{info, warn};
-use cell_transport::Synapse;
-use cell_core::channel;
 use std::time::Duration;
+
+use cell_sdk::{Synapse, channel};
+
+use crate::wal::{LogEntry, WriteAheadLog};
+use crate::compaction::Compactor;
+use crate::snapshot::Snapshot;
+use crate::membership::{MembershipManager, MembershipChange};
 
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[archive(check_bytes)]
@@ -57,9 +53,9 @@ pub struct RaftNode {
     wal_tx: mpsc::UnboundedSender<WalCmd>, 
     state_machine: Arc<dyn StateMachine>,
     commit_index: AtomicU64,
-    events_tx: broadcast::Sender<RaftMessage>,
+    _events_tx: broadcast::Sender<RaftMessage>,
     
-    compactor: Compactor,
+    _compactor: Compactor,
     membership: Arc<RwLock<MembershipManager>>,
 }
 
@@ -114,8 +110,8 @@ impl RaftNode {
             wal_tx,
             state_machine: sm,
             commit_index: AtomicU64::new(last_index),
-            events_tx: tx,
-            compactor,
+            _events_tx: tx,
+            _compactor: compactor,
             membership,
         });
 
@@ -128,12 +124,12 @@ impl RaftNode {
             }
         });
         
-        // Start background compaction
-        let _wal_path = config.storage_path.clone(); // In a real impl this would be shared/managed differently
+        // Start background compaction stub
+        let _wal_path = config.storage_path.clone(); 
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(300)).await;
-                // Compact logic here
+                // Compact logic stub
             }
         });
 

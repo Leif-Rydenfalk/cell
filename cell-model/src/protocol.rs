@@ -16,6 +16,7 @@ pub struct CellGenome {
     pub fingerprint: u64,
     pub methods: Vec<MethodSchema>,
     pub types: Vec<TypeSchema>,
+    pub macros: Vec<MacroSchema>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -39,6 +40,22 @@ pub enum TypeKind {
     Enum {
         variants: Vec<(String, Vec<TypeRef>)>,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MacroSchema {
+    pub name: String,
+    pub kind: MacroKind,
+    pub source: String,
+    pub dependencies: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum MacroKind {
+    Declarative,   // macro_rules!
+    Attribute,     // #[proc_macro_attribute]
+    Derive,        // #[proc_macro_derive]
+    Function,      // proc_macro
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

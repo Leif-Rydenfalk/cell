@@ -5,19 +5,16 @@ use tracing::{info, error};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-// --- SYMBIOSIS ---
 cell_remote!(Ledger = "ledger");
+cell_remote!(Consensus = "consensus-raft");
 
-// --- LOCAL DNA ---
 #[protein]
 pub enum Side { Buy, Sell }
 
-// --- LOGIC ---
-
-// 1. Add state to hold the persistent connection
 #[derive(Clone)]
 struct EngineState {
     ledger: Arc<Mutex<Ledger::Client>>,
+    consensus: Arc<Mutex<Consensus::Client>>,
 }
 
 #[service]
@@ -34,21 +31,23 @@ impl EngineService {
             Side::Sell => (Ledger::Asset::BTC, amount),
         };
 
-        // 2. Lock the persistent connection instead of connecting
         let mut client = self.state.ledger.lock().await;
-        
-        // 3. Fire using the existing socket
         let result = client.lock_funds(user, asset, lock_amt).await?;
 
         match result {
             Ok(true) => {
-                info!("[Engine] Funds Locked. Order Placed.");
+                // Log to consensus
+                let order_data = format!("ORDER:{}:{}:{}", user, price, amount).into_bytes();
+                let cmd = Consensus::Command { data: order_data };
+                
+                let mut consensus = self.state.consensus.lock().await;
+                let _ = consensus.propose(cmd).await?;
+                
+                info!("[Engine] Order logged to consensus");
                 Ok(12345)
             },
-            Ok(false) => {
-                bail!("Insufficient Funds")
-            },
-            Err(e) => bail!("Ledger Logic Error: {}", e),
+            Ok(false) => bail!("Insufficient Funds"),
+            Err(e) => bail!("Ledger Error: {}", e),
         }
     }
 }
@@ -58,14 +57,13 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
     info!("[Engine] Online");
 
-    // 4. Connect ONCE at startup
-    info!("[Engine] Connecting to Ledger...");
     let ledger_client = Ledger::connect().await?;
-    info!("[Engine] Connected.");
+    let consensus_client = Consensus::connect().await?;
 
     let service = EngineService {
         state: EngineState {
             ledger: Arc::new(Mutex::new(ledger_client)),
+            consensus: Arc::new(Mutex::new(consensus_client)),
         }
     };
 
