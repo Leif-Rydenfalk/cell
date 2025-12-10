@@ -11,4 +11,4 @@ alloc = []
 [dependencies]
 cell-core = { workspace = true }
 rkyv = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }

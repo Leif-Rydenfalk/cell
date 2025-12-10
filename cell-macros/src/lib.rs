@@ -6,12 +6,13 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse_macro_input, DeriveInput, Item, ItemImpl, Type, FnArg, Pat, 
-    ReturnType, spanned::Spanned, Attribute, GenericArgument, PathArguments, File
+    ReturnType, spanned::Spanned, Attribute, GenericArgument, PathArguments
 };
 use convert_case::{Case, Casing};
 use std::path::PathBuf;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use cell_transport::coordination::MacroCoordinator;
 
 // Helpers
 fn normalize_ty(ty: &Type) -> Type {
@@ -95,47 +96,6 @@ fn locate_dna(cell_name: &str) -> PathBuf {
         if deep_sibling.exists() { return deep_sibling; }
     }
     panic!("Could not locate DNA for '{}'", cell_name);
-}
-
-// NEW: Extract cell_macro definitions from a file
-fn extract_cell_macros(file: &File) -> Vec<(String, String, String)> {
-    let mut macros = Vec::new();
-    
-    fn visit_items(items: &[Item], macros: &mut Vec<(String, String, String)>) {
-        for item in items {
-            match item {
-                Item::Macro(m) if has_attr(&m.attrs, "cell_macro") => {
-                    let name = m.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
-                    let source = m.to_token_stream().to_string();
-                    macros.push((name, "declarative".to_string(), source));
-                }
-                Item::Fn(f) if has_attr(&f.attrs, "cell_macro") => {
-                    let name = f.sig.ident.to_string();
-                    let source = f.to_token_stream().to_string();
-                    
-                    // Detect proc macro type by signature
-                    let kind = if f.attrs.iter().any(|a| a.path().is_ident("proc_macro_attribute")) {
-                        "attribute"
-                    } else if f.attrs.iter().any(|a| a.path().is_ident("proc_macro_derive")) {
-                        "derive"
-                    } else {
-                        "function"
-                    };
-                    
-                    macros.push((name, kind.to_string(), source));
-                }
-                Item::Mod(m) => {
-                    if let Some((_, items)) = &m.content {
-                        visit_items(items, macros);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    
-    visit_items(&file.items, &mut macros);
-    macros
 }
 
 #[proc_macro_attribute]
@@ -289,7 +249,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let module_name = format_ident!("{}", parts[0].trim());
     let cell_name_part = parts[1].trim();
     
-    // Parse cell_name and flags
     let import_macros = cell_name_part.contains("import_macros");
     let cell_name = cell_name_part
         .split(',')
@@ -298,14 +257,43 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         .trim()
         .trim_matches(|c| c == '"' || c == ' ');
 
+    // Query Cell for available macros
+    let coordinator = MacroCoordinator::new(cell_name);
+    let available_macros = match coordinator.query_macros() {
+        Ok(macros) => macros,
+        Err(e) => {
+            eprintln!("Warning: Could not query Cell '{}': {}", cell_name, e);
+            vec![]
+        }
+    };
+
+    if !available_macros.is_empty() {
+        eprintln!("Cell '{}' provides {} macros", cell_name, available_macros.len());
+        for m in &available_macros {
+            eprintln!("  - {} ({:?})", m.name, m.kind);
+        }
+    }
+
     let out_dir = std::env::var("OUT_DIR").ok();
     if let Some(ref dir) = out_dir {
         let path = PathBuf::from(dir).join(format!("{}_client.rs", cell_name));
         if path.exists() {
             let path_str = path.to_str().unwrap();
+            
+            let macro_import = if import_macros || !available_macros.is_empty() {
+                let macro_crate = format_ident!("{}_macros", cell_name.replace("-", "_"));
+                quote! {
+                    #[allow(unused_imports)]
+                    pub use #macro_crate::*;
+                }
+            } else {
+                quote! {}
+            };
+            
             return TokenStream::from(quote! {
                 include!(#path_str);
                 pub use #cell_name::Client as #module_name;
+                #macro_import
             });
         }
     }
@@ -322,7 +310,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let mut handler_impl = None;
     let mut service_struct_name = String::new();
 
-    fn find_items<'a>(items: &'a [syn::Item], proteins: &mut Vec<&'a syn::Item>, handler: &mut Option<&'a syn::ItemImpl>, service_name: &mut String) {
+    fn find_items<'a>(items: &'a [Item], proteins: &mut Vec<&'a Item>, handler: &mut Option<&'a syn::ItemImpl>, service_name: &mut String) {
         for item in items {
             match item {
                 Item::Enum(i) if has_attr(&i.attrs, "protein") => proteins.push(item),
@@ -346,14 +334,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     find_items(&file.items, &mut proteins, &mut handler_impl, &mut service_struct_name);
 
     if handler_impl.is_none() { panic!("No #[handler] found in cell '{}'", cell_name); }
-
-    // Extract macros if requested
-    let macro_defs = if import_macros {
-        let macros = extract_cell_macros(&file);
-        generate_macro_code(&macros, &module_name)
-    } else {
-        quote! {}
-    };
 
     let mut methods = Vec::new();
     for item in handler_impl.unwrap().items.iter() {
@@ -409,6 +389,16 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         }
     });
 
+    let macro_import = if import_macros || !available_macros.is_empty() {
+        let macro_crate = format_ident!("{}_macros", cell_name.replace("-", "_"));
+        quote! {
+            #[allow(unused_imports)]
+            pub use #macro_crate::*;
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #[allow(non_snake_case, dead_code)]
         pub mod #module_name {
@@ -419,9 +409,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
             const _: &[u8] = include_bytes!(#dna_path_str);
 
             #(#proteins)*
-
-            // NEW: Injected macros
-            #macro_defs
 
             #[derive(
                 ::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize,
@@ -461,38 +448,12 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
             pub async fn connect() -> ::anyhow::Result<#client_struct> {
                 #client_struct::connect().await
             }
+
+            #macro_import
         }
     };
 
     TokenStream::from(expanded)
-}
-
-fn generate_macro_code(macros: &[(String, String, String)], _module: &syn::Ident) -> proc_macro2::TokenStream {
-    let mut defs = Vec::new();
-    
-    for (name, kind, source) in macros {
-        if kind == "declarative" {
-            // Parse and re-emit macro_rules!
-            let tokens: proc_macro2::TokenStream = source.parse().unwrap();
-            defs.push(quote! {
-                #tokens
-                pub(crate) use #name;
-            });
-        } else {
-            // Proc macros need build.rs compilation
-            // For now, emit a TODO comment
-            let name_ident = format_ident!("{}", name);
-            defs.push(quote! {
-                // TODO: Proc macro '#name' requires build.rs compilation
-                // This will be implemented in Phase 2
-                pub use __cell_macro_shim::#name_ident;
-            });
-        }
-    }
-    
-    quote! {
-        #(#defs)*
-    }
 }
 
 #[proc_macro_attribute]
@@ -521,9 +482,8 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(quote! { #input })
 }
 
-// NEW: Mark macros for export
 #[proc_macro_attribute]
 pub fn cell_macro(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Just pass through - the extraction happens in handler
+    // Just pass through - the extraction happens in cell-build
     item
 }

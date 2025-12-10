@@ -1,0 +1,13 @@
+[package]
+name = "consumer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+cell-sdk = { path = "../../../cell-sdk" }
+cell-macros = { path = "../../../cell-macros" }
+# We depend on ledger macros which are auto-generated/managed by cell-remote
+# But since this is a workspace, we point to the generated crate if it existed.
+# For demonstration, we assume cell-remote! handles the import.

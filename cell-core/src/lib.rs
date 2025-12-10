@@ -25,6 +25,7 @@ pub mod channel {
     pub const APP: u8 = 0x00;
     pub const CONSENSUS: u8 = 0x01;
     pub const OPS: u8 = 0x02;
+    pub const MACRO_COORDINATION: u8 = 0x03;
 }
 
 pub enum Wire<'a, T> {

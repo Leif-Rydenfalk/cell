@@ -4,9 +4,10 @@
 use std::path::{Path, PathBuf};
 use anyhow::{Result, Context, bail};
 use std::fs;
-use syn::{parse_file, Item, Type, FnArg, Pat, ReturnType, File};
+use std::process::Command;
+use syn::{parse_file, Item, Type, FnArg, Pat, ReturnType, File, Attribute};
 use syn::visit_mut::VisitMut;
-use quote::{quote, format_ident};
+use quote::{quote, format_ident, ToTokens};
 use convert_case::{Case, Casing};
 
 pub struct CellBuilder {
@@ -52,6 +53,137 @@ impl CellBuilder {
         self.cell_name = name.to_string();
         self.source_path = path.as_ref().to_path_buf();
         self
+    }
+
+    pub fn extract_macros(self) -> Result<Self> {
+        let dna_path = self.source_path.join("src/main.rs");
+        let entry_point = if dna_path.exists() {
+            dna_path
+        } else {
+            let lib_path = self.source_path.join("src/lib.rs");
+            if !lib_path.exists() {
+                bail!("DNA entry point (src/main.rs or src/lib.rs) not found at {:?}", self.source_path);
+            }
+            lib_path
+        };
+
+        let file = load_and_flatten_source(&entry_point)?;
+        
+        let proc_macros = extract_proc_macros(&file);
+        
+        if !proc_macros.is_empty() {
+            self.generate_macro_crate(&proc_macros)?;
+        }
+        
+        Ok(self)
+    }
+
+    fn generate_macro_crate(&self, macros: &[ProcMacroItem]) -> Result<()> {
+        let home = dirs::home_dir().context("No home directory")?;
+        let macro_dir = home.join(".cell/macros").join(&self.cell_name);
+        
+        fs::create_dir_all(&macro_dir)?;
+        fs::create_dir_all(macro_dir.join("src"))?;
+        
+        // Generate Cargo.toml
+        // We now depend on cell-transport to use MacroCoordinator
+        let cargo_toml = format!(r#"[package]
+name = "{}-macros"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = {{ version = "2.0", features = ["full", "extra-traits"] }}
+quote = "1.0"
+proc-macro2 = "1.0"
+cell-transport = {{ version = "0.4.0", features = ["std"] }}
+cell-model = "0.4.0"
+tokio = {{ version = "1", features = ["full"] }}
+"#, 
+            self.cell_name
+        );
+        
+        fs::write(macro_dir.join("Cargo.toml"), cargo_toml)?;
+        
+        // Generate lib.rs
+        let lib_rs = self.generate_macro_lib_code(macros)?;
+        fs::write(macro_dir.join("src/lib.rs"), lib_rs)?;
+        
+        // Compile it
+        let status = Command::new("cargo")
+            .arg("build")
+            .arg("--release")
+            .current_dir(&macro_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .context("Failed to run cargo build for macro crate")?;
+        
+        if !status.success() {
+            bail!("Failed to compile macro crate for {}", self.cell_name);
+        }
+        
+        // Generate manifest.json for caching macro definitions
+        let manifest = self.generate_macro_manifest(macros)?;
+        fs::write(macro_dir.join("manifest.json"), manifest)?;
+
+        println!("cargo:warning=[cell-build] Generated macro crate: {}-macros at {}", self.cell_name, macro_dir.display());
+        
+        Ok(())
+    }
+    
+    fn generate_macro_lib_code(&self, macros: &[ProcMacroItem]) -> Result<String> {
+        let mut code = String::new();
+        
+        code.push_str("// Auto-generated macro crate\n");
+        code.push_str("// DO NOT EDIT - regenerated on each build\n\n");
+        code.push_str("extern crate proc_macro;\n");
+        code.push_str("use proc_macro::TokenStream;\n");
+        code.push_str("use quote::quote;\n");
+        code.push_str("use syn::{parse_macro_input, DeriveInput, Field, ItemFn};\n");
+        code.push_str("use cell_transport::coordination::MacroCoordinator;\n");
+        code.push_str("use cell_model::macro_coordination::ExpansionContext;\n\n");
+        
+        for mac in macros {
+            let item_tokens = mac.item.to_token_stream().to_string();
+            code.push_str(&item_tokens);
+            code.push_str("\n\n");
+        }
+        
+        Ok(code)
+    }
+
+    fn generate_macro_manifest(&self, macros: &[ProcMacroItem]) -> Result<String> {
+        use serde_json::json;
+        
+        let mut info_list = Vec::new();
+        
+        for mac in macros {
+             let name = match &mac.item {
+                 Item::Fn(f) => f.sig.ident.to_string(),
+                 _ => "unknown".to_string(),
+             };
+             
+             let kind = if has_attr(&mac.item, "proc_macro_attribute") {
+                 "Attribute"
+             } else if has_attr(&mac.item, "proc_macro_derive") {
+                 "Derive"
+             } else {
+                 "Function"
+             };
+             
+             info_list.push(json!({
+                 "name": name,
+                 "kind": kind,
+                 "description": "Auto-extracted macro",
+                 "dependencies": []
+             }));
+        }
+        
+        Ok(serde_json::to_string_pretty(&info_list)?)
     }
 
     pub fn generate(self) -> Result<()> {
@@ -283,4 +415,56 @@ impl VisitMut for ModuleFlattener {
             self.base_dir = old_base;
         }
     }
+}
+
+// Data structure for proc macros
+struct ProcMacroItem {
+    item: Item,
+}
+
+#[allow(dead_code)]
+enum ProcMacroKind {
+    Attribute,
+    Derive,
+    Function,
+}
+
+// Extract all #[cell_macro] items that are proc macros
+fn extract_proc_macros(file: &File) -> Vec<ProcMacroItem> {
+    let mut macros = Vec::new();
+    
+    fn visit_items(items: &[Item], macros: &mut Vec<ProcMacroItem>) {
+        for item in items {
+            // Check if item has #[cell_macro]
+            let has_cell_macro = match item {
+                Item::Fn(_) => has_attr(item, "cell_macro"),
+                _ => false,
+            };
+            
+            if !has_cell_macro {
+                if let Item::Mod(m) = item {
+                    if let Some((_, items)) = &m.content {
+                        visit_items(items, macros);
+                    }
+                }
+                continue;
+            }
+            
+            // It is a cell macro, keep it
+            macros.push(ProcMacroItem { item: item.clone() });
+        }
+    }
+    
+    visit_items(&file.items, &mut macros);
+    macros
+}
+
+fn has_attr(item: &Item, name: &str) -> bool {
+    let attrs = match item {
+        Item::Fn(f) => &f.attrs,
+        _ => return false,
+    };
+    
+    attrs.iter().any(|a| a.path().is_ident(name) || 
+        (a.path().segments.len() == 2 && a.path().segments[1].ident == name))
 }

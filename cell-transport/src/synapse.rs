@@ -16,13 +16,13 @@ use crate::circuit_breaker::{CircuitBreaker};
 use crate::deadline::Deadline;
 
 use cell_core::{Transport, TransportError, channel};
-use anyhow::{bail, Result, Context};
+use anyhow::{bail, Result};
 use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{Archive, Serialize};
 use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 use std::time::Duration;
 
 #[cfg(feature = "axon")]

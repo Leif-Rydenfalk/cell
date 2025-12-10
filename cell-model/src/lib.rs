@@ -12,10 +12,12 @@ pub mod protocol;
 pub mod error;
 pub mod vesicle;
 pub mod ops;
+pub mod macro_coordination;
 
 pub use protocol::*;
 pub use ops::*;
 pub use error::Error;
+pub use macro_coordination::*;
 
 pub use rkyv;
 pub use serde;

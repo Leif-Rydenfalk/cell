@@ -6,10 +6,11 @@ use crate::transport::{UnixListenerAdapter, UnixConnection};
 use cell_core::{Listener, Connection, channel};
 use cell_model::protocol::GENOME_REQUEST;
 use cell_model::ops::{OpsRequest, OpsResponse, ArchivedOpsRequest};
+use cell_model::macro_coordination::{MacroCoordinationRequest, MacroCoordinationResponse, ArchivedMacroCoordinationRequest};
 use anyhow::{Context, Result, bail};
 use fd_lock::RwLock;
 use rkyv::ser::Serializer;
-use rkyv::{Archive, Serialize};
+use rkyv::Archive;
 use std::fs::File;
 use std::future::Future;
 use std::pin::Pin;
@@ -41,6 +42,8 @@ use std::os::unix::io::AsRawFd;
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use crate::transport::ShmConnection;
 
+use crate::coordination::CoordinationHandler;
+
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 10_000;
@@ -54,6 +57,7 @@ impl Membrane {
         genome_json: Option<String>,
         cell_name: &str,
         consensus_tx: Option<Sender<Vec<u8>>>,
+        coordination_handler: Option<Arc<CoordinationHandler>>,
     ) -> Result<()>
     where
         L: Listener + 'static,
@@ -68,6 +72,7 @@ impl Membrane {
         let g_shared = Arc::new(genome_json);
         let name_owned = cell_name.to_string();
         let c_shared = Arc::new(consensus_tx);
+        let coord_shared = Arc::new(coordination_handler);
         let start_time = SystemTime::now();
 
         loop {
@@ -85,10 +90,11 @@ impl Membrane {
                     let g = g_shared.clone();
                     let n = name_owned.clone();
                     let c = c_shared.clone();
+                    let ch = coord_shared.clone();
 
                     tokio::spawn(async move {
                         let _permit = permit;
-                        if let Err(_e) = handle_connection::<F, Req, Resp>(connection, h, g, &n, c, start_time).await {
+                        if let Err(_e) = handle_connection::<F, Req, Resp>(connection, h, g, &n, c, start_time, ch).await {
                              // Suppress errors
                         }
                     });
@@ -105,6 +111,7 @@ impl Membrane {
         handler: F,
         genome_json: Option<String>,
         consensus_tx: Option<Sender<Vec<u8>>>,
+        coordination_handler: Option<Arc<CoordinationHandler>>,
     ) -> Result<()>
     where
         F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>>
@@ -142,7 +149,7 @@ impl Membrane {
 
         info!("[{}] Membrane Active at {:?}", name, socket_path);
 
-        Self::bind_generic::<UnixListenerAdapter, F, Req, Resp>(listener, handler, genome_json, name, consensus_tx).await
+        Self::bind_generic::<UnixListenerAdapter, F, Req, Resp>(listener, handler, genome_json, name, consensus_tx, coordination_handler).await
     }
 }
 
@@ -153,6 +160,7 @@ async fn handle_connection<F, Req, Resp>(
     cell_name: &str,
     consensus_tx: Arc<Option<Sender<Vec<u8>>>>,
     start_time: SystemTime,
+    coordination_handler: Arc<Option<Arc<CoordinationHandler>>>,
 ) -> Result<()>
 where
     F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>> + Send + Sync + 'static,
@@ -173,9 +181,6 @@ where
 
         #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
         if data == SHM_UPGRADE_REQUEST {
-            // Note: Since we are in an async block spawn, downcasting the Box<dyn Connection> 
-            // inside the async block is safe regarding Send if Connection is Send.
-            // cell_core::Connection requires Send + Sync.
             if let Ok(unix_conn_box) = conn.into_any().downcast::<UnixConnection>() {
                 let mut stream = unix_conn_box.into_inner();
                 
@@ -189,7 +194,6 @@ where
                 let mut response = [0u8; 32];
                 stream.read_exact(&mut response).await?;
                 
-                // CRITICAL: Panic if SHM token is compromised/missing rather than continuing insecurely
                 let auth_token = get_shm_auth_token().context("CRITICAL: Failed to retrieve secure SHM token")?;
                 let expected = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
                 
@@ -302,6 +306,21 @@ where
                 write_buf = aligned_output;
                 write_buf.clear();
             }
+            channel::MACRO_COORDINATION => {
+                if let Some(coord_handler_arc) = coordination_handler.as_ref() {
+                    let req = rkyv::check_archived_root::<MacroCoordinationRequest>(data)
+                        .map_err(|e| anyhow::anyhow!("Invalid macro coordination request: {:?}", e))?;
+                    
+                    let resp = coord_handler_arc.handle(req).await?;
+                    
+                    let resp_bytes = rkyv::to_bytes::<_, 1024>(&resp)?.into_vec();
+                    conn.send(&resp_bytes).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                } else {
+                    let resp = MacroCoordinationResponse::Error { message: "Macro coordination not supported".to_string() };
+                    let resp_bytes = rkyv::to_bytes::<_, 1024>(&resp)?.into_vec();
+                    conn.send(&resp_bytes).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                }
+            }
             _ => {
                 conn.send(b"Unknown Channel").await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
             }
@@ -375,7 +394,7 @@ pub(crate) fn get_shm_auth_token() -> Result<Vec<u8>> {
 }
 
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
-fn send_fds(socket_fd: std::os::unix::io::RawFd, fds: &[std::os::unix::io::RawFd]) -> Result<()> {
+pub fn send_fds(socket_fd: std::os::unix::io::RawFd, fds: &[std::os::unix::io::RawFd]) -> Result<()> {
     use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
     use std::io::IoSlice;
 

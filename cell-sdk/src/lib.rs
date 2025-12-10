@@ -10,7 +10,7 @@ pub use cell_model::Vesicle;
 pub use cell_macros::{cell_remote, handler, protein, service, cell_macro};
 
 #[cfg(feature = "transport")]
-pub use cell_transport::{Membrane, Synapse, ShmClient, resolve_socket_dir};
+pub use cell_transport::{Membrane, Synapse, ShmClient, CoordinationHandler, resolve_socket_dir};
 
 #[cfg(feature = "axon")]
 pub use cell_axon::{AxonServer, AxonClient};

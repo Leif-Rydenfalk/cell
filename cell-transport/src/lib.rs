@@ -13,6 +13,9 @@ pub mod synapse;
 #[cfg(feature = "std")]
 pub mod membrane;
 
+#[cfg(feature = "std")]
+pub mod coordination;
+
 // Resilience Modules
 pub mod retry;
 pub mod circuit_breaker;
@@ -26,6 +29,8 @@ pub use response::Response;
 pub use synapse::Synapse;
 #[cfg(feature = "std")]
 pub use membrane::Membrane;
+#[cfg(feature = "std")]
+pub use coordination::CoordinationHandler;
 
 pub use transport::{UnixTransport};
 #[cfg(feature = "shm")]
