@@ -63,14 +63,17 @@ impl VivaldiService {
     pub async fn update(&self, update: UpdateRTT) -> Result<Coordinate> {
         let mut coords = self.coordinates.write().await;
         
-        let my_coord = coords.entry("self".to_string()).or_insert(Coordinate {
+        let my_coord_entry = coords.entry("self".to_string()).or_insert(Coordinate {
             vec: [0.0, 0.0, 0.0],
             height: 0.1,
             error: 1.0,
         });
 
+        // Copy values to avoid multiple mutable borrows or simultaneous borrow
+        let mut my_coord = my_coord_entry.clone();
+
         // Vivaldi Update Logic (Simplified)
-        let dist_est = Self::distance(my_coord, &update.peer_coordinate);
+        let dist_est = Self::distance(&my_coord, &update.peer_coordinate);
         let error = (dist_est - update.rtt_ms).abs();
         
         // Update local error
@@ -83,6 +86,9 @@ impl VivaldiService {
         
         // Apply force vector (omitted full math for brevity, just updating height as example)
         my_coord.height = (my_coord.height + delta).max(0.1);
+        
+        // Save back my_coord
+        coords.insert("self".to_string(), my_coord.clone());
         
         // Store peer's coord
         coords.insert(update.node_id, update.peer_coordinate);

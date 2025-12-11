@@ -14,7 +14,9 @@ use crate::wal::{LogEntry, WriteAheadLog};
 
 // --- RPC MESSAGES ---
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize, cell_sdk::rkyv::Deserialize, Serialize, Deserialize, Debug, Clone)]
+#[archive(check_bytes)]
+#[archive(crate = "cell_sdk::rkyv")]
 pub enum RaftMessage {
     AppendEntries {
         term: u64,

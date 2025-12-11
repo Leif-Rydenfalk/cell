@@ -126,8 +126,8 @@ async fn main() -> Result<()> {
 
     let peers_clone = peers.clone();
     tokio::spawn(async move {
-        // Fix: Import rkyv from cell_model which is re-exported properly
-        use cell_model::rkyv;
+        // Fix: Use cell_sdk which re-exports rkyv and cell_core
+        use cell_sdk::rkyv;
         
         while let Some((target_idx, msg)) = rx.recv().await {
              if let Some(peer_name) = peers_clone.get(target_idx as usize) {
@@ -136,8 +136,7 @@ async fn main() -> Result<()> {
                      if let Ok(mut syn) = Synapse::grow(&p_name).await {
                          if let Ok(bytes) = rkyv::to_bytes::<_, 1024>(&msg) {
                              let vec_bytes = bytes.into_vec();
-                             // Fix: cell_core re-export check
-                             if let Err(e) = syn.fire_on_channel(cell_core::channel::CONSENSUS, &vec_bytes).await {
+                             if let Err(e) = syn.fire_on_channel(cell_sdk::channel::CONSENSUS, &vec_bytes).await {
                                  tracing::error!("Failed to send Raft RPC to {}: {:?}", p_name, e);
                              }
                          }

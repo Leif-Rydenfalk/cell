@@ -7,7 +7,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize, cell_sdk::rkyv::Deserialize, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[archive(check_bytes)]
+#[archive(crate = "cell_sdk::rkyv")]
 pub enum LogEntry {
     Command { term: u64, data: Vec<u8> },
     NoOp { term: u64 },
