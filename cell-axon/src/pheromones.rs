@@ -2,7 +2,7 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use anyhow::Result;
-use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::{Deserialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -76,7 +76,7 @@ impl PheromoneSystem {
                         }
                     }
                 } else {
-                    // Advertisement - Update Global Discovery
+                    // Advertisement
                     LanDiscovery::global().update(sig.clone()).await;
                 }
             }
@@ -88,7 +88,7 @@ impl PheromoneSystem {
     pub async fn query(&self, target_cell_name: &str) -> Result<()> {
         let sig = Signal {
             cell_name: target_cell_name.into(),
-            instance_id: self.node_id, // Sender's ID
+            instance_id: self.node_id,
             ip: get_best_local_ip(),
             port: 0,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),

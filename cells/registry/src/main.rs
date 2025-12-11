@@ -99,9 +99,9 @@ impl RegistryService {
     async fn verify_signature(&self, package: &Package) -> Result<bool> {
         let keys = self.trusted_keys.read().await;
         
-        if let Some(public_key) = keys.get(&package.author) {
+        if let Some(_public_key) = keys.get(&package.author) {
             // In real impl: use ed25519 or RSA signature verification
-            let payload = format!("{}:{}:{}", 
+            let _payload = format!("{}:{}:{}", 
                 package.name, package.version, package.commit_hash);
             
             // Placeholder verification

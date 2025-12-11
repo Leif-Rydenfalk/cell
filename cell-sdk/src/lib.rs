@@ -28,6 +28,9 @@ pub use runtime::Runtime;
 // === IDENTITY ABSTRACTION ===
 pub mod identity;
 
+// === DISCOVERY ===
+pub use cell_discovery as discovery;
+
 // === EXTERNAL DEPS ===
 pub use rkyv;
 pub use serde;
@@ -35,8 +38,6 @@ pub use anyhow;
 pub use tracing;
 
 // === NUCLEUS CLIENT ===
-// All discovery, health checks, etc. delegated to nucleus cell
-
 pub struct NucleusClient {
     _synapse: Synapse,
 }

@@ -48,6 +48,7 @@ impl DhtService {
         }
     }
 
+    #[allow(dead_code)]
     fn hash_key(key: &str) -> String {
         let mut hasher = Sha1::new();
         hasher.update(key.as_bytes());

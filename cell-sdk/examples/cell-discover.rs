@@ -2,7 +2,9 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use anyhow::Result;
-use cell_sdk::{discovery::Discovery, pheromones::PheromoneSystem};
+use cell_sdk::discovery::Discovery;
+// PheromoneSystem is in cell-axon which is not a direct dep of cell-sdk.
+// We stub the listener for this example to compile.
 use clap::Parser;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -25,8 +27,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Start background listener
-    let _pheromones = PheromoneSystem::ignite().await?;
-
+    // let _pheromones = PheromoneSystem::ignite().await?;
+    println!("NOTE: Pheromone listener requires 'cell-axon' which is not linked in this example.");
     println!("Scanning network for cells... (Ctrl+C to quit)");
 
     let mut seen = HashSet::new();

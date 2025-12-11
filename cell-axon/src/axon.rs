@@ -5,8 +5,8 @@ use crate::pheromones::PheromoneSystem;
 use cell_model::protocol::GENOME_REQUEST;
 use anyhow::{Result};
 use cell_model::rkyv::ser::serializers::AllocSerializer;
-use cell_model::rkyv::{self, Archive, Serialize};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use cell_model::rkyv::{self, Archive};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
@@ -30,10 +30,7 @@ impl AxonServer {
                 Ok((addr, endpoint)) => {
                     endpoints.push((addr, endpoint));
                     let port = addr.port();
-                    let ip_str = match addr {
-                        SocketAddr::V4(v4) => v4.ip().to_string(),
-                        SocketAddr::V6(v6) => v6.ip().to_string(),
-                    };
+                    let ip_str = addr.ip().to_string();
                     let _ = pheromones.secrete_specific(cell_name, &ip_str, port).await;
                     info!("[Axon] ✓ Bound and advertising {}:{}", ip_str, port);
                 }
@@ -120,16 +117,13 @@ impl AxonServer {
 pub struct AxonClient;
 
 impl AxonClient {
-    // Legacy connect: Connects to ANY instance
     pub async fn connect(cell_name: &str) -> Result<Option<quinn::Connection>> {
-        // Use 0 as node_id for ephemeral client; or reuse a global ID if we had one.
-        // For simple clients, 0 is acceptable as they don't advertise.
         let pheromones = PheromoneSystem::ignite(0).await?;
         info!("[Axon] Discovering cell '{}'...", cell_name);
         let _ = pheromones.query(cell_name).await;
         
         let max_attempts = 30; 
-        for attempt in 0..max_attempts {
+        for _ in 0..max_attempts {
             let signals = pheromones.lookup_all(cell_name).await;
             if !signals.is_empty() {
                 for sig in signals {
@@ -144,7 +138,6 @@ impl AxonClient {
         Ok(None)
     }
 
-    // Direct connect to specific signal (Used by Tissue)
     pub async fn connect_to_signal(sig: &cell_discovery::lan::Signal) -> Result<Option<quinn::Connection>> {
         let addrs = expand_signal_to_candidates(sig);
         for addr in addrs {
@@ -160,7 +153,6 @@ impl AxonClient {
     }
 }
 
-// Helpers
 async fn get_all_local_addresses() -> Result<Vec<IpAddr>> {
     let mut addrs = Vec::new();
     if let Ok(interfaces) = if_addrs::get_if_addrs() {
@@ -218,7 +210,6 @@ fn make_server_config() -> Result<quinn::ServerConfig> {
     let cert_chain = vec![rustls::Certificate(cert_der)];
     let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, priv_key)?;
     
-    // Hardening: QUIC Flow Control
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_concurrent_uni_streams(0u8.into());
     transport_config.max_concurrent_bidi_streams(128u8.into());
@@ -252,10 +243,6 @@ fn make_client_endpoint() -> Result<quinn::Endpoint> {
     let client_config = quinn::ClientConfig::new(Arc::new(crypto));
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
-    
-    // Note: client flow control limits are negotiated during handshake based on server preference,
-    // but we can set local transport limits for our receiving side too if needed via EndpointConfig,
-    // though usually handled by connect().
     
     Ok(endpoint)
 }
