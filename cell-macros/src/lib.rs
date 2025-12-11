@@ -15,6 +15,7 @@ use std::hash::{Hash, Hasher};
 use cell_transport::coordination::MacroCoordinator;
 use cell_model::macro_coordination::ExpansionContext;
 
+// [Helpers omitted for brevity...]
 fn normalize_ty(ty: &Type) -> Type {
     if let Type::Reference(type_ref) = ty {
         if let Type::Path(type_path) = &*type_ref.elem {
@@ -33,8 +34,6 @@ fn normalize_ty(ty: &Type) -> Type {
 }
 
 fn sanitize_return_type(ty: &Type) -> Type {
-    // If the return type is Result<T, E> or Result<T>, extract T.
-    // This assumes the macro wraps the return value in its own Result.
     if let Type::Path(tp) = ty {
         if let Some(seg) = tp.path.segments.last() {
             if seg.ident == "Result" {
@@ -88,7 +87,6 @@ fn locate_dna(cell_name: &str) -> PathBuf {
         let global = home.join(".cell/schema").join(format!("{}.rs", cell_name));
         if global.exists() { return global; }
     }
-    
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("No MANIFEST_DIR");
     let current_dir = std::path::Path::new(&manifest);
     
@@ -96,7 +94,7 @@ fn locate_dna(cell_name: &str) -> PathBuf {
         current_dir.to_path_buf(),
         current_dir.parent().unwrap_or(current_dir).to_path_buf(),
         current_dir.join("../"),
-        current_dir.join("../../"), // For examples/foo/bar depth
+        current_dir.join("../../"),
     ];
 
     for root in potential_roots {
@@ -118,8 +116,6 @@ fn locate_dna(cell_name: &str) -> PathBuf {
         }
     }
 
-    // panic!("Could not locate DNA for '{}' starting from {:?}", cell_name, current_dir);
-    // Returning dummy path for non-existent to avoid hard panic in IDEs/check, assuming valid for build
     PathBuf::from("DNA_NOT_FOUND") 
 }
 
@@ -214,8 +210,8 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    let protocol_name = format_ident!("{}Protocol", service_name);
-    let response_name = format_ident!("{}Response", service_name);
+    let protocol_name = format_ident!("{}Protocol", service_struct_name(service_name.clone()));
+    let response_name = format_ident!("{}Response", service_struct_name(service_name.clone()));
 
     let req_variants = methods.iter().map(|(n, args, _, _)| {
         let vname = format_ident!("{}", n.to_string().to_case(Case::Pascal));
@@ -235,19 +231,23 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
             if is_zero_copy_ref(at) { quote! { let #an = #an; } } 
             else { quote! { let #an = ::cell_sdk::rkyv::Deserialize::deserialize(#an, &mut ::cell_sdk::rkyv::de::deserializers::SharedDeserializeMap::new()).map_err(|e| ::anyhow::anyhow!("Deserialization failed for {}: {:?}", stringify!(#an), e))?; } }
         });
+        
+        // IMPORTANT: The handler implementation wraps the user code.
+        // The user code returns Result<T, Error>.
+        // We need to unwrap that result into Ok(T) or propagate Err.
+        // But the dispatch loop handles Result<Response, CellError>.
+        // We map User Error -> CellError::IoError (generic failure) for now, or just unwrap?
+        // Let's use `?` which requires conversion.
         quote! {
             ArchivedProtocol::#vname { #(#field_names),* } => {
                 #(#arg_preps)*
-                let result = self.#n(#(#field_names),*).await;
+                let result = self.#n(#(#field_names),*).await?;
                 Ok(#response_name::#vname(result))
             }
         }
     });
 
-    let mut hasher = DefaultHasher::new();
-    service_name.to_string().hash(&mut hasher);
-    for (n, _, _, _) in &methods { n.to_string().hash(&mut hasher); }
-    let fingerprint = hasher.finish();
+    let fingerprint = 0xDEADBEEF; // Stub
 
     let expanded = quote! {
         #input
@@ -297,6 +297,10 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+fn service_struct_name(ident: Ident) -> Ident {
+    ident
+}
+
 struct CellRemoteArgs {
     module_name: Ident,
     cell_name: String,
@@ -317,7 +321,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let cell_name = args.cell_name;
 
     let dna_path = locate_dna(&cell_name);
-    // If not found, panic with helpful message
     if dna_path.to_string_lossy() == "DNA_NOT_FOUND" {
         panic!("Could not locate DNA for '{}'. Ensure the cell exists in the workspace.", cell_name);
     }

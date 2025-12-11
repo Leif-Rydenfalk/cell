@@ -48,24 +48,32 @@ impl NucleusClient {
         cell_remote!(nucleus = "nucleus");
         
         let mut client = nucleus::connect().await?;
-        Ok(client.register(nucleus::CellRegistration {
+        let res = client.register(nucleus::CellRegistration {
             name: cell_name,
             node_id,
             capabilities: vec![],
             endpoints: vec![],
-        }).await?)
+        }).await;
+
+        match res {
+            Ok(val) => Ok(val),
+            Err(e) => Err(anyhow::anyhow!("RPC Error: {}", e))
+        }
     }
 
     pub async fn discover(&mut self, cell_name: String) -> anyhow::Result<Vec<String>> {
         cell_remote!(nucleus = "nucleus");
         
         let mut client = nucleus::connect().await?;
-        let result = client.discover(nucleus::DiscoveryQuery {
+        let res = client.discover(nucleus::DiscoveryQuery {
             cell_name,
             prefer_local: true,
-        }).await?;
-        
-        Ok(result.instances.into_iter().map(|i| i.address).collect())
+        }).await;
+
+        match res {
+            Ok(result) => Ok(result.instances.into_iter().map(|i| i.address).collect()),
+            Err(e) => Err(anyhow::anyhow!("RPC Error: {}", e))
+        }
     }
 }
 

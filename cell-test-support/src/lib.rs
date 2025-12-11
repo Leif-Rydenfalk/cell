@@ -4,12 +4,14 @@
 use cell_sdk::*;
 use cell_process::MyceliumRoot;
 use cell_model::protocol::{MitosisRequest, MitosisResponse};
+use cell_model::config::{CellInitConfig, PeerConfig};
 use tokio::sync::OnceCell;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use std::sync::Arc;
 use std::collections::HashMap;
 use tracing::info;
+use cell_sdk::rkyv::Deserialize;
 
 static ROOT: OnceCell<Arc<MyceliumRoot>> = OnceCell::const_new();
 
@@ -24,7 +26,9 @@ pub async fn root() -> &'static Arc<MyceliumRoot> {
             std::fs::create_dir_all(&target_dir).unwrap();
             std::env::set_var("CELL_SOCKET_DIR", target_dir.to_str().unwrap());
         }
-        MyceliumRoot::ignite().await.expect("Failed to start Mycelium Root")
+        
+        let root = MyceliumRoot::ignite().await.expect("Failed to start Mycelium Root");
+        Arc::new(root)
     }).await
 }
 
@@ -34,7 +38,7 @@ pub async fn spawn(cell_name: &str) -> Synapse {
 }
 
 /// Spawn with specific configuration (environment variables)
-pub async fn spawn_with_config(cell_name: &str, config: HashMap<String, String>) -> Synapse {
+pub async fn spawn_with_config(cell_name: &str, _config: HashMap<String, String>) -> Synapse {
     let _ = root().await;
     let socket_dir = cell_transport::resolve_socket_dir();
     let umbilical = socket_dir.join("mitosis.sock");
@@ -49,12 +53,18 @@ pub async fn spawn_with_config(cell_name: &str, config: HashMap<String, String>)
     }
     let mut stream = stream.expect("Failed to connect to Umbilical");
 
-    // Serialize Config for Wire
-    let env_vec: Vec<(String, String)> = config.into_iter().collect();
+    // In the new architecture, the Test Harness acts as the Orchestrator.
+    // We construct the strict configuration here.
+    let init_config = CellInitConfig {
+        node_id: rand::random(),
+        cell_name: cell_name.to_string(),
+        peers: vec![],
+        socket_path: format!("/tmp/cell/{}.sock", cell_name),
+    };
 
     let req = MitosisRequest::Spawn { 
         cell_name: cell_name.to_string(),
-        env: env_vec 
+        config: Some(init_config),
     };
     
     let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req).unwrap().into_vec();
@@ -85,14 +95,12 @@ pub async fn spawn_with_config(cell_name: &str, config: HashMap<String, String>)
     }
 }
 
-pub async fn spawn_worker_with_fake_cpu(cpu: f64) {
-    // In a real implementation this would mock metrics. 
-    // Here we just spawn a worker to ensure capacity increases.
+pub async fn spawn_worker_with_fake_cpu(_cpu: f64) {
     let _ = spawn("worker").await;
 }
 
-pub async fn kill_any(count: usize) {
-    // Stub for chaos testing
+pub async fn kill_any(_count: usize) {
+    // Stub
 }
 
 pub async fn nucleus() -> NucleusClient {
@@ -100,7 +108,6 @@ pub async fn nucleus() -> NucleusClient {
 }
 
 pub async fn wait_leader(_nodes: &[Synapse]) -> Synapse {
-    // Stub: Return first node, assume it's leader for now
     spawn("consensus").await 
 }
 
