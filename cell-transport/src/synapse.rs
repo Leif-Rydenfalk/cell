@@ -4,8 +4,6 @@
 use crate::resolve_socket_dir;
 use crate::response::Response;
 use crate::transport::UnixTransport;
-#[cfg(feature = "axon")]
-use crate::transport::QuicTransport;
 #[cfg(feature = "shm")]
 use crate::transport::ShmTransport;
 #[cfg(feature = "shm")]
@@ -24,9 +22,6 @@ use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 use std::time::Duration;
-
-#[cfg(feature = "axon")]
-use cell_axon::AxonClient;
 
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
@@ -91,27 +86,25 @@ impl Synapse {
                         shm_client = Some(client);
                     }
                     Err(e) => {
-                        warn!("[Synapse] SHM Upgrade failed ({}), falling back...", e);
+                        // This is fine - remote proxies created by Axon won't support SHM
+                        // We just fall back to the Unix socket
+                        info!("[Synapse] SHM Upgrade not supported by peer (likely remote proxy). Using Unix Socket.");
                     }
                 }
             }
             
             if transport.is_none() {
+                // If we consumed the stream trying to upgrade, we need a new one
+                // or we need to handle the buffer. For simplicity, we reconnect 
+                // if upgrade failed but stream is dirty/moved.
+                // In the logic above, `try_upgrade_to_shm` consumes the stream.
+                // We open a fresh connection for the pure Unix transport.
                 if let Ok(clean_stream) = UnixStream::connect(&socket_path).await {
                     transport = Some(Box::new(UnixTransport::new(clean_stream)));
                 }
             }
         }
 
-        if transport.is_none() {
-            #[cfg(feature = "axon")]
-            {
-                if let Some(conn) = AxonClient::connect(cell_name).await? {
-                    transport = Some(Box::new(QuicTransport::new(conn)));
-                }
-            }
-        }
-        
         if let Some(t) = transport {
             Ok(Self {
                 cell_name: cell_name.to_string(),
@@ -126,32 +119,7 @@ impl Synapse {
                 shm_client,
             })
         } else {
-            bail!("Cell '{}' not found", cell_name);
-        }
-    }
-
-    // New: Grow to a specific target signal (Used by Tissue)
-    #[cfg(feature = "axon")]
-    pub async fn grow_to_signal(sig: &cell_discovery::lan::Signal) -> Result<Self> {
-        let config = SynapseConfig::default();
-        
-        // Skip local checks for explicit signal connection to avoid ambiguity
-        if let Some(conn) = AxonClient::connect_to_signal(sig).await? {
-            let t = Box::new(QuicTransport::new(conn));
-            Ok(Self {
-                cell_name: sig.cell_name.clone(),
-                transport: t,
-                retry_policy: config.retry_policy,
-                circuit_breaker: CircuitBreaker::new(
-                    config.circuit_breaker_threshold,
-                    config.circuit_breaker_timeout,
-                ),
-                default_deadline: Deadline::new(config.default_timeout),
-                #[cfg(feature = "shm")]
-                shm_client: None, // Remote connections don't use SHM
-            })
-        } else {
-            bail!("Failed to connect to signal instance {}", sig.instance_id);
+            bail!("Cell '{}' not found locally. Ensure 'cell-axon' is running to bridge remote cells.", cell_name);
         }
     }
     

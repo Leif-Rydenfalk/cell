@@ -16,7 +16,6 @@ pub mod membrane;
 #[cfg(feature = "std")]
 pub mod coordination;
 
-// Resilience Modules
 pub mod retry;
 pub mod circuit_breaker;
 pub mod deadline;
@@ -35,11 +34,7 @@ pub use coordination::CoordinationHandler;
 pub use transport::{UnixTransport};
 #[cfg(feature = "shm")]
 pub use transport::{ShmTransport, ShmConnection};
-// Re-export ShmClient for SDK usage
 #[cfg(feature = "shm")]
 pub use shm::ShmClient;
-
-#[cfg(feature = "axon")]
-pub use transport::QuicTransport;
 
 pub use cell_discovery::resolve_socket_dir;

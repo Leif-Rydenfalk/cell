@@ -1,0 +1,17 @@
+[package]
+name = "axon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cell-sdk = { path = "../../cell-sdk" }
+cell-model = { path = "../../cell-model" }
+cell-axon-lib = { path = "../../cell-axon" }
+cell-discovery = { path = "../../cell-discovery" }
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+quinn = "0.10"
+rustls = { version = "0.21", features = ["quic", "dangerous_configuration"] }
+futures = "0.3"

@@ -32,17 +32,25 @@ impl Transport for UnixTransport {
         Box::pin(async move {
             let mut stream = stream_lock.lock().await;
             
-            // Length + Data (Data already contains Channel byte from Synapse)
+            // Length + Data
             let len = data_vec.len() as u32;
-            stream.write_all(&len.to_le_bytes()).await.map_err(|_| TransportError::Io)?;
-            stream.write_all(&data_vec).await.map_err(|_| TransportError::Io)?;
+            if let Err(_) = stream.write_all(&len.to_le_bytes()).await {
+                return Err(TransportError::Io);
+            }
+            if let Err(_) = stream.write_all(&data_vec).await {
+                return Err(TransportError::Io);
+            }
             
             let mut len_buf = [0u8; 4];
-            stream.read_exact(&mut len_buf).await.map_err(|_| TransportError::Io)?;
+            if let Err(_) = stream.read_exact(&mut len_buf).await {
+                return Err(TransportError::Io);
+            }
             let resp_len = u32::from_le_bytes(len_buf) as usize;
 
             let mut resp_buf = vec![0u8; resp_len];
-            stream.read_exact(&mut resp_buf).await.map_err(|_| TransportError::Io)?;
+            if let Err(_) = stream.read_exact(&mut resp_buf).await {
+                return Err(TransportError::Io);
+            }
 
             Ok(resp_buf)
         })
@@ -64,13 +72,19 @@ impl Connection for UnixConnection {
     fn recv(&mut self) -> Pin<Box<dyn Future<Output = Result<(u8, Vesicle<'static>), TransportError>> + Send + '_>> {
         Box::pin(async move {
             let mut len_buf = [0u8; 4];
-            self.inner.read_exact(&mut len_buf).await.map_err(|_| TransportError::Io)?;
+            match self.inner.read_exact(&mut len_buf).await {
+                Ok(_) => {},
+                Err(_) => return Err(TransportError::ConnectionClosed),
+            };
             let len = u32::from_le_bytes(len_buf) as usize;
             
             if len == 0 { return Err(TransportError::ConnectionClosed); }
 
             let mut buf = vec![0u8; len];
-            self.inner.read_exact(&mut buf).await.map_err(|_| TransportError::Io)?;
+            match self.inner.read_exact(&mut buf).await {
+                Ok(_) => {},
+                Err(_) => return Err(TransportError::Io),
+            };
             
             let channel = buf[0];
             let payload = buf[1..].to_vec(); 
@@ -83,8 +97,12 @@ impl Connection for UnixConnection {
         let data_vec = data.to_vec();
         Box::pin(async move {
             let len = data_vec.len() as u32;
-            self.inner.write_all(&len.to_le_bytes()).await.map_err(|_| TransportError::Io)?;
-            self.inner.write_all(&data_vec).await.map_err(|_| TransportError::Io)?;
+            if let Err(_) = self.inner.write_all(&len.to_le_bytes()).await {
+                return Err(TransportError::Io);
+            }
+            if let Err(_) = self.inner.write_all(&data_vec).await {
+                return Err(TransportError::Io);
+            }
             Ok(())
         })
     }
@@ -197,38 +215,4 @@ impl Connection for ShmConnection {
 
     fn as_any(&mut self) -> &mut (dyn Any + Send) { self }
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send> { self }
-}
-
-// --- QUIC Implementation ---
-
-#[cfg(feature = "axon")]
-pub struct QuicTransport {
-    connection: quinn::Connection,
-}
-#[cfg(feature = "axon")]
-impl QuicTransport {
-    pub fn new(connection: quinn::Connection) -> Self { Self { connection } }
-}
-#[cfg(feature = "axon")]
-impl Transport for QuicTransport {
-    fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + Send + '_>> {
-        let conn = self.connection.clone();
-        let data_vec = data.to_vec();
-        Box::pin(async move {
-            let (mut send, mut recv) = conn.open_bi().await.map_err(|_| TransportError::ConnectionClosed)?;
-            
-            let len = data_vec.len() as u32;
-            send.write_all(&len.to_le_bytes()).await.map_err(|_| TransportError::Io)?;
-            send.write_all(&data_vec).await.map_err(|_| TransportError::Io)?;
-            send.finish().await.map_err(|_| TransportError::Io)?;
-
-            let mut len_buf = [0u8; 4];
-            recv.read_exact(&mut len_buf).await.map_err(|_| TransportError::Io)?;
-            let resp_len = u32::from_le_bytes(len_buf) as usize;
-
-            let mut resp_buf = vec![0u8; resp_len];
-            recv.read_exact(&mut resp_buf).await.map_err(|_| TransportError::Io)?;
-            Ok(resp_buf)
-        })
-    }
 }

@@ -1,4 +1,3 @@
-// cell-sdk/src/lib.rs (CLEANED UP VERSION)
 // SPDX-License-Identifier: MIT
 // Minimal SDK - Infrastructure cells handle everything else
 
@@ -17,10 +16,6 @@ pub use cell_transport::{Membrane, Synapse, resolve_socket_dir};
 
 #[cfg(all(feature = "transport", feature = "shm"))]
 pub use cell_transport::ShmClient;
-
-// === AXON (Required for WAN) ===
-#[cfg(feature = "axon")]
-pub use cell_axon::{AxonServer, AxonClient};
 
 // === SIMPLE RUNTIME ===
 pub mod runtime;

@@ -8,7 +8,6 @@ use tracing::{info, warn};
 use cell_model::macro_coordination::{MacroInfo, ExpansionContext};
 use std::pin::Pin;
 use std::future::Future;
-use std::sync::Arc;
 use tokio::time::Duration;
 
 pub struct Runtime;
@@ -50,21 +49,15 @@ impl Runtime {
         let config = CellConfig::from_env(name).context("Failed to load Cell configuration")?;
         info!("[Runtime] Booting Cell '{}' (Node {})", name, config.node_id);
 
-        #[cfg(feature = "axon")]
-        {
-            // Start Pheromone system for discovery
-            let _ = cell_axon::pheromones::PheromoneSystem::ignite(config.node_id).await?;
-        }
+        // NOTE: Pheromone discovery is now handled by the external Axon cell.
+        // The runtime focuses purely on local serving and nucleus registration.
 
         // Start background registration with Nucleus
         let cell_name = name.to_string();
         let node_id = config.node_id;
         tokio::spawn(async move {
-            // Give the membrane a moment to bind
             tokio::time::sleep(Duration::from_secs(1)).await;
             
-            // Try to register with Nucleus
-            // We use a loop to retry connection
             let mut backoff = Duration::from_secs(2);
             loop {
                 match crate::NucleusClient::connect().await {
@@ -72,23 +65,18 @@ impl Runtime {
                         match nucleus.register(cell_name.clone(), node_id).await {
                             Ok(_) => {
                                 info!("[Runtime] Registered '{}' with Nucleus", cell_name);
-                                // Start Heartbeat
                                 loop {
                                     tokio::time::sleep(Duration::from_secs(5)).await;
-                                    // We need to implement heartbeat in NucleusClient or generic fire
-                                    // For now, re-register acts as heartbeat in naive implementations
                                     if let Err(e) = nucleus.register(cell_name.clone(), node_id).await {
                                         warn!("[Runtime] Nucleus heartbeat failed: {}", e);
-                                        break; // Re-connect
+                                        break; 
                                     }
                                 }
                             },
                             Err(e) => warn!("[Runtime] Registration failed: {}", e),
                         }
                     },
-                    Err(_) => {
-                        // Nucleus likely not running, stay silent-ish
-                    }
+                    Err(_) => {}
                 }
                 tokio::time::sleep(backoff).await;
                 if backoff < Duration::from_secs(60) { backoff *= 2; }
