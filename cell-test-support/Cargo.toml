@@ -1,0 +1,18 @@
+[package]
+name = "cell-test-support"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cell-sdk = { workspace = true }
+cell-process = { workspace = true }
+cell-model = { workspace = true }
+cell-transport = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+memmap2 = { workspace = true }
+ctor = "0.2"
+nix = { workspace = true }
+dirs = { workspace = true }

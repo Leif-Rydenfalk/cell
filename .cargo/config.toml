@@ -1,0 +1,12 @@
+[env]
+# Ensure tests use a local, isolated directory for sockets
+CELL_SOCKET_DIR = { value = "target/test-sockets", relative = true }
+
+# Force enable SHM for tests to ensure coverage of that path
+CELL_DISABLE_SHM = { value = "0" }
+
+# Log level for tests
+RUST_LOG = "cell=info"
+
+# Ensure we use the debug binaries for quicker test cycles
+CELL_DNA_DIR = { value = "target/debug", relative = true }
