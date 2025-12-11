@@ -7,7 +7,8 @@ use tracing::info;
 use std::collections::HashMap;
 
 // Define the RPC interface for the test client
-cell_remote!(Raft = "consensus-raft");
+// This uses the macro to find "cells/consensus/src/main.rs"
+cell_remote!(Raft = "consensus");
 
 async fn install_consensus_dna() -> Result<()> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")?;
@@ -43,11 +44,17 @@ async fn wait_for_leader(nodes: &[&str]) -> Result<(String, Raft::Client)> {
             // Note: In this setup, the socket is named after the Identity (e.g., "Alpha")
             // because service.serve() uses the ID.
             
+            // spawn(name) waits for the socket "name.sock" to appear
+            // and returns a Synapse connected to it.
             let conn = spawn(name).await;
+            
+            // Create a typed client using the existing connection
             let mut client = Raft::Client::new(conn);
 
             let cmd = Raft::Command { data: b"ping".to_vec() };
-            // Single unwrap because macro returns Result<u64, CellError> directly
+            
+            // Try to propose. If it succeeds, we found the leader.
+            // Result<ProposeResult, CellError>
             if let Ok(_) = client.propose(cmd).await {
                 return Ok((name.to_string(), client));
             }
@@ -64,6 +71,19 @@ async fn static_topology_cluster() -> Result<()> {
     install_consensus_dna().await?;
 
     info!("Differentiating Stem Cells into Alpha, Beta, Gamma...");
+    
+    // We spawn 3 nodes. The test helper `spawn_with_config` calls Root.
+    // Root injects the config.
+    // But `spawn` waits for "Alpha.sock".
+    // Does Root create the socket? No, the Cell does.
+    // The Cell reads identity "Alpha", binds "Alpha.sock".
+    // `spawn` succeeds.
+    
+    // Note: We need to install the source as "Alpha", "Beta", "Gamma" because
+    // Root looks for DNA matching the requested name.
+    // Ideally Root supports `spawn(dna="consensus", name="Alpha")`.
+    // But our current protocol is `Spawn { cell_name }` which implies DNA name.
+    // So we copy DNA to Alpha/Beta/Gamma folders to satisfy the Root's lookup.
     
     install_cell_source_as("Alpha").await?;
     install_cell_source_as("Beta").await?;
