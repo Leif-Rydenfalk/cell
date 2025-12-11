@@ -1,3 +1,4 @@
+// Path: /Users/07lead01/cell/cell-transport/src/coordination.rs
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
@@ -8,6 +9,7 @@ use std::pin::Pin;
 use std::future::Future;
 use std::time::Duration;
 use crate::synapse::Synapse;
+use crate::response::Response;
 use rkyv::Deserialize;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -84,8 +86,13 @@ impl CoordinationHandler {
             &req_bytes
         ).await?;
 
-        // Deserializing Vec<u8> into expected MacroCoordinationResponse
-        let bytes = response.get()?;
+        // FIX: Extract bytes directly instead of using .get() which expects Vec<u8>
+        let bytes = match &response {
+            Response::Owned(vec) => vec.as_slice(),
+            Response::Borrowed(slice) => slice,
+            _ => anyhow::bail!("Unexpected response type for macro coordination"),
+        };
+        
         let archived = cell_model::rkyv::check_archived_root::<MacroCoordinationResponse>(bytes)
             .map_err(|e| anyhow::anyhow!("Invalid response from other cell: {:?}", e))?;
         
@@ -129,8 +136,13 @@ impl MacroCoordinator {
                         &req_bytes
                     ).await?;
 
-                    // Manual deserialization because fire_on_channel returns Vec<u8> inside Response
-                    let bytes = response.get()?;
+                    // FIX: Extract bytes directly instead of using .get() which expects Vec<u8>
+                    let bytes = match &response {
+                        Response::Owned(vec) => vec.as_slice(),
+                        Response::Borrowed(slice) => slice,
+                        _ => anyhow::bail!("Unexpected response type for macro coordination"),
+                    };
+
                     let archived = cell_model::rkyv::check_archived_root::<MacroCoordinationResponse>(bytes)
                         .map_err(|e| anyhow::anyhow!("Invalid coordination response: {:?}", e))?;
                     
@@ -138,11 +150,13 @@ impl MacroCoordinator {
                     Ok(resp)
                 }
                 Ok(Err(e)) => {
+                    // Connection failed - use cached/fallback
                     Ok(MacroCoordinationResponse::Error {
                         message: format!("Cell '{}' not running: {}", self.cell_name, e)
                     })
                 }
                 Err(_) => {
+                    // Timeout
                     Ok(MacroCoordinationResponse::Error {
                         message: format!("Cell '{}' connection timeout", self.cell_name)
                     })
@@ -163,6 +177,8 @@ impl MacroCoordinator {
         match response {
             MacroCoordinationResponse::Macros { macros } => Ok(macros),
             MacroCoordinationResponse::Error { message } => {
+                // Fallback: check cached macros
+                // In a real implementation we would log this warning
                 eprintln!("Warning: Failed to query macros from {}: {}", self.cell_name, message);
                 Ok(self.get_cached_macros()?)
             }
@@ -192,6 +208,7 @@ impl MacroCoordinator {
     }
 
     fn get_cached_macros(&self) -> Result<Vec<MacroInfo>> {
+        // Check ~/.cell/macros/{cell_name}/manifest.json
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home dir"))?;
         let manifest_path = home
             .join(".cell/macros")

@@ -1,3 +1,4 @@
+// Path: /Users/07lead01/cell/cell-macros/src/lib.rs
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
@@ -5,14 +6,15 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
-    parse_macro_input, DeriveInput, Item, ItemImpl, Type, FnArg, Pat, 
-    ReturnType, spanned::Spanned, Attribute, GenericArgument, PathArguments
+    parse::{Parse, ParseStream}, parse_macro_input, DeriveInput, Item, ItemImpl, Type, FnArg, Pat, 
+    ReturnType, spanned::Spanned, Attribute, GenericArgument, PathArguments, Token, Ident, LitStr, LitBool
 };
 use convert_case::{Case, Casing};
 use std::path::PathBuf;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use cell_transport::coordination::MacroCoordinator;
+use cell_model::macro_coordination::ExpansionContext;
 
 // Helpers
 fn normalize_ty(ty: &Type) -> Type {
@@ -97,6 +99,98 @@ fn locate_dna(cell_name: &str) -> PathBuf {
     }
     panic!("Could not locate DNA for '{}'", cell_name);
 }
+
+// --- IPC Expansion Macro ---
+
+struct ExpandArgs {
+    cell_name: String,
+    macro_name: String,
+}
+
+impl Parse for ExpandArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let cell_name = if input.peek(LitStr) {
+            input.parse::<LitStr>()?.value()
+        } else {
+            input.parse::<Ident>()?.to_string()
+        };
+        
+        input.parse::<Token![,]>()?;
+        
+        let macro_name = if input.peek(LitStr) {
+            input.parse::<LitStr>()?.value()
+        } else {
+            input.parse::<Ident>()?.to_string()
+        };
+        
+        Ok(ExpandArgs { cell_name, macro_name })
+    }
+}
+
+#[proc_macro_attribute]
+pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as ExpandArgs);
+    let input_item = parse_macro_input!(item as Item);
+    
+    let context = match extract_context(&input_item) {
+        Ok(ctx) => ctx,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    
+    // Connect to Cell
+    let coordinator = MacroCoordinator::new(&args.cell_name);
+    
+    let result = coordinator.coordinate_expansion(&args.macro_name, context);
+    
+    match result {
+        Ok(code) => {
+            use std::str::FromStr;
+            match proc_macro2::TokenStream::from_str(&code) {
+                Ok(ts) => TokenStream::from(ts),
+                Err(e) => {
+                    let msg = format!("Failed to parse expanded code from cell '{}': {}", args.cell_name, e);
+                    syn::Error::new(input_item.span(), msg).to_compile_error().into()
+                }
+            }
+        }
+        Err(e) => {
+             let msg = format!(
+                 "Cell Expansion Error: Could not talk to cell '{}'. Ensure it is running!\nDetails: {}", 
+                 args.cell_name, e
+             );
+             syn::Error::new(input_item.span(), msg).to_compile_error().into()
+        }
+    }
+}
+
+fn extract_context(item: &Item) -> syn::Result<ExpansionContext> {
+    match item {
+        Item::Struct(s) => {
+            let struct_name = s.ident.to_string();
+            let mut fields = Vec::new();
+            
+            for field in &s.fields {
+                let fname = field.ident.as_ref()
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "unnamed".to_string());
+                let ftype = field.ty.to_token_stream().to_string();
+                fields.push((fname, ftype));
+            }
+            
+            let attributes = s.attrs.iter().map(|a| a.to_token_stream().to_string()).collect();
+            
+            Ok(ExpansionContext {
+                struct_name,
+                fields,
+                attributes,
+                other_cells: vec![],
+            })
+        }
+        _ => Err(syn::Error::new(item.span(), "Only structs are supported for cell expansion currently")),
+    }
+}
+
+// --- Cell Remote ---
 
 #[proc_macro_attribute]
 pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -240,65 +334,57 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+struct CellRemoteArgs {
+    module_name: Ident,
+    cell_name: String,
+    import_macros: bool,
+}
+
+impl Parse for CellRemoteArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let module_name: Ident = input.parse()?;
+        input.parse::<Token![=]>()?;
+        let cell_name_lit: LitStr = input.parse()?;
+        let cell_name = cell_name_lit.value();
+        
+        // We still allow parsing the option for backward compat, but we won't use it
+        let mut import_macros = false;
+        
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            if !input.is_empty() {
+                let key: Ident = input.parse()?;
+                if key == "import_macros" {
+                    input.parse::<Token![=]>()?;
+                    let val: LitBool = input.parse()?;
+                    import_macros = val.value;
+                }
+            }
+        }
+        
+        Ok(CellRemoteArgs { module_name, cell_name, import_macros })
+    }
+}
+
 #[proc_macro]
 pub fn cell_remote(input: TokenStream) -> TokenStream {
-    let input_str = input.to_string();
-    let parts: Vec<&str> = input_str.split('=').collect();
-    if parts.len() != 2 { panic!("Usage: cell_remote!(Module = \"cell_name\") or cell_remote!(Module = \"cell_name\", import_macros = true)"); }
-    
-    let module_name = format_ident!("{}", parts[0].trim());
-    let cell_name_part = parts[1].trim();
-    
-    let import_macros = cell_name_part.contains("import_macros");
-    let cell_name = cell_name_part
-        .split(',')
-        .next()
-        .unwrap()
-        .trim()
-        .trim_matches(|c| c == '"' || c == ' ');
-
-    // Query Cell for available macros
-    let coordinator = MacroCoordinator::new(cell_name);
-    let available_macros = match coordinator.query_macros() {
-        Ok(macros) => macros,
-        Err(e) => {
-            eprintln!("Warning: Could not query Cell '{}': {}", cell_name, e);
-            vec![]
-        }
-    };
-
-    if !available_macros.is_empty() {
-        eprintln!("Cell '{}' provides {} macros", cell_name, available_macros.len());
-        for m in &available_macros {
-            eprintln!("  - {} ({:?})", m.name, m.kind);
-        }
-    }
+    let args = parse_macro_input!(input as CellRemoteArgs);
+    let module_name = args.module_name;
+    let cell_name = args.cell_name;
 
     let out_dir = std::env::var("OUT_DIR").ok();
     if let Some(ref dir) = out_dir {
         let path = PathBuf::from(dir).join(format!("{}_client.rs", cell_name));
         if path.exists() {
             let path_str = path.to_str().unwrap();
-            
-            let macro_import = if import_macros || !available_macros.is_empty() {
-                let macro_crate = format_ident!("{}_macros", cell_name.replace("-", "_"));
-                quote! {
-                    #[allow(unused_imports)]
-                    pub use #macro_crate::*;
-                }
-            } else {
-                quote! {}
-            };
-            
             return TokenStream::from(quote! {
                 include!(#path_str);
                 pub use #cell_name::Client as #module_name;
-                #macro_import
             });
         }
     }
 
-    let dna_path = locate_dna(cell_name);
+    let dna_path = locate_dna(&cell_name);
     let dna_path_str = dna_path.to_str().expect("Invalid path");
     
     let file = match cell_build::load_and_flatten_source(&dna_path) {
@@ -389,16 +475,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         }
     });
 
-    let macro_import = if import_macros || !available_macros.is_empty() {
-        let macro_crate = format_ident!("{}_macros", cell_name.replace("-", "_"));
-        quote! {
-            #[allow(unused_imports)]
-            pub use #macro_crate::*;
-        }
-    } else {
-        quote! {}
-    };
-
     let expanded = quote! {
         #[allow(non_snake_case, dead_code)]
         pub mod #module_name {
@@ -448,8 +524,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
             pub async fn connect() -> ::anyhow::Result<#client_struct> {
                 #client_struct::connect().await
             }
-
-            #macro_import
         }
     };
 

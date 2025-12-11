@@ -1,3 +1,4 @@
+// Path: /Users/07lead01/cell/cell-sdk/src/lib.rs
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
@@ -7,7 +8,8 @@ pub use cell_core::*;
 pub use cell_model::*;
 pub use cell_model::Vesicle;
 
-pub use cell_macros::{cell_remote, handler, protein, service, cell_macro};
+// Added 'expand' to the re-exports list
+pub use cell_macros::{cell_remote, handler, protein, service, cell_macro, expand};
 
 #[cfg(feature = "transport")]
 pub use cell_transport::{Membrane, Synapse, ShmClient, CoordinationHandler, resolve_socket_dir};
