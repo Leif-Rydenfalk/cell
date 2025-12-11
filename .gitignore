@@ -2,3 +2,4 @@ target/
 run/
 .cell/
 trash/
+.DS_Store
