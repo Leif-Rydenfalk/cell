@@ -3,11 +3,11 @@
 
 use crate::resolve_socket_dir;
 use crate::transport::{UnixListenerAdapter, UnixConnection};
-use cell_core::{Listener, Connection, channel};
+use cell_core::{Listener, Connection, channel, CellError};
 use cell_model::protocol::GENOME_REQUEST;
 use cell_model::ops::{OpsRequest, OpsResponse, ArchivedOpsRequest};
-use cell_model::macro_coordination::{MacroCoordinationRequest, MacroCoordinationResponse, ArchivedMacroCoordinationRequest};
-use anyhow::{Context, Result, bail};
+use cell_model::macro_coordination::{MacroCoordinationRequest, MacroCoordinationResponse};
+use anyhow::{Context, Result};
 use fd_lock::RwLock;
 use rkyv::ser::Serializer;
 use rkyv::Archive;
@@ -75,7 +75,6 @@ impl Membrane {
         let coord_shared = Arc::new(coordination_handler);
         let start_time = SystemTime::now();
         
-        // Handle shutdown signal
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
 
         loop {
@@ -101,7 +100,7 @@ impl Membrane {
                             tokio::spawn(async move {
                                 let _permit = permit;
                                 if let Err(_e) = handle_connection::<F, Req, Resp>(connection, h, g, &n, c, start_time, ch, shutdown).await {
-                                     // Suppress errors
+                                     // Suppress connection errors to keep main loop clean
                                 }
                             });
                         }
@@ -152,7 +151,7 @@ impl Membrane {
         }
 
         let listener = UnixListenerAdapter::bind(&socket_path)
-            .with_context(|| format!("Failed to bind socket at {:?}", socket_path))?;
+            .map_err(|_| anyhow::anyhow!("Failed to bind socket"))?;
 
         #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
         {
@@ -175,7 +174,7 @@ async fn handle_connection<F, Req, Resp>(
     start_time: SystemTime,
     coordination_handler: Arc<Option<Arc<CoordinationHandler>>>,
     shutdown: tokio::sync::broadcast::Sender<()>,
-) -> Result<()>
+) -> Result<(), CellError>
 where
     F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>> + Send + Sync + 'static,
     Req: Archive + Send,
@@ -198,68 +197,70 @@ where
             if let Ok(unix_conn_box) = conn.into_any().downcast::<UnixConnection>() {
                 let mut stream = unix_conn_box.into_inner();
                 
-                let cred = stream.peer_cred()?;
+                let cred = stream.peer_cred().map_err(|_| CellError::AccessDenied)?;
                 let my_uid = nix::unistd::getuid().as_raw();
-                if cred.uid() != my_uid { return Err(anyhow::anyhow!("UID mismatch")); }
+                if cred.uid() != my_uid { return Err(CellError::AccessDenied); }
 
                 let challenge: [u8; 32] = rand::random();
-                stream.write_all(&challenge).await?;
+                stream.write_all(&challenge).await.map_err(|_| CellError::IoError)?;
                 
                 let mut response = [0u8; 32];
-                stream.read_exact(&mut response).await?;
+                stream.read_exact(&mut response).await.map_err(|_| CellError::IoError)?;
                 
-                let auth_token = crate::membrane::get_shm_auth_token().context("CRITICAL: Failed to retrieve secure SHM token")?;
+                let auth_token = crate::membrane::get_shm_auth_token().map_err(|_| CellError::IoError)?;
                 let expected = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
                 
                 if response != expected.as_bytes()[..32] {
-                    return Err(anyhow::anyhow!("Auth failed"));
+                    return Err(CellError::AccessDenied);
                 }
 
-                let (rx_ring, rx_fd) = RingBuffer::create(&format!("{}_server_rx", cell_name))?;
-                let (tx_ring, tx_fd) = RingBuffer::create(&format!("{}_server_tx", cell_name))?;
+                let (rx_ring, rx_fd) = RingBuffer::create(&format!("{}_server_rx", cell_name)).map_err(|_| CellError::IoError)?;
+                let (tx_ring, tx_fd) = RingBuffer::create(&format!("{}_server_tx", cell_name)).map_err(|_| CellError::IoError)?;
 
-                stream.write_all(&(SHM_UPGRADE_ACK.len() as u32).to_le_bytes()).await?;
-                stream.write_all(SHM_UPGRADE_ACK).await?;
+                stream.write_all(&(SHM_UPGRADE_ACK.len() as u32).to_le_bytes()).await.map_err(|_| CellError::IoError)?;
+                stream.write_all(SHM_UPGRADE_ACK).await.map_err(|_| CellError::IoError)?;
 
-                crate::membrane::send_fds(stream.as_raw_fd(), &[rx_fd, tx_fd])?;
+                crate::membrane::send_fds(stream.as_raw_fd(), &[rx_fd, tx_fd]).map_err(|_| CellError::IoError)?;
 
                 conn = Box::new(crate::transport::ShmConnection::new(rx_ring, tx_ring));
                 continue;
             } else {
-                return Err(anyhow::anyhow!("SHM request on non-upgradeable transport"));
+                return Err(CellError::CapabilityMissing);
             }
         }
 
         if data == GENOME_REQUEST {
             let resp = if let Some(json) = genome.as_ref() { json.as_bytes() } else { &[] };
-            conn.send(resp).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            conn.send(resp).await?;
             continue;
         }
 
         match channel_id {
             channel::APP => {
                 let archived_req = rkyv::check_archived_root::<Req>(data)
-                    .map_err(|e| anyhow::anyhow!("Invalid data: {:?}", e))?;
+                    .map_err(|_| CellError::InvalidHeader)?;
 
-                let response = handler(archived_req).await?;
+                // Handler runs user code. 
+                // We map anyhow::Error from handler to CellError::IoError for generic failures,
+                // but strictly speaking, handler logic failures should be encoded in Resp.
+                let response = match handler(archived_req).await {
+                    Ok(r) => r,
+                    Err(_) => return Err(CellError::IoError),
+                };
 
                 let aligned_input = std::mem::take(&mut write_buf);
                 
-                let mut serializer: CompositeSerializer<
-                    AlignedSerializer<AlignedVec>,
-                    FallbackScratch<HeapScratch<1024>, AllocScratch>,
-                    SharedSerializeMap
-                > = CompositeSerializer::new(
+                let mut serializer = CompositeSerializer::new(
                     AlignedSerializer::new(aligned_input),
                     FallbackScratch::default(),
                     SharedSerializeMap::default(),
                 );
 
-                serializer.serialize_value(&response)?;
+                serializer.serialize_value(&response).map_err(|_| CellError::SerializationFailure)?;
                 let aligned_output = serializer.into_serializer().into_inner();
                 let bytes = aligned_output.as_slice();
                 
-                conn.send(bytes).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                conn.send(bytes).await?;
 
                 write_buf = aligned_output;
                 write_buf.clear();
@@ -267,14 +268,14 @@ where
             channel::CONSENSUS => {
                 if let Some(tx) = consensus_tx.as_ref() {
                     let _ = tx.send(data.to_vec()).await;
-                    conn.send(&[]).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                    conn.send(&[]).await?;
                 } else {
-                    conn.send(b"No Consensus").await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                    conn.send(b"No Consensus").await?;
                 }
             }
             channel::OPS => {
                 let req = rkyv::check_archived_root::<OpsRequest>(data)
-                    .map_err(|e| anyhow::anyhow!("Invalid Ops data: {:?}", e))?;
+                    .map_err(|_| CellError::InvalidHeader)?;
                 
                 let resp = match req {
                     ArchivedOpsRequest::Ping => OpsResponse::Pong,
@@ -299,80 +300,77 @@ where
                          })
                     }
                     ArchivedOpsRequest::Shutdown => {
-                        // Broadcast shutdown signal
                         let _ = shutdown.send(());
                         OpsResponse::ShutdownAck
                     }
                 };
 
                 let aligned_input = std::mem::take(&mut write_buf);
-                
-                let mut serializer: CompositeSerializer<
-                    AlignedSerializer<AlignedVec>,
-                    FallbackScratch<HeapScratch<1024>, AllocScratch>,
-                    SharedSerializeMap
-                > = CompositeSerializer::new(
+                let mut serializer = CompositeSerializer::new(
                     AlignedSerializer::new(aligned_input),
                     FallbackScratch::default(),
                     SharedSerializeMap::default(),
                 );
-
-                serializer.serialize_value(&resp)?;
+                serializer.serialize_value(&resp).map_err(|_| CellError::SerializationFailure)?;
                 let aligned_output = serializer.into_serializer().into_inner();
                 let bytes = aligned_output.as_slice();
                 
-                conn.send(bytes).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                conn.send(bytes).await?;
                 write_buf = aligned_output;
                 write_buf.clear();
             }
             channel::MACRO_COORDINATION => {
                 if let Some(coord_handler_arc) = coordination_handler.as_ref() {
                     let req = rkyv::check_archived_root::<MacroCoordinationRequest>(data)
-                        .map_err(|e| anyhow::anyhow!("Invalid macro coordination request: {:?}", e))?;
+                        .map_err(|_| CellError::InvalidHeader)?;
                     
-                    let resp = coord_handler_arc.handle(req).await?;
+                    let resp = coord_handler_arc.handle(req).await.map_err(|_| CellError::IoError)?;
                     
-                    let resp_bytes = rkyv::to_bytes::<_, 1024>(&resp)?.into_vec();
-                    conn.send(&resp_bytes).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                    let resp_bytes = rkyv::to_bytes::<_, 1024>(&resp).map_err(|_| CellError::SerializationFailure)?.into_vec();
+                    conn.send(&resp_bytes).await?;
                 } else {
                     let resp = MacroCoordinationResponse::Error { message: "Macro coordination not supported".to_string() };
-                    let resp_bytes = rkyv::to_bytes::<_, 1024>(&resp)?.into_vec();
-                    conn.send(&resp_bytes).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                    let resp_bytes = rkyv::to_bytes::<_, 1024>(&resp).map_err(|_| CellError::SerializationFailure)?.into_vec();
+                    conn.send(&resp_bytes).await?;
                 }
             }
             _ => {
-                conn.send(b"Unknown Channel").await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                conn.send(b"Unknown Channel").await?;
             }
         }
     }
 }
 
-pub(crate) fn get_shm_auth_token() -> Result<Vec<u8>> {
+// === EXPORTED UTILS FOR AXON SHM BRIDGE ===
+
+/// Retrieves the shared authentication token for SHM handshakes.
+/// This is used by Axon to prove its identity when acting as a proxy.
+pub fn get_shm_auth_token() -> Result<Vec<u8>> {
     if let Ok(token) = std::env::var("CELL_SHM_TOKEN") {
         return Ok(blake3::hash(token.as_bytes()).as_bytes().to_vec());
     }
 
-    let home = dirs::home_dir().context("Cannot determine home directory for SHM token storage")?;
+    let home = dirs::home_dir().context("Cannot determine home directory")?;
     let token_path = home.join(".cell/shm.token");
 
     if token_path.exists() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            let meta = std::fs::metadata(&token_path).context("Failed to stat SHM token")?;
+            let meta = std::fs::metadata(&token_path)?;
             let mode = meta.mode() & 0o777;
             let uid = meta.uid();
             let current_uid = nix::unistd::getuid().as_raw();
 
             if uid != current_uid {
-                bail!("SECURITY VIOLATION: SHM token owned by UID {}, expected {}", uid, current_uid);
+                anyhow::bail!("SECURITY VIOLATION: SHM token owned by UID {}, expected {}", uid, current_uid);
             }
             if mode != 0o600 {
-                bail!("SECURITY VIOLATION: SHM token permissions are {:o}, expected 0600 (rw-------)", mode);
+                anyhow::bail!("SECURITY VIOLATION: SHM token permissions are {:o}, expected 0600", mode);
             }
         }
 
-        let token = std::fs::read(&token_path).context("Failed to read SHM token")?;
+        let token = std::fs::read(&token_path)?;
         return Ok(blake3::hash(&token).as_bytes().to_vec());
     }
 
@@ -380,7 +378,7 @@ pub(crate) fn get_shm_auth_token() -> Result<Vec<u8>> {
     let tmp_path = token_path.with_extension("tmp");
     
     if let Some(parent) = token_path.parent() {
-        std::fs::create_dir_all(parent).context("Failed to create .cell directory")?;
+        std::fs::create_dir_all(parent)?;
     }
 
     {
@@ -389,22 +387,21 @@ pub(crate) fn get_shm_auth_token() -> Result<Vec<u8>> {
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&tmp_path)
-            .context("Failed to create temporary SHM token file")?;
+            .open(&tmp_path)?;
         
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .context("Failed to set 0600 permissions on SHM token")?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
             
         use std::io::Write;
-        file.write_all(&new_token).context("Failed to write SHM token data")?;
-        file.sync_all().context("Failed to sync SHM token to disk")?;
+        file.write_all(&new_token)?;
+        file.sync_all()?;
     }
 
-    std::fs::rename(&tmp_path, &token_path).context("Failed to atomically install SHM token")?;
+    std::fs::rename(&tmp_path, &token_path)?;
 
     Ok(blake3::hash(&new_token).as_bytes().to_vec())
 }
 
+/// Sends file descriptors over a Unix socket (for SHM ring sharing).
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 pub fn send_fds(socket_fd: std::os::unix::io::RawFd, fds: &[std::os::unix::io::RawFd]) -> Result<()> {
     use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};

@@ -13,7 +13,7 @@ use crate::retry::RetryPolicy;
 use crate::circuit_breaker::{CircuitBreaker};
 use crate::deadline::Deadline;
 
-use cell_core::{Transport, TransportError, channel};
+use cell_core::{Transport, CellError, channel};
 use cell_model::bridge::{BridgeRequest, BridgeResponse};
 use anyhow::{bail, Result, Context};
 use rkyv::ser::serializers::AllocSerializer;
@@ -21,7 +21,7 @@ use rkyv::{Archive, Serialize};
 use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn, debug};
+use tracing::{info, debug, warn};
 use std::time::Duration;
 
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
@@ -50,21 +50,14 @@ impl Default for SynapseConfig {
 pub struct Synapse {
     cell_name: String,
     transport: Box<dyn Transport>,
-    
     retry_policy: RetryPolicy,
     circuit_breaker: Arc<CircuitBreaker>,
     default_deadline: Deadline,
-    
     #[cfg(feature = "shm")]
     shm_client: Option<ShmClient>,
 }
 
 impl Synapse {
-    /// Connect to a cell.
-    /// Supports:
-    /// 1. Local sockets ("ledger")
-    /// 2. URI Schemes ("mavlink:drone", "quic:remote") via Gateways
-    /// 3. Fallback to default gateway ("axon")
     pub async fn grow(connection_string: &str) -> Result<Self> {
         Self::grow_with_config(connection_string, SynapseConfig::default()).await
     }
@@ -72,25 +65,19 @@ impl Synapse {
     pub async fn grow_with_config(connection_string: &str, config: SynapseConfig) -> Result<Self> {
         info!("[Synapse] Connecting to '{}'...", connection_string);
 
-        // 1. Parse Connection String
         let (gateway_name, target) = Self::resolve_gateway(connection_string);
 
-        // 2. Try Direct Connection (Fast Path)
-        // If it's a simple name like "ledger", check local socket first
+        // 1. Try Direct Local Connection
         if gateway_name.is_none() {
             if let Ok(syn) = Self::connect_local(target, &config).await {
                 return Ok(syn);
             }
         }
 
-        // 3. Routing via Gateway (Slow Path)
-        // If we have a scheme (e.g. "mavlink") or local connect failed, ask the gateway.
-        let gateway = gateway_name.unwrap_or("axon"); // Default to Axon
-        
+        // 2. Gateway Routing (Axon Bridge)
+        let gateway = gateway_name.unwrap_or("axon");
         debug!("[Synapse] Routing '{}' via gateway '{}'", target, gateway);
 
-        // Recursive: Connect to the gateway itself (must be local)
-        // We assume the gateway itself is reachable locally.
         let mut gateway_syn = match Self::connect_local(gateway, &SynapseConfig::default()).await {
             Ok(g) => g,
             Err(_) => bail!("Target '{}' not found and gateway '{}' is not running.", target, gateway),
@@ -100,8 +87,8 @@ impl Synapse {
         let req = BridgeRequest::Mount { target: target.to_string() };
         let req_bytes = rkyv::to_bytes::<_, 256>(&req)?.into_vec();
         
-        // We send this on the APP channel of the gateway
-        let resp_wrapper = gateway_syn.fire_on_channel(channel::APP, &req_bytes).await?;
+        let resp_wrapper = gateway_syn.fire_on_channel(channel::APP, &req_bytes).await
+            .map_err(|e| anyhow::anyhow!("Gateway request failed: {}", e))?;
         
         let resp_bytes = match resp_wrapper {
             Response::Owned(v) => v,
@@ -116,8 +103,6 @@ impl Synapse {
         match response {
             BridgeResponse::Mounted { socket_path } => {
                 info!("[Synapse] Gateway mounted '{}' at '{}'", target, socket_path);
-                // Connect to the proxy socket provided by the gateway
-                // Note: We bypass `connect_local` helpers to connect to arbitrary path
                 Self::connect_to_path(&socket_path, target, &config).await
             }
             BridgeResponse::NotFound => bail!("Gateway '{}' could not find target '{}'", gateway, target),
@@ -125,16 +110,14 @@ impl Synapse {
         }
     }
 
-    /// Determines the gateway cell based on URI scheme
     fn resolve_gateway(conn_str: &str) -> (Option<&str>, &str) {
         if let Some((scheme, rest)) = conn_str.split_once(':') {
-            // Map schemes to convention-based cell names
             let gateway = match scheme {
                 "quic" => "axon",
                 "tcp" => "tcp-gateway",
                 "mavlink" => "mavlink-gateway",
                 "ssh" => "ssh-gateway",
-                other => other, // e.g. "custom:target" -> "custom" cell
+                other => other,
             };
             (Some(gateway), rest)
         } else {
@@ -154,26 +137,24 @@ impl Synapse {
         let mut shm_client: Option<ShmClient> = None;
 
         if let Ok(mut stream) = UnixStream::connect(path).await {
-            
             #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
             if std::env::var("CELL_DISABLE_SHM").is_err() {
                 match Self::try_upgrade_to_shm(&mut stream).await {
                     Ok(client) => {
+                        info!("[Synapse] ✓ Upgraded to Shared Memory");
                         transport = Some(Box::new(ShmTransport::new(
                                 ShmClient::new(client.tx.clone(), client.rx.clone())
                         )));
                         shm_client = Some(client);
                     }
                     Err(_) => {
-                        // Fallback to Unix if upgrade rejected (common for proxies)
+                        // Fallback to Unix
                     }
                 }
             }
             
             if transport.is_none() {
-                // If upgrade consumed stream, we need a new one or carefully handle buffer.
-                // Assuming upgrade logic handles clean stream state or we reconnect.
-                // For simplicity, we reconnect if upgrade failed to ensure clean state.
+                // Reconnect for clean stream if upgrade failed
                 if let Ok(clean_stream) = UnixStream::connect(path).await {
                     transport = Some(Box::new(UnixTransport::new(clean_stream)));
                 }
@@ -265,9 +246,6 @@ impl Synapse {
         for i in 0..RECONNECT_ATTEMPTS {
             tokio::time::sleep(Duration::from_millis(BASE_DELAY * (1 << i))).await;
             
-            // Retry the original connection string logic implicitly?
-            // Synapse struct stores `cell_name`. If it was "mavlink:drone", we need to re-resolve.
-            // Simplified: We attempt to reconnect using the stored name.
             match Synapse::grow(&self.cell_name).await {
                 Ok(new_syn) => {
                     info!("[Synapse] Reconnected to '{}'.", self.cell_name);
@@ -285,26 +263,28 @@ impl Synapse {
         bail!("Failed to heal connection to '{}' after {} attempts", self.cell_name, RECONNECT_ATTEMPTS);
     }
 
-    async fn call_transport(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+    async fn call_transport(&mut self, data: &[u8]) -> Result<Vec<u8>, CellError> {
          match self.transport.call(data).await {
              Ok(resp) => Ok(resp),
              Err(e) => {
                  match e {
-                     TransportError::Io | TransportError::ConnectionClosed | TransportError::Timeout => {
-                         if let Err(heal_err) = self.heal().await {
-                             return Err(anyhow::anyhow!("Transport Error: {:?}, Healing Failed: {}", e, heal_err));
+                     CellError::IoError | CellError::ConnectionReset | CellError::Timeout => {
+                         // Attempt healing
+                         if self.heal().await.is_ok() {
+                             self.transport.call(data).await
+                         } else {
+                             Err(e)
                          }
-                         self.transport.call(data).await.map_err(|e2| anyhow::anyhow!("Retry after heal failed: {:?}", e2))
                      },
-                     _ => Err(anyhow::anyhow!("Transport Error: {:?}", e)),
+                     _ => Err(e),
                  }
              }
          }
     }
 
-    pub async fn fire_on_channel(&mut self, channel_id: u8, data: &[u8]) -> Result<Response<Vec<u8>>> {
+    pub async fn fire_on_channel(&mut self, channel_id: u8, data: &[u8]) -> Result<Response<Vec<u8>>, CellError> {
         if self.circuit_breaker.is_open() {
-            return Err(anyhow::anyhow!("Circuit breaker open for '{}'", self.cell_name));
+            return Err(CellError::CircuitBreakerOpen);
         }
 
         #[cfg(feature = "shm")]
@@ -321,27 +301,32 @@ impl Synapse {
         loop {
             attempt += 1;
             
-            let result = self.default_deadline.execute({
+            let res = self.default_deadline.execute({
                 let data_ref = &data_vec;
                 let breaker = self.circuit_breaker.clone();
+                let transport = &self.transport; // we need mut access wrapper or call_transport logic inline
                 
+                // For simplicity due to borrow checker in this loop context:
+                // We delegate to call_transport which handles the actual IO
                 async move {
-                   breaker.call(|| { Ok(()) }).map_err(|e| anyhow::anyhow!("{}", e))?; 
-                   let mut frame = Vec::with_capacity(1 + data_ref.len());
-                   frame.push(channel_id);
-                   frame.extend_from_slice(data_ref);
-                   Ok(frame)
+                    breaker.call(|| { Ok(()) }).map_err(|_| CellError::CircuitBreakerOpen)?;
+                    // We need to frame it here
+                    let mut frame = Vec::with_capacity(1 + data_ref.len());
+                    frame.push(channel_id);
+                    frame.extend_from_slice(data_ref);
+                    
+                    // We can't move self.transport into closure. 
+                    // This complexity is why call_transport is usually outside.
+                    // But here we need retry logic.
+                    // We assume call_transport is robust.
+                    Ok(frame)
                 }
             }).await;
 
-            let frame = match result {
-                Ok(f) => f,
-                Err(e) => {
-                    if attempt >= self.retry_policy.max_attempts { return Err(e); }
-                    tokio::time::sleep(delay).await;
-                    delay = std::cmp::min(Duration::from_secs_f64(delay.as_secs_f64() * self.retry_policy.multiplier), self.retry_policy.max_delay);
-                    continue;
-                }
+            let frame = match res {
+                Ok(Ok(f)) => f,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err(CellError::Timeout),
             };
             
             match self.call_transport(&frame).await {
@@ -355,7 +340,7 @@ impl Synapse {
         }
     }
 
-    pub async fn fire<'a, Req, Resp>(&'a mut self, request: &Req) -> Result<Response<'a, Resp>>
+    pub async fn fire<'a, Req, Resp>(&'a mut self, request: &Req) -> Result<Response<'a, Resp>, CellError>
     where
         Req: Serialize<AllocSerializer<1024>>,
         Resp: Archive + 'a,
@@ -363,7 +348,7 @@ impl Synapse {
     {
         let req_bytes = match rkyv::to_bytes::<_, 1024>(request) {
             Ok(b) => b.into_vec(),
-            Err(e) => return Err(anyhow::anyhow!("Serialization error: {}", e)),
+            Err(_) => return Err(CellError::SerializationFailure),
         };
 
         #[cfg(feature = "shm")]
@@ -375,7 +360,7 @@ impl Synapse {
 
         match self.fire_on_channel(channel::APP, &req_bytes).await? {
             Response::Owned(vec) => Ok(Response::Owned(vec)),
-            _ => Err(anyhow::anyhow!("Unexpected response type")),
+            _ => Err(CellError::SerializationFailure),
         }
     }
 }

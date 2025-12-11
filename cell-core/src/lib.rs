@@ -10,15 +10,8 @@ use core::future::Future;
 use core::pin::Pin;
 use core::any::Any;
 
-/// The 20-byte immutable header.
-#[repr(C, packed)]
-#[derive(Debug, Clone, Copy)]
-pub struct Header {
-    pub fingerprint: u64,
-    pub len: u32,
-    pub crc: u32,
-    pub flags: u32,
-}
+pub mod error;
+pub use error::CellError;
 
 /// Protocol Multiplexing Channels
 pub mod channel {
@@ -36,43 +29,26 @@ pub enum Wire<'a, T> {
 
 pub trait Codec {
     type Output;
-    fn encode<T: ?Sized>(&self, item: &T) -> Result<Vec<u8>, &'static str>;
-    fn decode<'a, T: ?Sized>(&self, bytes: &'a [u8]) -> Result<Self::Output, &'static str>;
-}
-
-#[derive(Debug)]
-pub enum TransportError {
-    Io,
-    Timeout,
-    ConnectionClosed,
-    Serialization,
-    Other(&'static str),
+    fn encode<T: ?Sized>(&self, item: &T) -> Result<Vec<u8>, CellError>;
+    fn decode<'a, T: ?Sized>(&self, bytes: &'a [u8]) -> Result<Self::Output, CellError>;
 }
 
 /// Client-side: Request/Response pattern.
 pub trait Transport: Send + Sync {
-    fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + Send + '_>>;
+    fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, CellError>> + Send + '_>>;
 }
 
 /// Server-side: Zero-Copy Bidirectional Connection.
-/// Replaces Stream/Receiver to allow zero-copy reads via Vesicle.
 pub trait Connection: Send + Sync {
-    /// Receive a message (Channel ID, Payload).
-    /// Returns a Vesicle which may be zero-copy (Guarded).
-    fn recv(&mut self) -> Pin<Box<dyn Future<Output = Result<(u8, Vesicle<'static>), TransportError>> + Send + '_>>;
-    
-    /// Send a response.
-    fn send(&mut self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + '_>>;
-
-    /// Downcasting support for Transport Upgrades (e.g. Unix -> SHM)
+    fn recv(&mut self) -> Pin<Box<dyn Future<Output = Result<(u8, Vesicle<'static>), CellError>> + Send + '_>>;
+    fn send(&mut self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<(), CellError>> + Send + '_>>;
     fn as_any(&mut self) -> &mut (dyn Any + Send);
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;
 }
 
 /// Server-side: Listener.
-/// Abstract factory for incoming Connections.
 pub trait Listener: Send + Sync {
-    fn accept(&mut self) -> Pin<Box<dyn Future<Output = Result<Box<dyn Connection>, TransportError>> + Send + '_>>;
+    fn accept(&mut self) -> Pin<Box<dyn Future<Output = Result<Box<dyn Connection>, CellError>> + Send + '_>>;
 }
 
 /// A container for payload data (Vesicle).

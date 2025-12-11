@@ -1,0 +1,13 @@
+[package]
+name = "vault"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cell-sdk = { path = "../../cell-sdk" }
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.21"

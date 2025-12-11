@@ -1,4 +1,3 @@
-// Path: /Users/07lead01/cell/cell-macros/src/lib.rs
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
@@ -35,17 +34,7 @@ fn normalize_ty(ty: &Type) -> Type {
 }
 
 fn sanitize_return_type(ty: &Type) -> Type {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            if seg.ident == "Result" {
-                if let PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if let Some(GenericArgument::Type(ok_type)) = args.args.first() {
-                        return syn::parse_quote! { ::std::result::Result<#ok_type, ::std::string::String> };
-                    }
-                }
-            }
-        }
-    }
+    // We preserve Result<T, E> to support user-defined errors on the wire.
     ty.clone()
 }
 
@@ -260,11 +249,8 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
             ArchivedProtocol::#vname { #(#field_names),* } => {
                 #(#arg_preps)*
                 let result = self.#n(#(#field_names),*).await;
-                let wire_result = match result {
-                    Ok(val) => Ok(val),
-                    Err(e) => Err(format!("{:?}", e)),
-                };
-                Ok(#response_name::#vname(wire_result))
+                // Directly wrap the result (including App Errors) into the response enum
+                Ok(#response_name::#vname(result))
             }
         }
     });
@@ -347,7 +333,6 @@ impl Parse for CellRemoteArgs {
         let cell_name_lit: LitStr = input.parse()?;
         let cell_name = cell_name_lit.value();
         
-        // We still allow parsing the option for backward compat, but we won't use it
         let mut import_macros = false;
         
         if input.peek(Token![,]) {
@@ -462,14 +447,23 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         let vname = format_ident!("{}", n.to_string().to_case(Case::Pascal));
         let args_sig = args.iter().map(|(an, at)| quote! { #an: #at });
         let args_struct = args.iter().map(|(an, _)| quote! { #an });
+        
+        // This generates:
+        // Result<Result<u64, LedgerError>, CellError>
         quote! {
-            pub async fn #n(&mut self, #(#args_sig),*) -> ::anyhow::Result<#wret> {
+            pub async fn #n(&mut self, #(#args_sig),*) -> ::std::result::Result<#wret, ::cell_sdk::CellError> {
                 let req = #protocol_name::#vname { #(#args_struct),* };
+                
+                // 1. System Error Check (Transport/Substrate failure)
                 let resp = self.conn.fire::<#protocol_name, #response_name>(&req).await?;
-                let val = resp.deserialize()?;
+                
+                // 2. Serialization Check
+                let val = resp.deserialize().map_err(|_| ::cell_sdk::CellError::SerializationFailure)?;
+                
+                // 3. Protocol Check
                 match val {
                     #response_name::#vname(res) => Ok(res),
-                    _ => Err(::anyhow::anyhow!("Protocol Mismatch")),
+                    _ => Err(::cell_sdk::CellError::VersionMismatch),
                 }
             }
         }

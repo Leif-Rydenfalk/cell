@@ -12,6 +12,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::time::Duration;
+use cell_core::CellError;
 
 pub type ShmSerializer = AllocSerializer<1024>;
 
@@ -25,13 +26,13 @@ const HEADER_SIZE: usize = std::mem::size_of::<SlotHeader>();
 
 #[repr(C)]
 struct SlotHeader {
-    refcount: AtomicU32,   // 4
-    len: AtomicU32,        // 4
-    epoch: AtomicU64,      // 8
-    generation: AtomicU64, // 8 - Added for ABA / Stale read detection
-    owner_pid: AtomicU32,  // 4
-    channel: AtomicU8,     // 1
-    _pad: [u8; 3],         // 3 (Padding to 32 bytes)
+    refcount: AtomicU32,
+    len: AtomicU32,
+    epoch: AtomicU64,
+    generation: AtomicU64,
+    owner_pid: AtomicU32,
+    channel: AtomicU8,
+    _pad: [u8; 3],
 }
 
 #[repr(C, align(64))]
@@ -40,16 +41,6 @@ struct RingControl {
     _pad1: [u8; CACHE_LINE - 8],
     read_pos: AtomicU64,
     _pad2: [u8; CACHE_LINE - 8],
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ShmError {
-    #[error("Shared memory error")]
-    Io(#[from] std::io::Error),
-    #[error("Slot was reclaimed during read (Stale)")]
-    Stale,
-    #[error("Serialization error")]
-    Serialization(String),
 }
 
 pub struct RingBuffer {
@@ -106,6 +97,7 @@ impl RingBuffer {
 
     #[cfg(target_os = "macos")]
     pub fn create(name: &str) -> anyhow::Result<(Arc<Self>, std::os::unix::io::RawFd)> {
+        // macOS implementation...
         use nix::fcntl::OFlag;
         use nix::sys::mman::{shm_open, shm_unlink};
         use nix::sys::stat::Mode;
@@ -168,7 +160,6 @@ impl RingBuffer {
     pub fn try_alloc(&self, exact_size: usize) -> Option<WriteSlot> {
         const MAX_ALLOC_SIZE: usize = 16 * 1024 * 1024;
         if exact_size > MAX_ALLOC_SIZE {
-            eprintln!("[SHM] Allocation too large: {}", exact_size);
             return None;
         }
 
@@ -224,28 +215,7 @@ impl RingBuffer {
         }
     }
 
-    pub fn try_read<T: Archive>(&self) -> Result<Option<ShmMessage<T>>, ShmError>
-    where
-        T::Archived:
-            rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
-    {
-        if let Some(raw) = self.try_read_raw()? {
-            let archived_ref = match rkyv::check_archived_root::<T>(raw.data) {
-                Ok(a) => a,
-                Err(e) => return Err(ShmError::Serialization(e.to_string())),
-            };
-            let archived_static: &'static T::Archived = unsafe { std::mem::transmute(archived_ref) };
-            Ok(Some(ShmMessage {
-                archived: archived_static,
-                _token: raw._token,
-                _phantom: PhantomData,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn try_read_raw(&self) -> Result<Option<RawShmMessage>, ShmError> {
+    pub fn try_read_raw(&self) -> Result<Option<RawShmMessage>, CellError> {
         let read = unsafe { (*self.control).read_pos.load(Ordering::Acquire) };
         let write = unsafe { (*self.control).write_pos.load(Ordering::Acquire) };
 
@@ -274,7 +244,6 @@ impl RingBuffer {
             read
         };
 
-        // 1. Check generation before locking
         let gen_before = header.generation.load(Ordering::Acquire);
         if header.epoch.load(Ordering::Acquire) != expected_epoch {
             return Ok(None);
@@ -308,13 +277,10 @@ impl RingBuffer {
             }
         }
 
-        // 2. Check generation AGAIN after locking to detect wrap-around race
         let gen_after = header.generation.load(Ordering::Acquire);
         if gen_before != gen_after {
-            // Writer overwrote this slot while we were trying to lock it.
-            // Release lock and fail safely.
             header.refcount.store(0, Ordering::Release);
-            return Err(ShmError::Stale);
+            return Err(CellError::Corruption); 
         }
 
         let channel = header.channel.load(Ordering::Acquire);
@@ -379,8 +345,6 @@ impl<'a> WriteSlot<'a> {
             (*header_ptr).refcount.store(0, Ordering::Release);
             (*header_ptr).len.store(actual_size as u32, Ordering::Release);
             std::sync::atomic::compiler_fence(Ordering::Release);
-            
-            // Bump generation after commit so readers can detect the change
             (*header_ptr).generation.fetch_add(1, Ordering::Release);
             (*header_ptr).epoch.store(self.epoch_claim, Ordering::Release);
         }
@@ -438,12 +402,12 @@ where
         self.archived
     }
 
-    pub fn deserialize(&self) -> anyhow::Result<T, rkyv::de::deserializers::SharedDeserializeMapError>
+    pub fn deserialize(&self) -> Result<T, CellError>
     where
         T::Archived: Deserialize<T, rkyv::de::deserializers::SharedDeserializeMap>,
     {
         let mut deserializer = rkyv::de::deserializers::SharedDeserializeMap::new();
-        self.archived.deserialize(&mut deserializer)
+        self.archived.deserialize(&mut deserializer).map_err(|_| CellError::SerializationFailure)
     }
 }
 
@@ -474,7 +438,7 @@ impl ShmClient {
         Self { tx, rx }
     }
 
-    pub async fn request_raw(&self, req_bytes: &[u8], channel: u8) -> anyhow::Result<RawShmMessage> {
+    pub async fn request_raw(&self, req_bytes: &[u8], channel: u8) -> Result<RawShmMessage, CellError> {
         let size = req_bytes.len();
         let mut slot = self.tx.wait_for_slot(size).await;
         slot.write(req_bytes, channel);
@@ -484,16 +448,11 @@ impl ShmClient {
         loop {
             match self.rx.try_read_raw() {
                 Ok(Some(msg)) => return Ok(msg),
-                Ok(None) => {
-                     // Keep spinning/sleeping
-                },
-                Err(ShmError::Stale) => {
-                    // Stale read implies race condition; back off slightly and retry reading loop
-                    // In a real scenario, this means we missed the message or it was corrupted/overwritten
-                    // For a Request/Response pattern, we should probably timeout if we miss it.
-                    // But here we just continue loop to try catch next valid state.
+                Ok(None) => {},
+                Err(CellError::Corruption) => {
+                    // Stale/Corrupt read, retry
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
             }
             
             spin += 1;
@@ -507,19 +466,19 @@ impl ShmClient {
         }
     }
 
-    pub async fn request<Req, Resp>(&self, req: &Req, channel: u8) -> anyhow::Result<ShmMessage<Resp>>
+    pub async fn request<Req, Resp>(&self, req: &Req, channel: u8) -> Result<ShmMessage<Resp>, CellError>
     where
         Req: Serialize<ShmSerializer>,
         Resp: Archive,
         Resp::Archived:
             rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
-        let bytes = rkyv::to_bytes::<_, 1024>(req)?.into_vec();
+        let bytes = rkyv::to_bytes::<_, 1024>(req).map_err(|_| CellError::SerializationFailure)?.into_vec();
         let msg = self.request_raw(&bytes, channel).await?;
         
         let archived_ref = match rkyv::check_archived_root::<Resp>(msg.data) {
             Ok(a) => a,
-            Err(_) => anyhow::bail!("SHM validation failed"),
+            Err(_) => return Err(CellError::SerializationFailure),
         };
         let archived_static: &'static Resp::Archived = unsafe { std::mem::transmute(archived_ref) };
 
@@ -536,11 +495,10 @@ fn is_process_alive(pid: u32) -> bool {
     {
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
-        // Kill with signal 0 checks for existence. Using None as signal 0.
         match kill(Pid::from_raw(pid as i32), None) {
             Ok(_) => true,
             Err(nix::errno::Errno::ESRCH) => false,
-            Err(_) => true, // Permission denied or other error -> assume alive
+            Err(_) => true,
         }
     }
     #[cfg(not(all(unix, any(target_os = "linux", target_os = "macos"))))]

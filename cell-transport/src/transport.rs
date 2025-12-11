@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use cell_core::{Transport, TransportError, Listener, Connection, Vesicle};
+use cell_core::{Transport, CellError, Listener, Connection, Vesicle};
 use std::future::Future;
 use std::pin::Pin;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,31 +25,31 @@ impl UnixTransport {
 
 // Client Side
 impl Transport for UnixTransport {
-    fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + Send + '_>> {
+    fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, CellError>> + Send + '_>> {
         let stream_lock = self.stream.clone();
         let data_vec = data.to_vec();
         
         Box::pin(async move {
             let mut stream = stream_lock.lock().await;
             
-            // Length + Data
+            // Length + Data (Data already contains Channel byte from Synapse)
             let len = data_vec.len() as u32;
-            if let Err(_) = stream.write_all(&len.to_le_bytes()).await {
-                return Err(TransportError::Io);
+            if stream.write_all(&len.to_le_bytes()).await.is_err() {
+                return Err(CellError::IoError);
             }
-            if let Err(_) = stream.write_all(&data_vec).await {
-                return Err(TransportError::Io);
+            if stream.write_all(&data_vec).await.is_err() {
+                return Err(CellError::IoError);
             }
             
             let mut len_buf = [0u8; 4];
-            if let Err(_) = stream.read_exact(&mut len_buf).await {
-                return Err(TransportError::Io);
+            if stream.read_exact(&mut len_buf).await.is_err() {
+                return Err(CellError::ConnectionReset);
             }
             let resp_len = u32::from_le_bytes(len_buf) as usize;
 
             let mut resp_buf = vec![0u8; resp_len];
-            if let Err(_) = stream.read_exact(&mut resp_buf).await {
-                return Err(TransportError::Io);
+            if stream.read_exact(&mut resp_buf).await.is_err() {
+                return Err(CellError::ConnectionReset);
             }
 
             Ok(resp_buf)
@@ -69,21 +69,21 @@ impl UnixConnection {
 }
 
 impl Connection for UnixConnection {
-    fn recv(&mut self) -> Pin<Box<dyn Future<Output = Result<(u8, Vesicle<'static>), TransportError>> + Send + '_>> {
+    fn recv(&mut self) -> Pin<Box<dyn Future<Output = Result<(u8, Vesicle<'static>), CellError>> + Send + '_>> {
         Box::pin(async move {
             let mut len_buf = [0u8; 4];
             match self.inner.read_exact(&mut len_buf).await {
                 Ok(_) => {},
-                Err(_) => return Err(TransportError::ConnectionClosed),
+                Err(_) => return Err(CellError::ConnectionReset),
             };
             let len = u32::from_le_bytes(len_buf) as usize;
             
-            if len == 0 { return Err(TransportError::ConnectionClosed); }
+            if len == 0 { return Err(CellError::ConnectionReset); }
 
             let mut buf = vec![0u8; len];
             match self.inner.read_exact(&mut buf).await {
                 Ok(_) => {},
-                Err(_) => return Err(TransportError::Io),
+                Err(_) => return Err(CellError::IoError),
             };
             
             let channel = buf[0];
@@ -93,15 +93,15 @@ impl Connection for UnixConnection {
         })
     }
 
-    fn send(&mut self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + '_>> {
+    fn send(&mut self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<(), CellError>> + Send + '_>> {
         let data_vec = data.to_vec();
         Box::pin(async move {
             let len = data_vec.len() as u32;
-            if let Err(_) = self.inner.write_all(&len.to_le_bytes()).await {
-                return Err(TransportError::Io);
+            if self.inner.write_all(&len.to_le_bytes()).await.is_err() {
+                return Err(CellError::IoError);
             }
-            if let Err(_) = self.inner.write_all(&data_vec).await {
-                return Err(TransportError::Io);
+            if self.inner.write_all(&data_vec).await.is_err() {
+                return Err(CellError::IoError);
             }
             Ok(())
         })
@@ -126,11 +126,11 @@ impl UnixListenerAdapter {
     }
 }
 impl Listener for UnixListenerAdapter {
-    fn accept(&mut self) -> Pin<Box<dyn Future<Output = Result<Box<dyn Connection>, TransportError>> + Send + '_>> {
+    fn accept(&mut self) -> Pin<Box<dyn Future<Output = Result<Box<dyn Connection>, CellError>> + Send + '_>> {
         Box::pin(async move {
             match self.inner.accept().await {
                 Ok((stream, _)) => Ok(Box::new(UnixConnection { inner: stream }) as Box<dyn Connection>),
-                Err(_) => Err(TransportError::Io),
+                Err(_) => Err(CellError::IoError),
             }
         })
     }
@@ -148,13 +148,13 @@ impl ShmTransport {
 }
 #[cfg(feature = "shm")]
 impl Transport for ShmTransport {
-    fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + Send + '_>> {
+    fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, CellError>> + Send + '_>> {
         let channel = data[0];
         let payload = data[1..].to_vec();
         let client = self.client.clone();
         
         Box::pin(async move {
-            let resp_msg = client.request_raw(&payload, channel).await.map_err(|_| TransportError::Io)?;
+            let resp_msg = client.request_raw(&payload, channel).await?;
             Ok(resp_msg.get_bytes().to_vec())
         })
     }
@@ -175,7 +175,7 @@ impl ShmConnection {
 
 #[cfg(feature = "shm")]
 impl Connection for ShmConnection {
-    fn recv(&mut self) -> Pin<Box<dyn Future<Output = Result<(u8, Vesicle<'static>), TransportError>> + Send + '_>> {
+    fn recv(&mut self) -> Pin<Box<dyn Future<Output = Result<(u8, Vesicle<'static>), CellError>> + Send + '_>> {
         Box::pin(async move {
             let mut spin = 0u32;
             loop {
@@ -202,7 +202,7 @@ impl Connection for ShmConnection {
         })
     }
 
-    fn send(&mut self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + '_>> {
+    fn send(&mut self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<(), CellError>> + Send + '_>> {
         let data_vec = data.to_vec();
         Box::pin(async move {
             let size = data_vec.len();
