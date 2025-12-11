@@ -1,4 +1,3 @@
-// Path: /Users/07lead01/cell/cell-transport/src/coordination.rs
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
@@ -81,12 +80,16 @@ impl CoordinationHandler {
         };
 
         let req_bytes = cell_model::rkyv::to_bytes::<_, 1024>(&request)?.into_vec();
-        let response = synapse.fire_on_channel(
+        
+        // Handle CellError -> anyhow::Error mapping manually since ? might fail with mismatched types
+        let response = match synapse.fire_on_channel(
             cell_core::channel::MACRO_COORDINATION,
             &req_bytes
-        ).await?;
+        ).await {
+            Ok(r) => r,
+            Err(e) => anyhow::bail!("Transport error: {}", e),
+        };
 
-        // FIX: Extract bytes directly instead of using .get() which expects Vec<u8>
         let bytes = match &response {
             Response::Owned(vec) => vec.as_slice(),
             Response::Borrowed(slice) => slice,
@@ -131,12 +134,14 @@ impl MacroCoordinator {
                 Ok(Ok(mut synapse)) => {
                     let req_bytes = rkyv::to_bytes::<_, 1024>(&request)?.into_vec();
                     
-                    let response = synapse.fire_on_channel(
+                    let response = match synapse.fire_on_channel(
                         cell_core::channel::MACRO_COORDINATION,
                         &req_bytes
-                    ).await?;
+                    ).await {
+                        Ok(r) => r,
+                        Err(e) => anyhow::bail!("Transport error: {}", e),
+                    };
 
-                    // FIX: Extract bytes directly instead of using .get() which expects Vec<u8>
                     let bytes = match &response {
                         Response::Owned(vec) => vec.as_slice(),
                         Response::Borrowed(slice) => slice,
@@ -178,7 +183,6 @@ impl MacroCoordinator {
             MacroCoordinationResponse::Macros { macros } => Ok(macros),
             MacroCoordinationResponse::Error { message } => {
                 // Fallback: check cached macros
-                // In a real implementation we would log this warning
                 eprintln!("Warning: Failed to query macros from {}: {}", self.cell_name, message);
                 Ok(self.get_cached_macros()?)
             }

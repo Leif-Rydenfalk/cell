@@ -39,8 +39,6 @@ use cell_model::protocol::{SHM_UPGRADE_ACK, SHM_UPGRADE_REQUEST};
 use std::os::unix::fs::PermissionsExt;
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use std::os::unix::io::AsRawFd;
-#[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
-use crate::transport::ShmConnection;
 
 use crate::coordination::CoordinationHandler;
 
@@ -81,7 +79,7 @@ impl Membrane {
             tokio::select! {
                 res = listener.accept() => {
                     match res {
-                        Ok(mut connection) => {
+                        Ok(connection) => {
                             let permit = match semaphore.clone().try_acquire_owned() {
                                 Ok(p) => p,
                                 Err(_) => {
@@ -240,9 +238,6 @@ where
                 let archived_req = rkyv::check_archived_root::<Req>(data)
                     .map_err(|_| CellError::InvalidHeader)?;
 
-                // Handler runs user code. 
-                // We map anyhow::Error from handler to CellError::IoError for generic failures,
-                // but strictly speaking, handler logic failures should be encoded in Resp.
                 let response = match handler(archived_req).await {
                     Ok(r) => r,
                     Err(_) => return Err(CellError::IoError),
@@ -250,9 +245,10 @@ where
 
                 let aligned_input = std::mem::take(&mut write_buf);
                 
+                // Fix: Explicitly specify types for CompositeSerializer
                 let mut serializer = CompositeSerializer::new(
                     AlignedSerializer::new(aligned_input),
-                    FallbackScratch::default(),
+                    FallbackScratch::<HeapScratch<1024>, AllocScratch>::default(),
                     SharedSerializeMap::default(),
                 );
 
@@ -308,7 +304,7 @@ where
                 let aligned_input = std::mem::take(&mut write_buf);
                 let mut serializer = CompositeSerializer::new(
                     AlignedSerializer::new(aligned_input),
-                    FallbackScratch::default(),
+                    FallbackScratch::<HeapScratch<1024>, AllocScratch>::default(),
                     SharedSerializeMap::default(),
                 );
                 serializer.serialize_value(&resp).map_err(|_| CellError::SerializationFailure)?;
@@ -343,8 +339,6 @@ where
 
 // === EXPORTED UTILS FOR AXON SHM BRIDGE ===
 
-/// Retrieves the shared authentication token for SHM handshakes.
-/// This is used by Axon to prove its identity when acting as a proxy.
 pub fn get_shm_auth_token() -> Result<Vec<u8>> {
     if let Ok(token) = std::env::var("CELL_SHM_TOKEN") {
         return Ok(blake3::hash(token.as_bytes()).as_bytes().to_vec());
@@ -401,7 +395,6 @@ pub fn get_shm_auth_token() -> Result<Vec<u8>> {
     Ok(blake3::hash(&new_token).as_bytes().to_vec())
 }
 
-/// Sends file descriptors over a Unix socket (for SHM ring sharing).
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 pub fn send_fds(socket_fd: std::os::unix::io::RawFd, fds: &[std::os::unix::io::RawFd]) -> Result<()> {
     use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};

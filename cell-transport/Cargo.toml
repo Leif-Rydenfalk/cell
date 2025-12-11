@@ -5,7 +5,7 @@ edition = { workspace = true }
 
 [features]
 default = ["std", "shm"]
-std = ["dep:tokio", "dep:socket2", "dep:dirs", "dep:tracing", "cell-core", "dep:fd-lock", "dep:users"]
+std = ["dep:tokio", "dep:socket2", "dep:dirs", "dep:tracing", "dep:fd-lock", "dep:users", "cell-core/std"]
 shm = ["std", "dep:nix", "dep:memmap2", "dep:users"]
 
 [dependencies]

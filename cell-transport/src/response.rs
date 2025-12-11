@@ -4,7 +4,6 @@
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
 use crate::shm::ShmMessage;
 use rkyv::{Archive, Deserialize};
-use std::marker::PhantomData;
 use anyhow::Result;
 
 pub enum Response<'a, T: Archive>
@@ -18,7 +17,7 @@ where
     ZeroCopy(ShmMessage<T>),
     
     #[cfg(not(all(feature = "shm", any(target_os = "linux", target_os = "macos"))))]
-    _Phantom(PhantomData<&'a T>),
+    _Phantom(std::marker::PhantomData<&'a T>),
 }
 
 impl<'a, T: Archive> Response<'a, T>
@@ -68,8 +67,6 @@ where
         Ok(archived.deserialize(&mut deserializer)?)
     }
 
-    /// Converts the response into an owned version with a static lifetime.
-    /// This is useful when the response needs to outlive the connection lock.
     pub fn into_owned(self) -> Response<'static, T> {
         match self {
             Response::Owned(v) => Response::Owned(v),

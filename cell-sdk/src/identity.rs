@@ -5,6 +5,7 @@ use anyhow::{Result, Context, anyhow};
 use cell_model::config::CellInitConfig;
 use std::io::Read;
 use std::sync::OnceLock;
+use rkyv::Deserialize;
 
 static CONFIG: OnceLock<CellInitConfig> = OnceLock::new();
 

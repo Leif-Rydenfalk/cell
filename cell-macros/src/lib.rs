@@ -15,7 +15,6 @@ use std::hash::{Hash, Hasher};
 use cell_transport::coordination::MacroCoordinator;
 use cell_model::macro_coordination::ExpansionContext;
 
-// [Helpers omitted for brevity, same as before...]
 fn normalize_ty(ty: &Type) -> Type {
     if let Type::Reference(type_ref) = ty {
         if let Type::Path(type_path) = &*type_ref.elem {
@@ -34,6 +33,19 @@ fn normalize_ty(ty: &Type) -> Type {
 }
 
 fn sanitize_return_type(ty: &Type) -> Type {
+    // If the return type is Result<T, E> or Result<T>, extract T.
+    // This assumes the macro wraps the return value in its own Result.
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            if seg.ident == "Result" {
+                if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(GenericArgument::Type(inner)) = args.args.first() {
+                        return inner.clone();
+                    }
+                }
+            }
+        }
+    }
     ty.clone()
 }
 
@@ -76,30 +88,39 @@ fn locate_dna(cell_name: &str) -> PathBuf {
         let global = home.join(".cell/schema").join(format!("{}.rs", cell_name));
         if global.exists() { return global; }
     }
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("No MANIFEST_DIR");
-    let root = std::path::Path::new(&manifest);
     
-    // Try to find in the workspace
-    // Check ./cells/<name>/src/main.rs
-    let check_paths = [
-        root.join("cells").join(cell_name).join("src/main.rs"),
-        root.join("examples").join("cell-market").join(cell_name).join("src/main.rs"),
-        root.join("examples").join("cell-market-bench").join("cells").join(cell_name).join("src/main.rs"),
-        root.join("examples").join("cell-tissue").join(cell_name).join("src/main.rs"),
-        root.join("examples").join("cell-consensus-raft").join("src/main.rs"), // Special case map
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("No MANIFEST_DIR");
+    let current_dir = std::path::Path::new(&manifest);
+    
+    let potential_roots = [
+        current_dir.to_path_buf(),
+        current_dir.parent().unwrap_or(current_dir).to_path_buf(),
+        current_dir.join("../"),
+        current_dir.join("../../"), // For examples/foo/bar depth
     ];
 
-    for p in check_paths {
-        if p.exists() { return p; }
-    }
-    
-    // Fallback for special naming like consensus-raft -> cell-consensus-raft
-    if cell_name == "consensus-raft" {
-        let p = root.join("examples").join("cell-consensus-raft").join("src/main.rs");
-        if p.exists() { return p; }
+    for root in potential_roots {
+        let check_paths = [
+            root.join("cells").join(cell_name).join("src/main.rs"),
+            root.join("examples").join("cell-market").join(cell_name).join("src/main.rs"),
+            root.join("examples").join("cell-market-bench").join("cells").join(cell_name).join("src/main.rs"),
+            root.join("examples").join("cell-tissue").join(cell_name).join("src/main.rs"),
+            root.join("examples").join("cell-consensus-raft").join("src/main.rs"),
+        ];
+
+        for p in check_paths {
+            if p.exists() { return p; }
+        }
+        
+        if cell_name == "consensus-raft" {
+            let p = root.join("examples").join("cell-consensus-raft").join("src/main.rs");
+            if p.exists() { return p; }
+        }
     }
 
-    panic!("Could not locate DNA for '{}' starting from {:?}", cell_name, root);
+    // panic!("Could not locate DNA for '{}' starting from {:?}", cell_name, current_dir);
+    // Returning dummy path for non-existent to avoid hard panic in IDEs/check, assuming valid for build
+    PathBuf::from("DNA_NOT_FOUND") 
 }
 
 struct ExpandArgs {
@@ -296,6 +317,11 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let cell_name = args.cell_name;
 
     let dna_path = locate_dna(&cell_name);
+    // If not found, panic with helpful message
+    if dna_path.to_string_lossy() == "DNA_NOT_FOUND" {
+        panic!("Could not locate DNA for '{}'. Ensure the cell exists in the workspace.", cell_name);
+    }
+
     let file = match cell_build::load_and_flatten_source(&dna_path) {
         Ok(f) => f,
         Err(e) => panic!("Failed to load DNA: {}", e),
@@ -371,7 +397,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         }
     });
 
-    // UPDATE: Added 'pub fn new(conn: Synapse)' to Client
     let expanded = quote! {
         #[allow(non_snake_case, dead_code)]
         pub mod #module_name {

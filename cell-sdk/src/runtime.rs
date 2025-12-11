@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use anyhow::{Result, Context};
+use anyhow::Result;
 use cell_transport::{Membrane, CoordinationHandler};
-use crate::config::CellConfig;
 use tracing::{info, warn};
 use cell_model::macro_coordination::{MacroInfo, ExpansionContext};
 use std::pin::Pin;
@@ -34,7 +33,7 @@ impl Runtime {
 
     pub async fn ignite_with_coordination<S, Req, Resp, F>(
         service: S,
-        name: &str,
+        _name: &str, 
         macros: Vec<MacroInfo>,
         expander: F,
     ) -> Result<()>
@@ -46,15 +45,15 @@ impl Runtime {
         Resp: cell_model::rkyv::Serialize<cell_model::rkyv::ser::serializers::AllocSerializer<1024>> + Send + 'static,
         F: Fn(&str, &ExpansionContext) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync + 'static,
     {
-        let config = CellConfig::from_env(name).context("Failed to load Cell configuration")?;
-        info!("[Runtime] Booting Cell '{}' (Node {})", name, config.node_id);
+        // 1. Hydrate Identity from Umbilical Cord (blocks if needed)
+        let identity = crate::identity::Identity::get();
+        let cell_name = identity.cell_name.clone();
+        let node_id = identity.node_id;
 
-        // NOTE: Pheromone discovery is now handled by the external Axon cell.
-        // The runtime focuses purely on local serving and nucleus registration.
+        info!("[Runtime] Booting Cell '{}' (Node {})", cell_name, node_id);
 
         // Start background registration with Nucleus
-        let cell_name = name.to_string();
-        let node_id = config.node_id;
+        let reg_name = cell_name.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
             
@@ -62,12 +61,12 @@ impl Runtime {
             loop {
                 match crate::NucleusClient::connect().await {
                     Ok(mut nucleus) => {
-                        match nucleus.register(cell_name.clone(), node_id).await {
+                        match nucleus.register(reg_name.clone(), node_id).await {
                             Ok(_) => {
-                                info!("[Runtime] Registered '{}' with Nucleus", cell_name);
+                                info!("[Runtime] Registered '{}' with Nucleus", reg_name);
                                 loop {
                                     tokio::time::sleep(Duration::from_secs(5)).await;
-                                    if let Err(e) = nucleus.register(cell_name.clone(), node_id).await {
+                                    if let Err(e) = nucleus.register(reg_name.clone(), node_id).await {
                                         warn!("[Runtime] Nucleus heartbeat failed: {}", e);
                                         break; 
                                     }
@@ -84,12 +83,12 @@ impl Runtime {
         });
 
         let coordination_handler = if !macros.is_empty() {
-            Some(CoordinationHandler::new(name, macros, expander))
+            Some(CoordinationHandler::new(&cell_name, macros, expander))
         } else {
             None
         };
 
-        info!("[Runtime] Membrane binding to {}", name);
-        Membrane::bind::<S, Req, Resp>(name, service, None, None, coordination_handler).await
+        info!("[Runtime] Membrane binding to {}", cell_name);
+        Membrane::bind::<S, Req, Resp>(&cell_name, service, None, None, coordination_handler).await
     }
 }

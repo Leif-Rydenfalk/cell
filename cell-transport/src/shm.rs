@@ -11,7 +11,6 @@ use std::os::unix::io::AsRawFd;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use tokio::time::Duration;
 use cell_core::CellError;
 
 pub type ShmSerializer = AllocSerializer<1024>;
@@ -97,13 +96,11 @@ impl RingBuffer {
 
     #[cfg(target_os = "macos")]
     pub fn create(name: &str) -> anyhow::Result<(Arc<Self>, std::os::unix::io::RawFd)> {
-        // macOS implementation...
         use nix::fcntl::OFlag;
         use nix::sys::mman::{shm_open, shm_unlink};
         use nix::sys::stat::Mode;
         use nix::unistd::ftruncate;
         use std::ffi::CString;
-        use std::os::unix::io::AsRawFd;
 
         let unique_name = format!("/{}_{}", name, rand::random::<u32>());
         let name_cstr = CString::new(unique_name)?;
@@ -460,7 +457,7 @@ impl ShmClient {
                 std::hint::spin_loop();
             } else {
                 #[cfg(feature = "std")]
-                tokio::time::sleep(std::time::Duration::from_nanos(100)).await;
+                tokio::time::sleep(tokio::time::Duration::from_nanos(100)).await;
                 spin = 0;
             }
         }
@@ -493,7 +490,7 @@ impl ShmClient {
 fn is_process_alive(pid: u32) -> bool {
     #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
     {
-        use nix::sys::signal::{kill, Signal};
+        use nix::sys::signal::kill;
         use nix::unistd::Pid;
         match kill(Pid::from_raw(pid as i32), None) {
             Ok(_) => true,

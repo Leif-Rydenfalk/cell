@@ -15,9 +15,9 @@ use crate::deadline::Deadline;
 
 use cell_core::{Transport, CellError, channel};
 use cell_model::bridge::{BridgeRequest, BridgeResponse};
-use anyhow::{bail, Result, Context};
+use anyhow::{bail, Result};
 use rkyv::ser::serializers::AllocSerializer;
-use rkyv::{Archive, Serialize};
+use rkyv::{Archive, Serialize, Deserialize};
 use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -304,29 +304,30 @@ impl Synapse {
             let res = self.default_deadline.execute({
                 let data_ref = &data_vec;
                 let breaker = self.circuit_breaker.clone();
-                let transport = &self.transport; // we need mut access wrapper or call_transport logic inline
                 
-                // For simplicity due to borrow checker in this loop context:
-                // We delegate to call_transport which handles the actual IO
                 async move {
-                    breaker.call(|| { Ok(()) }).map_err(|_| CellError::CircuitBreakerOpen)?;
-                    // We need to frame it here
+                    if let Err(_) = breaker.call(|| { Ok(()) }) {
+                        return Err(anyhow::Error::new(CellError::CircuitBreakerOpen));
+                    }
+                    
                     let mut frame = Vec::with_capacity(1 + data_ref.len());
                     frame.push(channel_id);
                     frame.extend_from_slice(data_ref);
                     
-                    // We can't move self.transport into closure. 
-                    // This complexity is why call_transport is usually outside.
-                    // But here we need retry logic.
-                    // We assume call_transport is robust.
                     Ok(frame)
                 }
             }).await;
 
             let frame = match res {
-                Ok(Ok(f)) => f,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(CellError::Timeout),
+                Ok(f) => f,
+                Err(e) => {
+                    // Try to recover known CellError if wrapped
+                    if let Some(ce) = e.downcast_ref::<CellError>() {
+                        return Err(*ce);
+                    }
+                    // Otherwise it's a deadline exceeded error (from execute)
+                    return Err(CellError::Timeout);
+                }
             };
             
             match self.call_transport(&frame).await {

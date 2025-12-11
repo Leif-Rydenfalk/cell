@@ -4,12 +4,14 @@
 use crate::capsid::Capsid;
 use crate::ribosome::Ribosome;
 use cell_model::protocol::{MitosisRequest, MitosisResponse, ArchivedMitosisRequest};
-use cell_model::config::{CellInitConfig, PeerConfig};
+use cell_model::config::CellInitConfig;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{info, error};
+use rkyv::option::ArchivedOption;
+use rkyv::Deserialize;
 
 pub struct MyceliumRoot {
     socket_dir: PathBuf,
@@ -85,24 +87,26 @@ impl MyceliumRoot {
                 };
 
                 // 2. Resolve Configuration
-                // If the requestor provided a specific strict config, use it.
-                // Otherwise, generate a default one (Orchestrator logic).
-                let final_config = if let Some(archived_cfg) = maybe_config {
-                    // Deserialize the strict config from the request
-                    let cfg: CellInitConfig = archived_cfg.deserialize(&mut cell_model::rkyv::Infallible).unwrap();
-                    cfg
-                } else {
-                    // Default / Auto-Generate
-                    CellInitConfig {
-                        node_id: rand::random(),
-                        cell_name: name_str.clone(),
-                        peers: vec![],
-                        socket_path: format!("/tmp/cell/{}.sock", name_str), // Matches bwrap bind
+                let final_config = match maybe_config {
+                    ArchivedOption::Some(archived_cfg) => {
+                        // Deserialize the strict config from the request
+                        let cfg: CellInitConfig = archived_cfg.deserialize(&mut rkyv::Infallible).unwrap();
+                        cfg
+                    },
+                    ArchivedOption::None => {
+                        // Default / Auto-Generate
+                        CellInitConfig {
+                            node_id: rand::random(),
+                            cell_name: name_str.clone(),
+                            peers: vec![],
+                            socket_path: format!("/tmp/cell/{}.sock", name_str),
+                        }
                     }
                 };
 
                 // 3. Inject & Spawn
-                match Capsid::spawn(&binary, &self.socket_dir, &final_config) {
+                // Note: Passing empty args list &[]
+                match Capsid::spawn(&binary, &self.socket_dir, &self.umbilical_path, &[], &final_config) {
                     Ok(_) => {
                         let resp = MitosisResponse::Ok { socket_path: final_config.socket_path };
                         self.send_resp(&mut stream, resp).await?;
