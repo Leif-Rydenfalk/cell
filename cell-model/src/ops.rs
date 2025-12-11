@@ -15,6 +15,8 @@ pub enum OpsRequest {
     Status,
     /// Request Metrics Snapshot
     Metrics,
+    /// Graceful Shutdown
+    Shutdown,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, Debug, Clone)]
@@ -28,6 +30,7 @@ pub enum OpsResponse {
         consensus_role: String,
     },
     Metrics(MetricsSnapshot),
+    ShutdownAck,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, Debug, Clone)]

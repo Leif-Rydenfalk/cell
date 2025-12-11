@@ -1,0 +1,12 @@
+[package]
+name = "consensus"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cell-sdk = { path = "../../cell-sdk" }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }

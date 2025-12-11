@@ -4,10 +4,12 @@
 use anyhow::{Result, Context};
 use cell_transport::{Membrane, CoordinationHandler};
 use crate::config::CellConfig;
-use tracing::info;
+use tracing::{info, warn};
 use cell_model::macro_coordination::{MacroInfo, ExpansionContext};
 use std::pin::Pin;
 use std::future::Future;
+use std::sync::Arc;
+use tokio::time::Duration;
 
 pub struct Runtime;
 
@@ -23,7 +25,6 @@ impl Runtime {
         Req::Archived: for<'a> cell_model::rkyv::CheckBytes<cell_model::rkyv::validation::validators::DefaultValidator<'a>> + 'static,
         Resp: cell_model::rkyv::Serialize<cell_model::rkyv::ser::serializers::AllocSerializer<1024>> + Send + 'static,
     {
-        // FIX: Added explicit type parameters <S, Req, Resp, _>
         Self::ignite_with_coordination::<S, Req, Resp, _>(
             service, 
             name, 
@@ -51,8 +52,48 @@ impl Runtime {
 
         #[cfg(feature = "axon")]
         {
+            // Start Pheromone system for discovery
             let _ = cell_axon::pheromones::PheromoneSystem::ignite(config.node_id).await?;
         }
+
+        // Start background registration with Nucleus
+        let cell_name = name.to_string();
+        let node_id = config.node_id;
+        tokio::spawn(async move {
+            // Give the membrane a moment to bind
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            
+            // Try to register with Nucleus
+            // We use a loop to retry connection
+            let mut backoff = Duration::from_secs(2);
+            loop {
+                match crate::NucleusClient::connect().await {
+                    Ok(mut nucleus) => {
+                        match nucleus.register(cell_name.clone(), node_id).await {
+                            Ok(_) => {
+                                info!("[Runtime] Registered '{}' with Nucleus", cell_name);
+                                // Start Heartbeat
+                                loop {
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                    // We need to implement heartbeat in NucleusClient or generic fire
+                                    // For now, re-register acts as heartbeat in naive implementations
+                                    if let Err(e) = nucleus.register(cell_name.clone(), node_id).await {
+                                        warn!("[Runtime] Nucleus heartbeat failed: {}", e);
+                                        break; // Re-connect
+                                    }
+                                }
+                            },
+                            Err(e) => warn!("[Runtime] Registration failed: {}", e),
+                        }
+                    },
+                    Err(_) => {
+                        // Nucleus likely not running, stay silent-ish
+                    }
+                }
+                tokio::time::sleep(backoff).await;
+                if backoff < Duration::from_secs(60) { backoff *= 2; }
+            }
+        });
 
         let coordination_handler = if !macros.is_empty() {
             Some(CoordinationHandler::new(name, macros, expander))

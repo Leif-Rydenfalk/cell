@@ -74,36 +74,49 @@ impl Membrane {
         let c_shared = Arc::new(consensus_tx);
         let coord_shared = Arc::new(coordination_handler);
         let start_time = SystemTime::now();
+        
+        // Handle shutdown signal
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
 
         loop {
-            match listener.accept().await {
-                Ok(mut connection) => {
-                    let permit = match semaphore.clone().try_acquire_owned() {
-                        Ok(p) => p,
-                        Err(_) => {
-                            warn!("Load Shedding");
-                            continue;
-                        }
-                    };
+            tokio::select! {
+                res = listener.accept() => {
+                    match res {
+                        Ok(mut connection) => {
+                            let permit = match semaphore.clone().try_acquire_owned() {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    warn!("Load Shedding");
+                                    continue;
+                                }
+                            };
 
-                    let h = handler.clone();
-                    let g = g_shared.clone();
-                    let n = name_owned.clone();
-                    let c = c_shared.clone();
-                    let ch = coord_shared.clone();
+                            let h = handler.clone();
+                            let g = g_shared.clone();
+                            let n = name_owned.clone();
+                            let c = c_shared.clone();
+                            let ch = coord_shared.clone();
+                            let shutdown = shutdown_tx.clone();
 
-                    tokio::spawn(async move {
-                        let _permit = permit;
-                        if let Err(_e) = handle_connection::<F, Req, Resp>(connection, h, g, &n, c, start_time, ch).await {
-                             // Suppress errors
+                            tokio::spawn(async move {
+                                let _permit = permit;
+                                if let Err(_e) = handle_connection::<F, Req, Resp>(connection, h, g, &n, c, start_time, ch, shutdown).await {
+                                     // Suppress errors
+                                }
+                            });
                         }
-                    });
+                        Err(e) => {
+                            warn!("Listener Accept Error: {:?}", e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    warn!("Listener Accept Error: {:?}", e);
+                _ = shutdown_rx.recv() => {
+                    info!("[Membrane] Shutdown signal received. Exiting accept loop.");
+                    break;
                 }
             }
         }
+        Ok(())
     }
 
     pub async fn bind<F, Req, Resp>(
@@ -161,6 +174,7 @@ async fn handle_connection<F, Req, Resp>(
     consensus_tx: Arc<Option<Sender<Vec<u8>>>>,
     start_time: SystemTime,
     coordination_handler: Arc<Option<Arc<CoordinationHandler>>>,
+    shutdown: tokio::sync::broadcast::Sender<()>,
 ) -> Result<()>
 where
     F: for<'a> Fn(&'a Req::Archived) -> BoxFuture<'a, Result<Resp>> + Send + Sync + 'static,
@@ -194,7 +208,7 @@ where
                 let mut response = [0u8; 32];
                 stream.read_exact(&mut response).await?;
                 
-                let auth_token = get_shm_auth_token().context("CRITICAL: Failed to retrieve secure SHM token")?;
+                let auth_token = crate::membrane::get_shm_auth_token().context("CRITICAL: Failed to retrieve secure SHM token")?;
                 let expected = blake3::hash(&[&challenge, auth_token.as_slice()].concat());
                 
                 if response != expected.as_bytes()[..32] {
@@ -207,9 +221,9 @@ where
                 stream.write_all(&(SHM_UPGRADE_ACK.len() as u32).to_le_bytes()).await?;
                 stream.write_all(SHM_UPGRADE_ACK).await?;
 
-                send_fds(stream.as_raw_fd(), &[rx_fd, tx_fd])?;
+                crate::membrane::send_fds(stream.as_raw_fd(), &[rx_fd, tx_fd])?;
 
-                conn = Box::new(ShmConnection::new(rx_ring, tx_ring));
+                conn = Box::new(crate::transport::ShmConnection::new(rx_ring, tx_ring));
                 continue;
             } else {
                 return Err(anyhow::anyhow!("SHM request on non-upgradeable transport"));
@@ -284,6 +298,11 @@ where
                              bytes_received: 0,
                          })
                     }
+                    ArchivedOpsRequest::Shutdown => {
+                        // Broadcast shutdown signal
+                        let _ = shutdown.send(());
+                        OpsResponse::ShutdownAck
+                    }
                 };
 
                 let aligned_input = std::mem::take(&mut write_buf);
@@ -329,7 +348,6 @@ where
 }
 
 pub(crate) fn get_shm_auth_token() -> Result<Vec<u8>> {
-    // 1. Env Override (Dev only, but supported)
     if let Ok(token) = std::env::var("CELL_SHM_TOKEN") {
         return Ok(blake3::hash(token.as_bytes()).as_bytes().to_vec());
     }
@@ -337,9 +355,7 @@ pub(crate) fn get_shm_auth_token() -> Result<Vec<u8>> {
     let home = dirs::home_dir().context("Cannot determine home directory for SHM token storage")?;
     let token_path = home.join(".cell/shm.token");
 
-    // 2. Read Existing
     if token_path.exists() {
-        // SECURITY: Strict Permission Check
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -360,7 +376,6 @@ pub(crate) fn get_shm_auth_token() -> Result<Vec<u8>> {
         return Ok(blake3::hash(&token).as_bytes().to_vec());
     }
 
-    // 3. Create New (Atomic)
     let new_token: [u8; 32] = rand::random();
     let tmp_path = token_path.with_extension("tmp");
     
@@ -369,7 +384,6 @@ pub(crate) fn get_shm_auth_token() -> Result<Vec<u8>> {
     }
 
     {
-        // Write to tmp file first
         use std::os::unix::fs::PermissionsExt;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -378,7 +392,6 @@ pub(crate) fn get_shm_auth_token() -> Result<Vec<u8>> {
             .open(&tmp_path)
             .context("Failed to create temporary SHM token file")?;
         
-        // Enforce permissions BEFORE writing sensitive data if possible, or immediately after
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .context("Failed to set 0600 permissions on SHM token")?;
             
@@ -387,7 +400,6 @@ pub(crate) fn get_shm_auth_token() -> Result<Vec<u8>> {
         file.sync_all().context("Failed to sync SHM token to disk")?;
     }
 
-    // Atomic Rename
     std::fs::rename(&tmp_path, &token_path).context("Failed to atomically install SHM token")?;
 
     Ok(blake3::hash(&new_token).as_bytes().to_vec())

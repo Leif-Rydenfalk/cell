@@ -10,9 +10,27 @@ members = [
     "cell-process",
     "cell-sdk",
     "cell-macros",
-    "cell-build"
+    "cell-build",
+    "cell-cli",
+    "cell-bind",
+    "cells/consensus",
+    "cells/dht",
+    "cells/registry",
+    "cells/autoscaler",
+    "cells/vivaldi",
+    "cells/nucleus",
+    "cells/codegen",
+    "examples/cell-market/ledger",
+    "examples/cell-market/engine",
+    "examples/cell-market/gateway",
+    "examples/cell-market/consumer",
+    "examples/cell-market-bench/cells/exchange",
+    "examples/cell-market-bench/cells/trader",
+    "examples/cell-tissue/worker",
+    "examples/cell-tissue/controller",
+    "examples/cell-consensus-raft"
 ]
-exclude = ["examples"]
+exclude = []
 
 [workspace.package]
 version = "0.4.0"
@@ -59,3 +77,4 @@ futures = "0.3"
 webpki-roots = "0.25"
 rustls-pemfile = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

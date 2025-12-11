@@ -1,0 +1,11 @@
+[package]
+name = "autoscaler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cell-sdk = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
