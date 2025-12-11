@@ -12,11 +12,7 @@ pub use cell_macros::{cell_remote, handler, protein, service, cell_macro, expand
 
 // === TRANSPORT (Required for basic RPC) ===
 #[cfg(feature = "transport")]
-pub use cell_transport::{Membrane, Synapse, resolve_socket_dir};
-
-// === TISSUE (Swarm Intelligence) ===
-#[cfg(feature = "transport")]
-pub mod tissue; // Exposed module
+pub use cell_transport::{Membrane, Synapse, Response, resolve_socket_dir}; // Added Response export
 
 #[cfg(all(feature = "transport", feature = "shm"))]
 pub use cell_transport::ShmClient;
@@ -28,6 +24,10 @@ pub use runtime::Runtime;
 // === IDENTITY ABSTRACTION ===
 pub mod identity;
 
+// === TISSUE ===
+#[cfg(feature = "transport")]
+pub mod tissue;
+
 // === EXTERNAL DEPS ===
 pub use rkyv;
 pub use serde;
@@ -35,8 +35,6 @@ pub use anyhow;
 pub use tracing;
 
 // === NUCLEUS CLIENT ===
-// All discovery, health checks, etc. delegated to nucleus cell
-
 pub struct NucleusClient {
     synapse: Synapse,
 }
