@@ -105,9 +105,12 @@ impl Nucleus {
                 });
                 
                 // Prune dead instances
-                for instances in reg.cells.values_mut() {
+                // Fix: Destructure to split the borrow. `cells` and `last_heartbeat` are disjoint fields.
+                let CellRegistry { cells, last_heartbeat } = &mut *reg;
+
+                for instances in cells.values_mut() {
                     instances.retain(|inst| {
-                        reg.last_heartbeat.contains_key(&inst.name)
+                        last_heartbeat.contains_key(&inst.name)
                     });
                 }
             }

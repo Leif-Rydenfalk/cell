@@ -1,7 +1,6 @@
 use anyhow::Result;
 use cell_sdk::{service, handler, protein};
-use cell_sdk as cell;
-use tracing::{info, warn};
+use tracing::info;
 use std::sync::Arc;
 
 // --- DNA ---
