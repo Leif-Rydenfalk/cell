@@ -81,7 +81,6 @@ impl CoordinationHandler {
 
         let req_bytes = cell_model::rkyv::to_bytes::<_, 1024>(&request)?.into_vec();
         
-        // Handle CellError -> anyhow::Error mapping manually since ? might fail with mismatched types
         let response = match synapse.fire_on_channel(
             cell_core::channel::MACRO_COORDINATION,
             &req_bytes

@@ -245,7 +245,8 @@ where
 
                 let aligned_input = std::mem::take(&mut write_buf);
                 
-                // Fix: Explicitly specify types for CompositeSerializer
+                // Using CompositeSerializer explicitly because AllocSerializer is a type alias that hides inner types
+                // AllocSerializer<N> = CompositeSerializer<AlignedSerializer<AlignedVec>, FallbackScratch<HeapScratch<N>, AllocScratch>, SharedSerializeMap>
                 let mut serializer = CompositeSerializer::new(
                     AlignedSerializer::new(aligned_input),
                     FallbackScratch::<HeapScratch<1024>, AllocScratch>::default(),

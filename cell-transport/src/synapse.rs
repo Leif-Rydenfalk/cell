@@ -237,30 +237,33 @@ impl Synapse {
         Ok(fds)
     }
 
-    async fn heal(&mut self) -> Result<()> {
-        warn!("[Synapse] Connection lost to '{}'. Healing...", self.cell_name);
-        
-        const RECONNECT_ATTEMPTS: usize = 5;
-        const BASE_DELAY: u64 = 200;
-
-        for i in 0..RECONNECT_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(BASE_DELAY * (1 << i))).await;
+    // Break async recursion cycle
+    fn heal(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            warn!("[Synapse] Connection lost to '{}'. Healing...", self.cell_name);
             
-            match Synapse::grow(&self.cell_name).await {
-                Ok(new_syn) => {
-                    info!("[Synapse] Reconnected to '{}'.", self.cell_name);
-                    self.transport = new_syn.transport;
-                    #[cfg(feature = "shm")]
-                    { self.shm_client = new_syn.shm_client; }
-                    self.circuit_breaker = new_syn.circuit_breaker;
-                    return Ok(());
-                },
-                Err(e) => {
-                    warn!("[Synapse] Reconnect attempt {}/{} failed: {}", i+1, RECONNECT_ATTEMPTS, e);
+            const RECONNECT_ATTEMPTS: usize = 5;
+            const BASE_DELAY: u64 = 200;
+
+            for i in 0..RECONNECT_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(BASE_DELAY * (1 << i))).await;
+                
+                match Synapse::grow(&self.cell_name).await {
+                    Ok(new_syn) => {
+                        info!("[Synapse] Reconnected to '{}'.", self.cell_name);
+                        self.transport = new_syn.transport;
+                        #[cfg(feature = "shm")]
+                        { self.shm_client = new_syn.shm_client; }
+                        self.circuit_breaker = new_syn.circuit_breaker;
+                        return Ok(());
+                    },
+                    Err(e) => {
+                        warn!("[Synapse] Reconnect attempt {}/{} failed: {}", i+1, RECONNECT_ATTEMPTS, e);
+                    }
                 }
             }
-        }
-        bail!("Failed to heal connection to '{}' after {} attempts", self.cell_name, RECONNECT_ATTEMPTS);
+            bail!("Failed to heal connection to '{}' after {} attempts", self.cell_name, RECONNECT_ATTEMPTS)
+        })
     }
 
     async fn call_transport(&mut self, data: &[u8]) -> Result<Vec<u8>, CellError> {
@@ -321,11 +324,9 @@ impl Synapse {
             let frame = match res {
                 Ok(f) => f,
                 Err(e) => {
-                    // Try to recover known CellError if wrapped
                     if let Some(ce) = e.downcast_ref::<CellError>() {
                         return Err(*ce);
                     }
-                    // Otherwise it's a deadline exceeded error (from execute)
                     return Err(CellError::Timeout);
                 }
             };

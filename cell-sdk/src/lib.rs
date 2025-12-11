@@ -48,12 +48,12 @@ impl NucleusClient {
         cell_remote!(nucleus = "nucleus");
         
         let mut client = nucleus::connect().await?;
-        client.register(nucleus::CellRegistration {
+        Ok(client.register(nucleus::CellRegistration {
             name: cell_name,
             node_id,
             capabilities: vec![],
             endpoints: vec![],
-        }).await
+        }).await?)
     }
 
     pub async fn discover(&mut self, cell_name: String) -> anyhow::Result<Vec<String>> {
