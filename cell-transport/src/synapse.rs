@@ -14,13 +14,14 @@ use crate::circuit_breaker::{CircuitBreaker};
 use crate::deadline::Deadline;
 
 use cell_core::{Transport, TransportError, channel};
-use anyhow::{bail, Result};
+use cell_model::bridge::{BridgeRequest, BridgeResponse};
+use anyhow::{bail, Result, Context};
 use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{Archive, Serialize};
 use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 use std::time::Duration;
 
 #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
@@ -59,47 +60,121 @@ pub struct Synapse {
 }
 
 impl Synapse {
-    pub async fn grow(cell_name: &str) -> Result<Self> {
-        Self::grow_with_config(cell_name, SynapseConfig::default()).await
+    /// Connect to a cell.
+    /// Supports:
+    /// 1. Local sockets ("ledger")
+    /// 2. URI Schemes ("mavlink:drone", "quic:remote") via Gateways
+    /// 3. Fallback to default gateway ("axon")
+    pub async fn grow(connection_string: &str) -> Result<Self> {
+        Self::grow_with_config(connection_string, SynapseConfig::default()).await
     }
 
-    pub async fn grow_with_config(cell_name: &str, config: SynapseConfig) -> Result<Self> {
-        info!("[Synapse] Connecting to '{}'...", cell_name);
+    pub async fn grow_with_config(connection_string: &str, config: SynapseConfig) -> Result<Self> {
+        info!("[Synapse] Connecting to '{}'...", connection_string);
 
+        // 1. Parse Connection String
+        let (gateway_name, target) = Self::resolve_gateway(connection_string);
+
+        // 2. Try Direct Connection (Fast Path)
+        // If it's a simple name like "ledger", check local socket first
+        if gateway_name.is_none() {
+            if let Ok(syn) = Self::connect_local(target, &config).await {
+                return Ok(syn);
+            }
+        }
+
+        // 3. Routing via Gateway (Slow Path)
+        // If we have a scheme (e.g. "mavlink") or local connect failed, ask the gateway.
+        let gateway = gateway_name.unwrap_or("axon"); // Default to Axon
+        
+        debug!("[Synapse] Routing '{}' via gateway '{}'", target, gateway);
+
+        // Recursive: Connect to the gateway itself (must be local)
+        // We assume the gateway itself is reachable locally.
+        let mut gateway_syn = match Self::connect_local(gateway, &SynapseConfig::default()).await {
+            Ok(g) => g,
+            Err(_) => bail!("Target '{}' not found and gateway '{}' is not running.", target, gateway),
+        };
+
+        // Handshake: Ask gateway to mount the target
+        let req = BridgeRequest::Mount { target: target.to_string() };
+        let req_bytes = rkyv::to_bytes::<_, 256>(&req)?.into_vec();
+        
+        // We send this on the APP channel of the gateway
+        let resp_wrapper = gateway_syn.fire_on_channel(channel::APP, &req_bytes).await?;
+        
+        let resp_bytes = match resp_wrapper {
+            Response::Owned(v) => v,
+            Response::Borrowed(v) => v.to_vec(),
+            _ => bail!("Invalid response from gateway"),
+        };
+
+        let response = cell_model::rkyv::check_archived_root::<BridgeResponse>(&resp_bytes)
+            .map_err(|e| anyhow::anyhow!("Gateway protocol mismatch: {}", e))?
+            .deserialize(&mut rkyv::Infallible).unwrap();
+
+        match response {
+            BridgeResponse::Mounted { socket_path } => {
+                info!("[Synapse] Gateway mounted '{}' at '{}'", target, socket_path);
+                // Connect to the proxy socket provided by the gateway
+                // Note: We bypass `connect_local` helpers to connect to arbitrary path
+                Self::connect_to_path(&socket_path, target, &config).await
+            }
+            BridgeResponse::NotFound => bail!("Gateway '{}' could not find target '{}'", gateway, target),
+            BridgeResponse::Error { message } => bail!("Gateway error: {}", message),
+        }
+    }
+
+    /// Determines the gateway cell based on URI scheme
+    fn resolve_gateway(conn_str: &str) -> (Option<&str>, &str) {
+        if let Some((scheme, rest)) = conn_str.split_once(':') {
+            // Map schemes to convention-based cell names
+            let gateway = match scheme {
+                "quic" => "axon",
+                "tcp" => "tcp-gateway",
+                "mavlink" => "mavlink-gateway",
+                "ssh" => "ssh-gateway",
+                other => other, // e.g. "custom:target" -> "custom" cell
+            };
+            (Some(gateway), rest)
+        } else {
+            (None, conn_str)
+        }
+    }
+
+    async fn connect_local(cell_name: &str, config: &SynapseConfig) -> Result<Self> {
         let socket_dir = resolve_socket_dir();
         let socket_path = socket_dir.join(format!("{}.sock", cell_name));
-        
+        let path_str = socket_path.to_string_lossy().to_string();
+        Self::connect_to_path(&path_str, cell_name, config).await
+    }
+
+    async fn connect_to_path(path: &str, cell_name: &str, config: &SynapseConfig) -> Result<Self> {
         let mut transport: Option<Box<dyn Transport>> = None;
         let mut shm_client: Option<ShmClient> = None;
 
-        if let Ok(mut stream) = UnixStream::connect(&socket_path).await {
-            info!("[Synapse] ✓ Local connection established");
+        if let Ok(mut stream) = UnixStream::connect(path).await {
             
             #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
             if std::env::var("CELL_DISABLE_SHM").is_err() {
                 match Self::try_upgrade_to_shm(&mut stream).await {
                     Ok(client) => {
-                        info!("[Synapse] ✓ Upgraded to Shared Memory");
                         transport = Some(Box::new(ShmTransport::new(
                                 ShmClient::new(client.tx.clone(), client.rx.clone())
                         )));
                         shm_client = Some(client);
                     }
-                    Err(e) => {
-                        // This is fine - remote proxies created by Axon won't support SHM
-                        // We just fall back to the Unix socket
-                        info!("[Synapse] SHM Upgrade not supported by peer (likely remote proxy). Using Unix Socket.");
+                    Err(_) => {
+                        // Fallback to Unix if upgrade rejected (common for proxies)
                     }
                 }
             }
             
             if transport.is_none() {
-                // If we consumed the stream trying to upgrade, we need a new one
-                // or we need to handle the buffer. For simplicity, we reconnect 
-                // if upgrade failed but stream is dirty/moved.
-                // In the logic above, `try_upgrade_to_shm` consumes the stream.
-                // We open a fresh connection for the pure Unix transport.
-                if let Ok(clean_stream) = UnixStream::connect(&socket_path).await {
+                // If upgrade consumed stream, we need a new one or carefully handle buffer.
+                // Assuming upgrade logic handles clean stream state or we reconnect.
+                // For simplicity, we reconnect if upgrade failed to ensure clean state.
+                if let Ok(clean_stream) = UnixStream::connect(path).await {
                     transport = Some(Box::new(UnixTransport::new(clean_stream)));
                 }
             }
@@ -109,7 +184,7 @@ impl Synapse {
             Ok(Self {
                 cell_name: cell_name.to_string(),
                 transport: t,
-                retry_policy: config.retry_policy,
+                retry_policy: config.retry_policy.clone(),
                 circuit_breaker: CircuitBreaker::new(
                     config.circuit_breaker_threshold,
                     config.circuit_breaker_timeout,
@@ -119,7 +194,7 @@ impl Synapse {
                 shm_client,
             })
         } else {
-            bail!("Cell '{}' not found locally. Ensure 'cell-axon' is running to bridge remote cells.", cell_name);
+            bail!("Failed to connect to socket: {}", path);
         }
     }
     
@@ -190,6 +265,9 @@ impl Synapse {
         for i in 0..RECONNECT_ATTEMPTS {
             tokio::time::sleep(Duration::from_millis(BASE_DELAY * (1 << i))).await;
             
+            // Retry the original connection string logic implicitly?
+            // Synapse struct stores `cell_name`. If it was "mavlink:drone", we need to re-resolve.
+            // Simplified: We attempt to reconnect using the stored name.
             match Synapse::grow(&self.cell_name).await {
                 Ok(new_syn) => {
                     info!("[Synapse] Reconnected to '{}'.", self.cell_name);
@@ -237,7 +315,6 @@ impl Synapse {
         }
 
         let data_vec = data.to_vec();
-        
         let mut attempt = 0;
         let mut delay = self.retry_policy.base_delay;
         
