@@ -58,7 +58,11 @@ impl Tissue {
             synapse.fire(request).await
         };
 
-        let detached = result.map(|r| r.into_owned());
+        // Convert CellError to anyhow::Error
+        let detached = result
+            .map(|r| r.into_owned())
+            .map_err(|e| anyhow::anyhow!("Distribution error: {}", e));
+            
         guard.rotate_left(1);
         
         detached
@@ -75,7 +79,11 @@ impl Tissue {
 
         for syn in guard.iter_mut() {
             let res = syn.fire(request).await;
-            results.push(res.map(|r| r.into_owned()));
+            // Convert CellError to anyhow::Error
+            results.push(
+                res.map(|r| r.into_owned())
+                   .map_err(|e| anyhow::anyhow!("Broadcast error: {}", e))
+            );
         }
         results
     }

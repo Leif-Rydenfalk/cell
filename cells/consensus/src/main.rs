@@ -8,7 +8,7 @@ use anyhow::Result;
 use cell_sdk::{service, handler, protein, Synapse};
 use cell_sdk as cell;
 use std::sync::Arc;
-use tracing::{info, warn, error};
+use tracing::info;
 use tokio::time::Duration;
 
 use crate::raft::{RaftNode, RaftConfig, StateMachine};
@@ -92,9 +92,6 @@ impl ConsensusService {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. Hydrate Identity from Umbilical Cord (STDIN)
-    // The process will block here until the Root injects the configuration.
-    // This guarantees strict ordering: No config -> No boot.
     let identity = cell_sdk::identity::Identity::get();
 
     tracing_subscriber::fmt().with_target(false).init();
@@ -104,15 +101,11 @@ async fn main() -> Result<()> {
     info!("║ Name: {:<32} ║", identity.cell_name);
     info!("╚══════════════════════════════════════════╝");
     
-    // 2. Use Injected Topology
-    // The Root provides the peers as a strictly typed list.
     let peers: Vec<String> = identity.peers.iter().map(|p| p.address.clone()).collect();
     info!("Injected Peers: {:?}", peers);
 
-    // 3. Storage Setup
     let storage_path = std::env::current_dir()?.join(format!("raft_{}.wal", identity.node_id));
 
-    // 4. Ignite Raft
     let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
     
     let raft_config = RaftConfig {
@@ -131,10 +124,9 @@ async fn main() -> Result<()> {
         state: Arc::new(ConsensusState { raft: raft.clone() }),
     };
 
-    // 5. Network Bridge
-    // Routes internal Raft messages to external peers via Cell RPC
     let peers_clone = peers.clone();
     tokio::spawn(async move {
+        // Fix: Import rkyv from cell_model which is re-exported properly
         use cell_model::rkyv;
         
         while let Some((target_idx, msg)) = rx.recv().await {
@@ -143,8 +135,10 @@ async fn main() -> Result<()> {
                  tokio::spawn(async move {
                      if let Ok(mut syn) = Synapse::grow(&p_name).await {
                          if let Ok(bytes) = rkyv::to_bytes::<_, 1024>(&msg) {
-                             if let Err(e) = syn.fire_on_channel(cell_core::channel::CONSENSUS, &bytes).await {
-                                 error!("Failed to send Raft RPC to {}: {:?}", p_name, e);
+                             let vec_bytes = bytes.into_vec();
+                             // Fix: cell_core re-export check
+                             if let Err(e) = syn.fire_on_channel(cell_core::channel::CONSENSUS, &vec_bytes).await {
+                                 tracing::error!("Failed to send Raft RPC to {}: {:?}", p_name, e);
                              }
                          }
                      }
@@ -153,6 +147,5 @@ async fn main() -> Result<()> {
         }
     });
 
-    // 6. Serve using the name assigned by Root
     service.serve(&identity.cell_name).await
 }

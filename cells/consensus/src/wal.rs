@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use anyhow::{Result, Context};
+use anyhow::Result;
 use serde::{Serialize, Deserialize};
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write, Seek, SeekFrom};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum LogEntry {
@@ -67,7 +66,7 @@ impl WriteAheadLog {
 
         // 2. Recover Log Entries
         if self.path.exists() {
-            let mut file = File::open(&self.path)?;
+            let file = File::open(&self.path)?;
             let len = file.metadata()?.len();
             if len > 0 {
                 let mut reader = BufReader::new(file);

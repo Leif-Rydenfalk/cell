@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{Duration, Instant};
-use tracing::{info, warn, error, debug};
+use tracing::{info, debug};
 use rand::Rng;
 
 use crate::wal::{LogEntry, WriteAheadLog};

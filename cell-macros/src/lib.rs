@@ -90,11 +90,14 @@ fn locate_dna(cell_name: &str) -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("No MANIFEST_DIR");
     let current_dir = std::path::Path::new(&manifest);
     
+    // We try to find the workspace root or look relative to current dir
+    // This list attempts to find the cell source from various potential calling locations (root, sdk, etc)
     let potential_roots = [
         current_dir.to_path_buf(),
         current_dir.parent().unwrap_or(current_dir).to_path_buf(),
-        current_dir.join("../"),
-        current_dir.join("../../"),
+        current_dir.join("../"), // e.g. if inside cell-sdk
+        current_dir.join("../../"), // e.g. if inside examples/foo
+        current_dir.join("../../../"), // e.g. if inside examples/foo/bar
     ];
 
     for root in potential_roots {
@@ -110,12 +113,14 @@ fn locate_dna(cell_name: &str) -> PathBuf {
             if p.exists() { return p; }
         }
         
+        // Fallback for special naming like consensus-raft -> cell-consensus-raft
         if cell_name == "consensus-raft" {
             let p = root.join("examples").join("cell-consensus-raft").join("src/main.rs");
             if p.exists() { return p; }
         }
     }
 
+    // Returning dummy path to let the compiler fail gracefully with the panic below if not found
     PathBuf::from("DNA_NOT_FOUND") 
 }
 
@@ -232,12 +237,6 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
             else { quote! { let #an = ::cell_sdk::rkyv::Deserialize::deserialize(#an, &mut ::cell_sdk::rkyv::de::deserializers::SharedDeserializeMap::new()).map_err(|e| ::anyhow::anyhow!("Deserialization failed for {}: {:?}", stringify!(#an), e))?; } }
         });
         
-        // IMPORTANT: The handler implementation wraps the user code.
-        // The user code returns Result<T, Error>.
-        // We need to unwrap that result into Ok(T) or propagate Err.
-        // But the dispatch loop handles Result<Response, CellError>.
-        // We map User Error -> CellError::IoError (generic failure) for now, or just unwrap?
-        // Let's use `?` which requires conversion.
         quote! {
             ArchivedProtocol::#vname { #(#field_names),* } => {
                 #(#arg_preps)*
@@ -247,7 +246,11 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     });
 
-    let fingerprint = 0xDEADBEEF; // Stub
+    // Fix: Cast explicitly to u64 to prevent i32 overflow type check error during macro expansion
+    let mut hasher = DefaultHasher::new();
+    service_name.to_string().hash(&mut hasher);
+    for (n, _, _, _) in &methods { n.to_string().hash(&mut hasher); }
+    let fingerprint = hasher.finish();
 
     let expanded = quote! {
         #input
@@ -321,8 +324,9 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let cell_name = args.cell_name;
 
     let dna_path = locate_dna(&cell_name);
+    // If not found, panic with helpful message including search paths attempted if debug needed
     if dna_path.to_string_lossy() == "DNA_NOT_FOUND" {
-        panic!("Could not locate DNA for '{}'. Ensure the cell exists in the workspace.", cell_name);
+        panic!("Could not locate DNA for '{}'. Ensure the cell source exists in the workspace (cells/ or examples/).", cell_name);
     }
 
     let file = match cell_build::load_and_flatten_source(&dna_path) {
@@ -435,7 +439,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn protein(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn protein(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     let expanded = quote! {
         #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Clone, Debug, PartialEq)]

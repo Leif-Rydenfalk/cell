@@ -116,8 +116,6 @@ impl MacroCoordinator {
 
     /// Helper to run the async query in a blocking context (for use inside proc macros)
     pub fn connect_and_query(&self, request: MacroCoordinationRequest) -> Result<MacroCoordinationResponse> {
-        // Create runtime and block on async operation
-        // Note: In a real environment, reusing a global runtime is better, but proc-macros are short-lived.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -154,13 +152,11 @@ impl MacroCoordinator {
                     Ok(resp)
                 }
                 Ok(Err(e)) => {
-                    // Connection failed - use cached/fallback
                     Ok(MacroCoordinationResponse::Error {
                         message: format!("Cell '{}' not running: {}", self.cell_name, e)
                     })
                 }
                 Err(_) => {
-                    // Timeout
                     Ok(MacroCoordinationResponse::Error {
                         message: format!("Cell '{}' connection timeout", self.cell_name)
                     })
@@ -181,7 +177,6 @@ impl MacroCoordinator {
         match response {
             MacroCoordinationResponse::Macros { macros } => Ok(macros),
             MacroCoordinationResponse::Error { message } => {
-                // Fallback: check cached macros
                 eprintln!("Warning: Failed to query macros from {}: {}", self.cell_name, message);
                 Ok(self.get_cached_macros()?)
             }
@@ -211,7 +206,6 @@ impl MacroCoordinator {
     }
 
     fn get_cached_macros(&self) -> Result<Vec<MacroInfo>> {
-        // Check ~/.cell/macros/{cell_name}/manifest.json
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home dir"))?;
         let manifest_path = home
             .join(".cell/macros")

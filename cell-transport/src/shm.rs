@@ -6,8 +6,6 @@ use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::fs::File;
 use std::marker::PhantomData;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::unix::io::AsRawFd;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -58,6 +56,7 @@ impl RingBuffer {
     pub fn create(name: &str) -> anyhow::Result<(Arc<Self>, std::os::unix::io::RawFd)> {
         use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
         use std::ffi::CString;
+        use std::os::unix::io::AsRawFd;
 
         let name_cstr = CString::new(name)?;
         let flags = MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING;
@@ -101,6 +100,7 @@ impl RingBuffer {
         use nix::sys::stat::Mode;
         use nix::unistd::ftruncate;
         use std::ffi::CString;
+        use std::os::unix::io::AsRawFd;
 
         let unique_name = format!("/{}_{}", name, rand::random::<u32>());
         let name_cstr = CString::new(unique_name)?;
@@ -312,7 +312,7 @@ impl RingBuffer {
                 std::hint::spin_loop();
             } else {
                 #[cfg(feature = "std")]
-                tokio::time::sleep(std::time::Duration::from_nanos(100)).await;
+                tokio::time::sleep(tokio::time::Duration::from_nanos(100)).await;
                 spin = 0;
             }
         }

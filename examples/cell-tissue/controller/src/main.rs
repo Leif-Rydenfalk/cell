@@ -31,24 +31,27 @@ async fn main() -> Result<()> {
     for i in 1..=10 {
         let task = Compute::ComputeTask { id: i, val: i * 10 };
         
-        // Wrap the task in the generated Protocol Enum
-        // The macro generates 'WorkerServiceProtocol' based on the struct name 'WorkerService'
         let req = Compute::WorkerServiceProtocol::Compute { task };
         
-        // .distribute() sends the request
-        // We expect a WorkerServiceResponse back, not just the result struct
         let resp_wrapper = tissue.distribute::<_, Compute::WorkerServiceResponse>(&req).await?;
         let response_enum = resp_wrapper.deserialize()?;
 
-        // Unwrap the Response Enum -> Result<ComputeResult, String> -> ComputeResult
+        // The updated macro logic unwraps Result automatically?
+        // Let's check `cell-macros/src/lib.rs`.
+        // The Service Response enum wraps the return type of the handler.
+        // Handler returns Result<ComputeResult>.
+        // So Response::Compute(Result<ComputeResult, AppError>) or just Response::Compute(ComputeResult)?
+        
+        // In the macro:
+        // `let result = self.#n(...).await; Ok(#response_name::#vname(result))`
+        // If `await?` is used, it returns T.
+        // The latest macro update uses `await?`. 
+        // So `result` is `ComputeResult`.
+        // Therefore `WorkerServiceResponse::Compute(ComputeResult)`.
+        // There is no inner Result wrapper anymore inside the Response enum variant.
+        
         let result = match response_enum {
-            Compute::WorkerServiceResponse::Compute(inner_result) => match inner_result {
-                Ok(val) => val,
-                Err(e) => {
-                    error!("Task {} Failed: {}", i, e);
-                    continue;
-                }
-            },
+            Compute::WorkerServiceResponse::Compute(val) => val,
             _ => {
                 error!("Unexpected response variant");
                 continue;
@@ -65,10 +68,8 @@ async fn main() -> Result<()> {
     info!("\n>>> Broadcasting Global Update (Multicast) <<<");
     let update = Compute::StatusUpdate { msg: "System Shutdown Imminent".to_string() };
     
-    // Wrap in Protocol Enum
     let req = Compute::WorkerServiceProtocol::UpdateStatus { update };
     
-    // .broadcast() sends to ALL workers
     let results = tissue.broadcast::<_, Compute::WorkerServiceResponse>(&req).await;
     
     info!("Broadcast sent to {} workers.", results.len());

@@ -14,6 +14,10 @@ pub use cell_macros::{cell_remote, handler, protein, service, cell_macro, expand
 #[cfg(feature = "transport")]
 pub use cell_transport::{Membrane, Synapse, resolve_socket_dir};
 
+// === TISSUE (Swarm Intelligence) ===
+#[cfg(feature = "transport")]
+pub mod tissue; // Exposed module
+
 #[cfg(all(feature = "transport", feature = "shm"))]
 pub use cell_transport::ShmClient;
 

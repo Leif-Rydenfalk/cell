@@ -7,15 +7,15 @@ use std::time::{Duration, Instant};
 use tracing::{error};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use rand::RngCore; // Needed to fill bytes
+use rand::RngCore;
 
 // --- THE NEW API ---
 cell_remote!(Exchange = "exchange");
 
 // --- UTILS ---
 
-fn unwrap_response<T>(res: anyhow::Result<Result<T, String>>) -> Result<T> {
-    match res? {
+fn unwrap_response<T>(res: std::result::Result<T, cell_sdk::CellError>) -> Result<T> {
+    match res {
         Ok(val) => Ok(val),
         Err(e) => anyhow::bail!("Service Error: {}", e),
     }
@@ -46,18 +46,18 @@ struct ShardedCounter { shards: [AtomicU64; SHARDS] }
 impl ShardedCounter {
     fn new() -> Self { Self { shards: [const { AtomicU64::new(0) }; SHARDS] } }
     fn inc(&self, n: u64) {
-        let idx = (std::thread::current().id().as_u64().get() as usize) & (SHARDS - 1);
+        let idx = (std::thread::current().id().as_u64_ext() as usize) & (SHARDS - 1);
         self.shards[idx].fetch_add(n, Ordering::Relaxed);
     }
     fn load(&self) -> u64 { self.shards.iter().map(|s| s.load(Ordering::Relaxed)).sum() }
 }
 
-trait ThreadIdExt { fn as_u64(&self) -> std::num::NonZeroU64; }
+trait ThreadIdExt { fn as_u64_ext(&self) -> u64; }
 impl ThreadIdExt for std::thread::ThreadId {
-    fn as_u64(&self) -> std::num::NonZeroU64 {
+    fn as_u64_ext(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
-        unsafe { std::num::NonZeroU64::new_unchecked(hasher.finish() | 1) }
+        hasher.finish()
     }
 }
 
@@ -87,7 +87,6 @@ async fn main() -> Result<()> {
 
     let req_count = Arc::new(ShardedCounter::new());
     let latency_sum = Arc::new(ShardedCounter::new());
-    // NEW: Byte Counter
     let byte_count = Arc::new(ShardedCounter::new()); 
 
     let r_req = req_count.clone();
@@ -123,7 +122,6 @@ async fn main() -> Result<()> {
             let avg_ns = if delta_req > 0 { delta_lat_sum as f64 / delta_req as f64 } else { 0.0 };
             let lat_str = if avg_ns < 1000.0 { format!("{:.0}ns", avg_ns) } else { format!("{:.2}µs", avg_ns/1000.0) };
 
-            // Throughput Calc
             let throughput_bps = delta_bytes as f64 / elapsed;
             let throughput_str = if throughput_bps > 1_000_000_000.0 {
                 format!("{:.2} GB/s", throughput_bps / 1_000_000_000.0)
@@ -157,21 +155,23 @@ async fn main() -> Result<()> {
             };
             
             // Connection Verification Probe
-            if let Ok(Ok(echo)) = client.ping(999).await {
+            // Handling Result<u64, CellError> (Client method returns CellError directly now)
+            if let Ok(echo) = client.ping(999).await {
                 if echo == 999 {
                     if i == 0 { println!("Task 0: Connection verified with ping"); }
                 } else {
                     error!("Task {}: Verification failed", i);
                     return;
                 }
+            } else {
+                error!("Task {}: Ping failed", i);
+                return;
             }
 
             let mut seq = 0u64;
             
-            // Pre-calculate payload for bytes mode to simulate high throughput data
             let (payload, expected_crc) = if let Mode::Bytes(s) = task_mode { 
                 let mut p = vec![0u8; s];
-                // Fill with random data so the CRC check is meaningful
                 rand::thread_rng().fill_bytes(&mut p);
                 let crc = crc32fast::hash(&p) as u64;
                 (p, crc)
@@ -191,8 +191,6 @@ async fn main() -> Result<()> {
                     },
                     Mode::Batch(n) => unwrap_response(client.submit_batch(n).await).map(|_| 0),
                     Mode::Bytes(_) => {
-                        // Integrity Check: The server returns the CRC of the data we sent.
-                        // We compare it to our local calculation.
                         match unwrap_response(client.ingest_data(payload.clone()).await) {
                             Ok(server_crc) => {
                                 if server_crc != expected_crc {
