@@ -21,6 +21,9 @@ pub use cell_transport::ShmClient;
 pub mod runtime;
 pub use runtime::Runtime;
 
+// === IDENTITY ABSTRACTION ===
+pub mod identity;
+
 // === EXTERNAL DEPS ===
 pub use rkyv;
 pub use serde;

@@ -8,6 +8,7 @@ use tokio::sync::OnceCell;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use std::sync::Arc;
+use std::collections::HashMap;
 use tracing::info;
 
 static ROOT: OnceCell<Arc<MyceliumRoot>> = OnceCell::const_new();
@@ -29,6 +30,11 @@ pub async fn root() -> &'static Arc<MyceliumRoot> {
 
 /// Helper to request spawn from Root. Returns a Synapse connected to the cell.
 pub async fn spawn(cell_name: &str) -> Synapse {
+    spawn_with_config(cell_name, HashMap::new()).await
+}
+
+/// Spawn with specific configuration (environment variables)
+pub async fn spawn_with_config(cell_name: &str, config: HashMap<String, String>) -> Synapse {
     let _ = root().await;
     let socket_dir = cell_transport::resolve_socket_dir();
     let umbilical = socket_dir.join("mitosis.sock");
@@ -43,7 +49,14 @@ pub async fn spawn(cell_name: &str) -> Synapse {
     }
     let mut stream = stream.expect("Failed to connect to Umbilical");
 
-    let req = MitosisRequest::Spawn { cell_name: cell_name.to_string() };
+    // Serialize Config for Wire
+    let env_vec: Vec<(String, String)> = config.into_iter().collect();
+
+    let req = MitosisRequest::Spawn { 
+        cell_name: cell_name.to_string(),
+        env: env_vec 
+    };
+    
     let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req).unwrap().into_vec();
     stream.write_all(&(req_bytes.len() as u32).to_le_bytes()).await.unwrap();
     stream.write_all(&req_bytes).await.unwrap();
@@ -88,8 +101,7 @@ pub async fn nucleus() -> NucleusClient {
 
 pub async fn wait_leader(_nodes: &[Synapse]) -> Synapse {
     // Stub: Return first node, assume it's leader for now
-    // A real implementation queries status
-    spawn("consensus").await // Just return a fresh connection for the example API
+    spawn("consensus").await 
 }
 
 pub async fn corrupt_vault_file(_name: &str, _ver: u64) {

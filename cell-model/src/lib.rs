@@ -12,13 +12,15 @@ pub mod error;
 pub mod vesicle;
 pub mod ops;
 pub mod macro_coordination;
-pub mod bridge; // <--- Added
+pub mod bridge;
+pub mod config;
 
 pub use protocol::*;
 pub use ops::*;
 pub use error::Error;
 pub use macro_coordination::*;
 pub use bridge::*;
+pub use config::*;
 
 pub use rkyv;
 pub use serde;

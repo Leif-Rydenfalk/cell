@@ -3,7 +3,9 @@
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
+use std::io::Write;
+use cell_model::config::CellInitConfig;
 
 pub struct Capsid;
 
@@ -13,6 +15,7 @@ impl Capsid {
         socket_dir: &Path,
         umbilical_path: &Path,
         args: &[&str],
+        config: &CellInitConfig,
     ) -> Result<Child> {
         let binary_canonical = binary.canonicalize()
             .context("Binary path invalid or does not exist")?;
@@ -21,12 +24,6 @@ impl Capsid {
             let _trusted_root = home.join(".cell/cache/proteins");
             if !binary_canonical.is_file() {
                 bail!("Target is not a file");
-            }
-        }
-
-        for arg in args {
-            if arg.contains(&['$', '`', ';', '|', '&', '<', '>'][..]) {
-                bail!("Invalid argument characters in spawn request");
             }
         }
 
@@ -40,50 +37,57 @@ impl Capsid {
             .arg("--cap-drop").arg("ALL")
             
             // 1. Filesystem: Whitelist, don't Blacklist.
-            // Do NOT bind-mount / (root).
-            
-            // 2. Base System (Read-Only)
             .arg("--ro-bind").arg("/usr").arg("/usr")
             .arg("--ro-bind").arg("/bin").arg("/bin")
-            .arg("--ro-bind").arg("/sbin").arg("/sbin");
+            .arg("--ro-bind").arg("/sbin").arg("/sbin")
+            .arg("--dev").arg("/dev")
+            .arg("--proc").arg("/proc")
+            .arg("--tmpfs").arg("/tmp")
+            
+            // 2. Cell runtime requirements
+            .arg("--bind").arg(socket_dir).arg("/tmp/cell")
+            .arg("--bind").arg(umbilical_path).arg("/tmp/mitosis.sock")
+            
+            // 3. The Payload
+            .arg("--ro-bind").arg(binary_canonical).arg("/tmp/dna/payload");
 
-        // 3. Libraries (Read-Only)
-        // Check for existence to prevent bwrap failure on different distros
-        if Path::new("/lib").exists() {
-            cmd.arg("--ro-bind").arg("/lib").arg("/lib");
-        }
-        if Path::new("/lib64").exists() {
-            cmd.arg("--ro-bind").arg("/lib64").arg("/lib64");
+        // 4. Bind optional libs
+        if Path::new("/lib").exists() { cmd.arg("--ro-bind").arg("/lib").arg("/lib"); }
+        if Path::new("/lib64").exists() { cmd.arg("--ro-bind").arg("/lib64").arg("/lib64"); }
+
+        // 5. Inject Identity via STDIN (Umbilical Cord)
+        cmd.stdin(Stdio::piped());
+
+        // 6. Config - Only strictly necessary ENV vars allowed (path locations)
+        cmd.env("CELL_SOCKET_DIR", "/tmp/cell");
+        cmd.env("CELL_UMBILICAL", "/tmp/mitosis.sock");
+        // NOTE: CELL_NODE_ID and others are purposely REMOVED.
+        cmd.env_remove("CELL_NODE_ID");
+        cmd.env_remove("CELL_IDENTITY");
+
+        cmd.args(args);
+        // The binary is generic; it doesn't even know its name until we inject it.
+        cmd.arg("/tmp/dna/payload");
+
+        let mut child = cmd.spawn().context("Failed to spawn Capsid (bwrap)")?;
+
+        // --- THE INJECTION ---
+        if let Some(mut stdin) = child.stdin.take() {
+            // Serialize Config to Bytes (Zero-Copy compatible format)
+            let bytes = cell_model::rkyv::to_bytes::<_, 1024>(config)
+                .context("Failed to serialize init config")?
+                .into_vec();
+            
+            // Wire Protocol: [Length u32][Data...]
+            let len = (bytes.len() as u32).to_le_bytes();
+            
+            stdin.write_all(&len).context("Failed to inject config length")?;
+            stdin.write_all(&bytes).context("Failed to inject config payload")?;
+            stdin.flush().context("Failed to flush umbilical cord")?;
+            
+            // Dropping stdin closes the pipe, signaling EOF to the child.
         }
 
-        // 4. Configuration (Selective)
-        if Path::new("/etc/resolv.conf").exists() {
-            cmd.arg("--ro-bind").arg("/etc/resolv.conf").arg("/etc/resolv.conf");
-        }
-        if Path::new("/etc/hosts").exists() {
-            cmd.arg("--ro-bind").arg("/etc/hosts").arg("/etc/hosts");
-        }
-        if Path::new("/etc/ssl/certs").exists() {
-            cmd.arg("--ro-bind").arg("/etc/ssl/certs").arg("/etc/ssl/certs");
-        }
-        if Path::new("/etc/ca-certificates").exists() {
-            cmd.arg("--ro-bind").arg("/etc/ca-certificates").arg("/etc/ca-certificates");
-        }
-
-        // 5. Devices & Runtime (Fresh Instances)
-        cmd.arg("--dev").arg("/dev")
-           .arg("--proc").arg("/proc")
-           .arg("--tmpfs").arg("/tmp")
-           
-           // 6. Cell runtime requirements
-           .arg("--bind").arg(socket_dir).arg("/tmp/cell")
-           .arg("--bind").arg(umbilical_path).arg("/tmp/mitosis.sock")
-           
-           // 7. The Payload
-           .arg("--ro-bind").arg(binary_canonical).arg("/tmp/dna/payload")
-           .args(args);
-
-        let child = cmd.spawn().context("Failed to spawn Capsid (bwrap)")?;
         Ok(child)
     }
 }

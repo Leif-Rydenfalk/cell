@@ -5,6 +5,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
+use crate::config::CellInitConfig;
 
 pub const GENOME_REQUEST: &[u8] = b"__CELL_GENOME_REQUEST__";
 pub const SHM_UPGRADE_REQUEST: &[u8] = b"__SHM_UPGRADE_REQUEST__";
@@ -85,13 +86,18 @@ pub enum Primitive {
     Bool,
 }
 
-#[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
 #[archive(check_bytes)]
 pub enum MitosisRequest {
-    Spawn { cell_name: String },
+    Spawn { 
+        cell_name: String,
+        /// The strict configuration to inject into the process.
+        /// If None, Root will generate a default configuration.
+        config: Option<CellInitConfig>,
+    },
 }
 
-#[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
 #[archive(check_bytes)]
 pub enum MitosisResponse {
     Ok { socket_path: String },
