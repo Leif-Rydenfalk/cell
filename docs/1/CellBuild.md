@@ -1,2 +1,0 @@
-Keep in mind that cell-macros and the current api stays exactly the same - even with the build.rs except there is more functionality. adding the build.rs should not be a refactor - it must be a expansion.
-The current examples stay exactly as they are right now - the API is locked.
