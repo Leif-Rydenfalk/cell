@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, error};
-use cell_sdk::cell_model::protocol::{MitosisRequest, MitosisResponse, ArchivedMitosisRequest};
-use cell_sdk::cell_model::config::CellInitConfig;
+// Fixed imports: Use re-exports from cell_sdk
+use cell_sdk::protocol::{MitosisRequest, MitosisResponse, ArchivedMitosisRequest};
+use cell_sdk::config::CellInitConfig;
 use cell_sdk::cell_remote;
 use cell_sdk::rkyv::Deserialize;
 use cell_sdk::rkyv;
@@ -73,7 +74,7 @@ impl MyceliumRoot {
     async fn bootstrap_kernel_cell(name: &str) -> Result<()> {
         use std::process::Command;
         
-        // Check if already running
+        // Check if already running. Use SDK resolver.
         let socket = cell_sdk::resolve_socket_dir().join(format!("{}.sock", name));
         if socket.exists() {
             // Simple probe
@@ -155,7 +156,7 @@ impl MyceliumRoot {
                     }
                 };
 
-                // Use the generated client method `spawn` which corresponds to the service definition we added to hypervisor
+                // Use the generated client method `spawn`
                 match hypervisor.spawn(name, Some(final_config.clone())).await {
                     Ok(_) => {
                         let resp = MitosisResponse::Ok { socket_path: final_config.socket_path };

@@ -94,12 +94,9 @@ fn locate_dna(cell_name: &str) -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("No MANIFEST_DIR");
     let current_dir = std::path::Path::new(&manifest);
     
-    // Fix: Check if we are ALREADY inside the cell directory (common during `cargo test -p consensus`)
-    // If we are in `cells/consensus`, and cell_name is `consensus`, then `src/main.rs` is the DNA.
+    // Check if we are ALREADY inside the cell directory
     let local_src = current_dir.join("src/main.rs");
     if local_src.exists() {
-        // Verify package name matches if possible, or just assume testing context implies match
-        // Or check `Cargo.toml`. For now, heuristic:
         if current_dir.ends_with(cell_name) {
             return local_src;
         }
@@ -119,7 +116,6 @@ fn locate_dna(cell_name: &str) -> PathBuf {
             root.join("examples").join("cell-market").join(cell_name).join("src/main.rs"),
             root.join("examples").join("cell-market-bench").join("cells").join(cell_name).join("src/main.rs"),
             root.join("examples").join("cell-tissue").join(cell_name).join("src/main.rs"),
-            // Fallback for names like 'consensus-raft' mapping to 'consensus' if needed, but better to fix call site
             root.join("cells").join(cell_name.replace("-raft", "")).join("src/main.rs"),
         ];
 
@@ -128,7 +124,6 @@ fn locate_dna(cell_name: &str) -> PathBuf {
         }
     }
 
-    // Returning dummy path to let the compiler fail gracefully with the panic below if not found
     PathBuf::from("DNA_NOT_FOUND") 
 }
 
@@ -332,7 +327,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
 
     let dna_path = locate_dna(&cell_name);
     if dna_path.to_string_lossy() == "DNA_NOT_FOUND" {
-        panic!("Could not locate DNA for '{}'. Ensure the cell source exists in the workspace (cells/ or examples/). Checked CWD: {}", cell_name, std::env::current_dir().unwrap().display());
+        panic!("Could not locate DNA for '{}'. Ensure the cell source exists in the workspace. Checked CWD: {}", cell_name, std::env::current_dir().unwrap().display());
     }
 
     let file = match cell_build::load_and_flatten_source(&dna_path) {
@@ -419,12 +414,14 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
 
             #(#proteins)*
 
+            // Request Protocol (No check_bytes to avoid bytecheck complexity on client side)
             #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
             #[serde(crate = "::cell_sdk::serde")]
-            #[archive(check_bytes)]
+            // #[archive(check_bytes)] -- Removed for client request
             #[archive(crate = "::cell_sdk::rkyv")]
             pub enum #protocol_name { #(#req_variants),* }
 
+            // Response Protocol (Keep check_bytes for validating server reply)
             #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize, ::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize, Debug, Clone)]
             #[serde(crate = "::cell_sdk::serde")]
             #[archive(check_bytes)]
@@ -435,7 +432,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
             impl #client_struct {
                 pub fn new(conn: ::cell_sdk::Synapse) -> Self { Self { conn } }
                 pub async fn connect() -> ::anyhow::Result<Self> { 
-                    // Note: This relies on "cell_name" being the socket name.
                     Ok(Self::new(::cell_sdk::Synapse::grow(#cell_name).await?)) 
                 }
                 pub fn connection(&mut self) -> &mut ::cell_sdk::Synapse { &mut self.conn }
