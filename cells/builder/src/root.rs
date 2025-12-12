@@ -5,11 +5,12 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, error, warn};
-use cell_model::protocol::{MitosisRequest, MitosisResponse};
-use cell_model::config::CellInitConfig;
+use tracing::{info, error};
+use cell_sdk::cell_model::protocol::{MitosisRequest, MitosisResponse, ArchivedMitosisRequest};
+use cell_sdk::cell_model::config::CellInitConfig;
 use cell_sdk::cell_remote;
-use rkyv::Deserialize;
+use cell_sdk::rkyv::Deserialize;
+use cell_sdk::rkyv;
 
 // Define remote interface to talk to Hypervisor
 cell_remote!(Hypervisor = "hypervisor");
@@ -73,7 +74,7 @@ impl MyceliumRoot {
         use std::process::Command;
         
         // Check if already running
-        let socket = cell_discovery::resolve_socket_dir().join(format!("{}.sock", name));
+        let socket = cell_sdk::resolve_socket_dir().join(format!("{}.sock", name));
         if socket.exists() {
             // Simple probe
             if tokio::net::UnixStream::connect(&socket).await.is_ok() {
@@ -127,7 +128,7 @@ impl MyceliumRoot {
         let mut buf = vec![0u8; len];
         stream.read_exact(&mut buf).await?;
 
-        let req = cell_model::rkyv::check_archived_root::<MitosisRequest>(&buf)
+        let req = rkyv::check_archived_root::<MitosisRequest>(&buf)
             .map_err(|e| anyhow::anyhow!("Protocol Violation: {}", e))?;
 
         // 2. Delegate to Hypervisor Cell
@@ -136,7 +137,7 @@ impl MyceliumRoot {
             .context("Kernel Panic: Hypervisor unreachable")?;
 
         match req {
-            cell_model::protocol::ArchivedMitosisRequest::Spawn { cell_name, config } => {
+            ArchivedMitosisRequest::Spawn { cell_name, config } => {
                 let name = cell_name.to_string();
                 
                 // Resolve Config
@@ -154,12 +155,8 @@ impl MyceliumRoot {
                     }
                 };
 
-                let spawn_req = Hypervisor::SpawnRequest {
-                    cell_name: name,
-                    config: final_config.clone(),
-                };
-
-                match hypervisor.spawn(spawn_req).await {
+                // Use the generated client method `spawn` which corresponds to the service definition we added to hypervisor
+                match hypervisor.spawn(name, Some(final_config.clone())).await {
                     Ok(_) => {
                         let resp = MitosisResponse::Ok { socket_path: final_config.socket_path };
                         self.send_resp(&mut stream, resp).await?;
@@ -174,7 +171,7 @@ impl MyceliumRoot {
     }
 
     async fn send_resp(&self, stream: &mut UnixStream, resp: MitosisResponse) -> Result<()> {
-        let bytes = cell_model::rkyv::to_bytes::<_, 256>(&resp)?.into_vec();
+        let bytes = rkyv::to_bytes::<_, 256>(&resp)?.into_vec();
         stream.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
         stream.write_all(&bytes).await?;
         Ok(())

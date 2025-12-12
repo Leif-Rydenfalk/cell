@@ -21,16 +21,19 @@ struct ExchangeService {
 
 #[cell::handler]
 impl ExchangeService {
-    async fn place_order(&self, _symbol: String, _amount: u64, _side: u8) -> Result<u64> {
+    async fn place_order(&self, symbol: String, amount: u64, side: u8) -> Result<u64> {
+        let _ = symbol;
+        let _ = amount;
+        let _ = side;
         Ok(self.state.trade_count.fetch_add(1, Ordering::Relaxed))
     }
 
     async fn submit_batch(&self, count: u32) -> Result<u64> {
         // Process batch item-by-item
-        let mut executed = 0;
+        let mut _executed = 0;
         for _ in 0..count {
             self.state.trade_count.fetch_add(1, Ordering::Relaxed);
-            executed += 1;
+            _executed += 1;
         }
 
         self.state.batch_ops.fetch_add(1, Ordering::Relaxed);

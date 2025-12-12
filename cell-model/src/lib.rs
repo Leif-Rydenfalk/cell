@@ -18,7 +18,10 @@ pub mod config;
 pub use protocol::*;
 pub use ops::*;
 pub use error::Error;
-pub use macro_coordination::*;
+// Explicitly export MacroCoordination types to avoid glob conflict with protocol::MacroKind
+pub use macro_coordination::{
+    MacroInfo, ExpansionContext, MacroCoordinationRequest, MacroCoordinationResponse
+};
 pub use bridge::*;
 pub use config::*;
 

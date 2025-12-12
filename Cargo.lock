@@ -241,6 +241,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "builder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "cell-sdk",
+ "dirs",
+ "fd-lock",
+ "rand",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -342,21 +357,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cell-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cell-model",
- "cell-process",
- "cell-sdk",
- "clap",
- "dirs",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "cell-codec"
 version = "0.4.0"
 dependencies = [
@@ -415,23 +415,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cell-process"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "blake3",
- "cell-model",
- "cell-transport",
- "dirs",
- "fd-lock",
- "rand",
- "rkyv",
- "tokio",
- "tracing",
- "users",
-]
-
-[[package]]
 name = "cell-sdk"
 version = "0.4.0"
 dependencies = [
@@ -440,7 +423,6 @@ dependencies = [
  "cell-discovery",
  "cell-macros",
  "cell-model",
- "cell-process",
  "cell-transport",
  "clap",
  "dirs",
@@ -1007,6 +989,24 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tower-service",
+]
+
+[[package]]
+name = "hypervisor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cell-discovery",
+ "cell-model",
+ "cell-sdk",
+ "cell-transport",
+ "dirs",
+ "rand",
+ "rkyv",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "users",
 ]
 
 [[package]]

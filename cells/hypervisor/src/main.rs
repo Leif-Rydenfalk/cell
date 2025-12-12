@@ -12,11 +12,26 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, error, warn};
+use tracing::{info, error};
 use rkyv::Deserialize;
 
 // Remote interface to Builder
 cell_remote!(Builder = "builder");
+
+// --- INTERFACE DEFINITION FOR CELL_REMOTE! SCANNER ---
+// This allows other cells (like builder/root) to generate a client for the Hypervisor.
+// The actual implementation below handles raw requests, but we define the schema here.
+#[cell_sdk::service]
+struct HypervisorService;
+
+#[cell_sdk::handler]
+impl HypervisorService {
+    // This signature matches what root.rs expects to call
+    async fn spawn(&self, cell_name: String, config: Option<CellInitConfig>) -> Result<()> {
+        Ok(())
+    }
+}
+// ----------------------------------------------------
 
 pub struct Hypervisor {
     // Socket directory for the system scope (where this daemon lives)

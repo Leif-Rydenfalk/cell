@@ -138,6 +138,14 @@ impl AxonClient {
         Ok(None)
     }
 
+    pub async fn connect_exact(addr: &str) -> Result<Option<quinn::Connection>> {
+        if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
+            try_connect(socket_addr).await
+        } else {
+            Ok(None)
+        }
+    }
+
     pub async fn connect_to_signal(sig: &cell_discovery::lan::Signal) -> Result<Option<quinn::Connection>> {
         let addrs = expand_signal_to_candidates(sig);
         for addr in addrs {

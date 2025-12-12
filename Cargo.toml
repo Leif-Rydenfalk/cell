@@ -10,7 +10,6 @@ members = [
     "cell-sdk",
     "cell-macros",
     "cell-build",
-    "cell-cli",
     "cell-bind",
     "cells/consensus",
     "cells/dht",
