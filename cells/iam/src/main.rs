@@ -5,7 +5,7 @@
 use cell_sdk::*;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use jsonwebtoken::{encode, decode, Header, Algorithm, Validation, EncodingKey, DecodingKey};
+use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
