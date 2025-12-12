@@ -1,3 +1,4 @@
+// cells/hypervisor/src/capsid.rs
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
@@ -45,9 +46,7 @@ impl Capsid {
             .arg("--tmpfs").arg("/tmp")
             
             // 2. Cell runtime requirements
-            // Bind the specific socket directory where this cell lives
             .arg("--bind").arg(socket_dir).arg("/tmp/cell")
-            // Bind the umbilical cord (Daemon socket)
             .arg("--bind").arg(umbilical_path).arg("/tmp/mitosis.sock")
             
             // 3. The Payload
@@ -63,11 +62,8 @@ impl Capsid {
         // 6. Config
         cmd.env("CELL_SOCKET_DIR", "/tmp/cell");
         cmd.env("CELL_UMBILICAL", "/tmp/mitosis.sock");
-        
-        // Inject the Organism ID so the cell knows its context for discovery
         cmd.env("CELL_ORGANISM", &config.organism);
-
-        cmd.env_remove("CELL_NODE_ID");
+        cmd.env_remove("CELL_NODE_ID"); 
         cmd.env_remove("CELL_IDENTITY");
 
         cmd.args(args);

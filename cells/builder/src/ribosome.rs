@@ -1,3 +1,4 @@
+// cells/builder/src/ribosome.rs
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
@@ -18,7 +19,7 @@ impl Ribosome {
             anyhow::bail!("Invalid cell name length");
         }
 
-        // New Layout: ~/.cell/bin (was .cell/cache/proteins)
+        // Layout: ~/.cell/bin (was .cell/cache/proteins)
         let home = dirs::home_dir().unwrap();
         let bin_dir = home.join(".cell/bin");
         let meta_dir = home.join(".cell/bin/.meta").join(cell_name);
@@ -41,8 +42,6 @@ impl Ribosome {
         
         let current_hash = Self::compute_dna_hash(&actual_source)?;
         
-        // Binary name includes hash for content addressing? 
-        // Or we keep simple name and check hash? Simple name is easier for Capsid.
         let binary_path = bin_dir.join(cell_name);
         let hash_file_path = meta_dir.join("dna.hash");
 
@@ -50,18 +49,24 @@ impl Ribosome {
             let cached_hash = fs::read_to_string(&hash_file_path).unwrap_or_default();
             if cached_hash.trim() == current_hash {
                 return Ok(binary_path);
-            } else {
-                println!(
-                    "[Ribosome] Mutation detected in '{}'. Re-synthesizing...",
-                    cell_name
-                );
             }
+            tracing::info!("[Ribosome] Mutation detected in '{}'. Re-synthesizing...", cell_name);
         } else {
-            println!("[Ribosome] Synthesizing '{}'...", cell_name);
+            tracing::info!("[Ribosome] Synthesizing '{}'...", cell_name);
         }
 
         let mut cmd = Command::new("cargo");
         cmd.arg("build").arg("--release");
+
+        // Sanitize Environment to prevent "Cargo Inception"
+        for (key, _) in std::env::vars() {
+            if key.starts_with("CARGO_") {
+                cmd.env_remove(&key);
+            }
+        }
+        if let Ok(path) = std::env::var("PATH") {
+            cmd.env("PATH", path);
+        }
 
         if actual_source.join("vendor").exists() {
             cmd.arg("--offline");
@@ -69,8 +74,8 @@ impl Ribosome {
 
         let status = cmd
             .current_dir(&actual_source)
-            .env("CARGO_TARGET_DIR", &meta_dir.join("target")) // Build artifacts in meta to keep bin clean
-            .stdout(std::process::Stdio::null())
+            .env("CARGO_TARGET_DIR", &meta_dir.join("target")) // Build artifacts in meta
+            .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .status()
             .context("Failed to run cargo build")?;
@@ -80,7 +85,8 @@ impl Ribosome {
         }
 
         // Locate the artifact
-        let built_binary = meta_dir.join("target/release").join(cell_name);
+        let artifact_name = if cfg!(windows) { format!("{}.exe", cell_name) } else { cell_name.to_string() };
+        let built_binary = meta_dir.join("target/release").join(&artifact_name);
         if !built_binary.exists() {
             anyhow::bail!("Compiler finished but binary missing at {:?}", built_binary);
         }

@@ -8,9 +8,8 @@ description = "Zero-copy RPC framework and runtime SDK."
 repository = { workspace = true }
 
 [features]
-default = ["transport", "process", "shm"]
+default = ["transport", "shm"]
 transport = ["dep:cell-transport"]
-process = ["dep:cell-process"]
 shm = ["cell-transport/shm"]
 
 [dependencies]
@@ -18,9 +17,9 @@ cell-core = { workspace = true }
 cell-model = { workspace = true }
 cell-macros = { workspace = true }
 cell-transport = { workspace = true, optional = true, features = ["std"] }
-cell-process = { workspace = true, optional = true }
 cell-discovery = { workspace = true }
 
+# Removed cell-process dependency
 tokio = { workspace = true }
 serde = { workspace = true }
 rkyv = { workspace = true }

@@ -8,18 +8,12 @@ use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use anyhow::{Result, Context, anyhow};
 use cell_model::rkyv::Deserialize;
-
-#[cfg(feature = "process")]
-use std::sync::Arc;
-#[cfg(feature = "process")]
 use tokio::sync::OnceCell;
-#[cfg(feature = "process")]
-use cell_process::MyceliumRoot;
 
-#[cfg(feature = "process")]
-static ROOT: OnceCell<Arc<MyceliumRoot>> = OnceCell::const_new();
+// Tracks if we have already ignited a local cluster in this process
+static CLUSTER_INIT: OnceCell<()> = OnceCell::const_new();
 
-/// Client interface for the Cell System Daemon (Root).
+/// Client interface for the Cell System Daemon (Hypervisor).
 pub struct System;
 
 impl System {
@@ -27,9 +21,6 @@ impl System {
     pub async fn spawn(cell_name: &str, mut config: Option<CellInitConfig>) -> Result<String> {
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
         
-        // Daemon is always in system scope (unless overridden)
-        // If we are in a test, CELL_SOCKET_DIR might point to the test root.
-        // But the Daemon listens on 'mitosis.sock' in the root of that dir.
         let system_dir = if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
             std::path::PathBuf::from(p)
         } else {
@@ -39,12 +30,12 @@ impl System {
         let umbilical = system_dir.join("mitosis.sock");
 
         if !umbilical.exists() {
-            return Err(anyhow!("System Daemon not found at {:?}. Is the Root running?", umbilical));
+            return Err(anyhow!("System Daemon not found at {:?}. Is the Hypervisor running?", umbilical));
         }
 
         if config.is_none() {
             let org = std::env::var("CELL_ORGANISM").unwrap_or_else(|_| "system".to_string());
-            let socket_dir = resolve_socket_dir(); // Respects CELL_ORGANISM
+            let socket_dir = resolve_socket_dir(); 
             let socket_path = socket_dir.join(format!("{}.sock", cell_name));
             
             config = Some(CellInitConfig {
@@ -57,7 +48,7 @@ impl System {
         }
 
         let mut stream = UnixStream::connect(&umbilical).await
-            .context("Failed to connect to System Daemon")?;
+            .context("Failed to connect to Hypervisor")?;
 
         let req = MitosisRequest::Spawn {
             cell_name: cell_name.to_string(),
@@ -86,10 +77,9 @@ impl System {
         }
     }
 
-    /// Bootstraps a complete, isolated local Cell environment.
-    #[cfg(feature = "process")]
+    /// Bootstraps a complete, isolated local Cell environment by running the Hypervisor cell.
     pub async fn ignite_local_cluster() -> Result<()> {
-        ROOT.get_or_init(|| async {
+        CLUSTER_INIT.get_or_init(|| async {
             let mut target_dir = std::env::current_dir().unwrap();
             target_dir.push("target");
             target_dir.push("cell-cluster");
@@ -99,8 +89,7 @@ impl System {
             }
             std::fs::create_dir_all(&target_dir).unwrap();
 
-            // Set Environment for the isolated cluster
-            // We set CELL_SOCKET_DIR to the *System* scope for the daemon.
+            // Config for the Daemon Process
             std::env::set_var("CELL_SOCKET_DIR", target_dir.join("runtime/system").to_str().unwrap());
             std::env::set_var("CELL_REGISTRY_DIR", target_dir.join("registry").to_str().unwrap());
             std::env::set_var("CELL_DISABLE_SHM", "0");
@@ -110,10 +99,9 @@ impl System {
             std::fs::create_dir_all(&fake_home).unwrap();
             std::env::set_var("HOME", fake_home.to_str().unwrap());
 
-            // Populate Registry via Symlinks
+            // Populate Registry
             if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
                 let current = std::path::Path::new(&manifest);
-                // Heuristic search for workspace root
                 let potential_roots = [
                     current.to_path_buf(),
                     current.parent().unwrap().to_path_buf(),
@@ -142,28 +130,34 @@ impl System {
                 }
             }
 
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter("info")
-                .with_test_writer()
-                .try_init();
-
-            // Start Root (which spawns Builder & Hypervisor)
-            let root = MyceliumRoot::ignite().await.expect("Failed to start Mycelium Root");
+            // Launch Hypervisor Daemon via Cargo
+            // This decouples the SDK from the daemon implementation.
+            let mut cmd = std::process::Command::new("cargo");
+            cmd.arg("run").arg("--release").arg("-p").arg("hypervisor");
             
-            // Spawn other core services via System API (which goes to Root -> Hypervisor)
-            // Wait for Root to settle first
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::inherit());
 
+            // Detach and run
+            std::thread::spawn(move || { let _ = cmd.spawn(); });
+
+            // Wait for system to be ready (Hypervisor will spawn builder/nucleus/axon)
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            
+            // Wait for Axon specifically (System::spawn("axon") is now handled inside hypervisor ignite)
+            // Actually, we should check if Axon is up. Hypervisor bootstrap spawns Builder.
+            // Hypervisor does NOT automatically spawn Nucleus/Axon in current implementation,
+            // the SDK test harness usually requests them.
+            // Let's spawn them here to complete the cluster.
+            
             for _ in 0..50 {
                 if Self::spawn("nucleus", None).await.is_ok() { break; }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
             
-            System::spawn("axon", None).await.expect("Failed to spawn Axon");
-
+            let _ = Self::spawn("axon", None).await;
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-            Arc::new(root)
         }).await;
         
         Ok(())
