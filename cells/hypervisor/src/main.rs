@@ -20,7 +20,6 @@ cell_remote!(Builder = "builder");
 
 // --- INTERFACE DEFINITION FOR CELL_REMOTE! SCANNER ---
 // This allows other cells (like builder/root) to generate a client for the Hypervisor.
-// The actual implementation below handles raw requests, but we define the schema here.
 #[cell_sdk::service]
 struct HypervisorService;
 
@@ -28,6 +27,8 @@ struct HypervisorService;
 impl HypervisorService {
     // This signature matches what root.rs expects to call
     async fn spawn(&self, cell_name: String, config: Option<CellInitConfig>) -> Result<()> {
+        let _ = cell_name;
+        let _ = config;
         Ok(())
     }
 }
@@ -63,8 +64,6 @@ impl Hypervisor {
         };
 
         // 1. Bootstrap: Ensure Kernel Cells are running
-        // The order matters: Builder is needed to compile others.
-        // Nucleus/Axon are needed for registration and networking.
         hv.bootstrap_kernel_cell("builder").await?;
         hv.bootstrap_kernel_cell("nucleus").await?;
         hv.bootstrap_kernel_cell("axon").await?;
@@ -86,7 +85,6 @@ impl Hypervisor {
 
     /// Spawns a kernel cell (like 'builder') if not already running.
     async fn bootstrap_kernel_cell(&self, name: &str) -> Result<()> {
-        // We look for the socket in the system dir
         let socket = self.system_socket_dir.join(format!("{}.sock", name));
         
         if socket.exists() {
@@ -99,12 +97,9 @@ impl Hypervisor {
 
         info!("[Hypervisor] Bootstrapping {}...", name);
 
-        // In a real install, we would expect the binary in ~/.cell/bin
-        // In dev/test mode, we use cargo run
         let mut cmd = std::process::Command::new("cargo");
         cmd.arg("run").arg("--release").arg("-p").arg(name);
         
-        // Propagate env for isolation
         if let Ok(s) = std::env::var("CELL_SOCKET_DIR") { cmd.env("CELL_SOCKET_DIR", s); }
         if let Ok(r) = std::env::var("CELL_REGISTRY_DIR") { cmd.env("CELL_REGISTRY_DIR", r); }
         if let Ok(h) = std::env::var("HOME") { cmd.env("HOME", h); }
@@ -113,10 +108,8 @@ impl Hypervisor {
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::inherit());
 
-        // Spawn detached
         std::thread::spawn(move || { let _ = cmd.spawn(); });
 
-        // Wait
         for _ in 0..100 {
             if tokio::net::UnixStream::connect(&socket).await.is_ok() {
                 info!("[Hypervisor] {} online.", name);
@@ -141,11 +134,9 @@ impl Hypervisor {
             cell_model::protocol::ArchivedMitosisRequest::Spawn { cell_name, config } => {
                 let name = cell_name.to_string();
                 
-                // Resolve Config
                 let final_config = if let rkyv::option::ArchivedOption::Some(c) = config {
                     c.deserialize(&mut rkyv::Infallible).unwrap()
                 } else {
-                    // Default behavior: System scope if no config provided
                     let socket_path = self.system_socket_dir.join(format!("{}.sock", name));
                     CellInitConfig {
                         node_id: rand::random(),
@@ -171,7 +162,6 @@ impl Hypervisor {
     }
 
     async fn perform_spawn(&self, cell_name: &str, config: &CellInitConfig) -> Result<()> {
-        // 1. Ask Builder for Binary
         let mut builder = Builder::Client::connect().await
             .context("Hypervisor cannot reach Builder")?;
             
@@ -181,12 +171,10 @@ impl Hypervisor {
 
         let binary_path = PathBuf::from(build_res.binary_path);
 
-        // 2. Prepare Environment
         let socket_path = PathBuf::from(&config.socket_path);
         let runtime_dir = socket_path.parent().unwrap();
         tokio::fs::create_dir_all(runtime_dir).await?;
 
-        // 3. Launch via Capsid
         Capsid::spawn(&binary_path, runtime_dir, &self.umbilical_path, &[], config)?;
         
         Ok(())
@@ -202,6 +190,6 @@ impl Hypervisor {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
     Hypervisor::ignite().await
 }

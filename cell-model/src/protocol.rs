@@ -103,3 +103,22 @@ pub enum MitosisResponse {
     Ok { socket_path: String },
     Denied { reason: String },
 }
+
+/// The biological phases of a Cell's startup lifecycle.
+/// Sent from Daughter to Progenitor via the Gap Junction (Stdout).
+#[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
+#[archive(check_bytes)]
+pub enum MitosisPhase {
+    /// Chromatin condensation (Compiling/Initializing)
+    Prophase,
+    /// Nuclear envelope breakdown & Attachment (Membrane Bound)
+    Prometaphase { socket_path: String },
+    /// Alignment (Waiting for Identity/Config)
+    Metaphase,
+    /// Separation (Fully Active)
+    Cytokinesis,
+    /// Programmed Death (Error)
+    Apoptosis { reason: String },
+    /// Traumatic Death (Panic)
+    Necrosis,
+}

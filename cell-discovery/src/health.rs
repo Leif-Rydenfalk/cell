@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use cell_model::ops::{OpsRequest};
 
 #[derive(Debug, Clone)]
 pub struct HealthStatus {
@@ -73,27 +72,6 @@ impl HealthChecker {
     }
 
     async fn ping_cell(&self, cell_name: &str) -> anyhow::Result<()> {
-        // NOTE: We cannot depend on cell-transport here to avoid circular dependencies if discovery is used by transport.
-        // Instead, we use a basic socket probe or minimal dependency approach.
-        // Assuming cell-transport depends on cell-discovery, we can't import Synapse here.
-        // We will perform a raw socket check using existing discovery primitives if possible.
-        // However, the original code requested using Synapse.
-        // To resolve the cycle: HealthChecker should be in cell-sdk or a higher level crate, 
-        // OR we duplicate minimal ping logic.
-        // Given constraints, we will use the local::probe_unix_socket logic directly if local, 
-        // or a simple TCP connect check for LAN. Full RPC ping requires transport layer.
-        
-        // REVISION: The original user code for `ping_cell` used `Synapse`.
-        // If cell-transport depends on cell-discovery, this file in cell-discovery cannot depend on cell-transport.
-        // I will implement a raw probe here similar to `cell_discovery::local::probe_unix_socket`.
-        
-        // Actually, looking at Cargo.toml:
-        // cell-transport depends on cell-discovery.
-        // cell-discovery depends on cell-model, cell-core.
-        // So I cannot use Synapse here.
-        
-        // I will implement a simple ping using the Discovery primitives available in this crate.
-        
         // For Local:
         let socket_dir = crate::resolve_socket_dir();
         let path = socket_dir.join(format!("{}.sock", cell_name));

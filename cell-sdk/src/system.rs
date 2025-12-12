@@ -2,13 +2,15 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use crate::resolve_socket_dir;
-use cell_model::protocol::{MitosisRequest, MitosisResponse};
+use cell_model::protocol::{MitosisRequest, MitosisResponse, MitosisPhase};
 use cell_model::config::CellInitConfig;
 use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use anyhow::{Result, Context, anyhow};
+use anyhow::{Result, Context, anyhow, bail};
 use cell_model::rkyv::Deserialize;
 use tokio::sync::OnceCell;
+use std::process::{Command, Stdio};
+use std::io::Read;
 
 // Tracks if we have already ignited a local cluster in this process
 static CLUSTER_INIT: OnceCell<()> = OnceCell::const_new();
@@ -131,30 +133,64 @@ impl System {
             }
 
             // Launch Hypervisor Daemon via Cargo
-            // This decouples the SDK from the daemon implementation.
-            let mut cmd = std::process::Command::new("cargo");
+            // Isolate build to prevent lock contention with the test runner
+            let mut cmd = Command::new("cargo");
             cmd.arg("run").arg("--release").arg("-p").arg("hypervisor");
+            cmd.env("CARGO_TARGET_DIR", target_dir.join("target-inner")); // ISOLATION
             
-            cmd.stdout(std::process::Stdio::null());
-            cmd.stderr(std::process::Stdio::inherit());
+            // Create the Gap Junction
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::inherit()); // Pass through logs
 
-            // Detach and run
-            std::thread::spawn(move || { let _ = cmd.spawn(); });
+            let mut child = cmd.spawn().expect("Failed to spawn Hypervisor");
+            let mut stdout = child.stdout.take().expect("Failed to open Gap Junction (stdout)");
 
-            // Wait for system to be ready.
-            // The Hypervisor manages spawning core services (builder, nucleus, axon).
-            // Once the umbilical socket exists, the Hypervisor is active.
-            // Requests sent to it will be queued until it finishes bootstrapping.
-            let umbilical = target_dir.join("runtime/system/mitosis.sock");
-            for _ in 0..100 {
-                if umbilical.exists() {
-                    break;
+            // The Progenitor Loop
+            let handle = std::thread::spawn(move || {
+                let mut len_buf = [0u8; 4];
+                loop {
+                    // Block until signal arrives
+                    if stdout.read_exact(&mut len_buf).is_err() {
+                        panic!("[System] Gap Junction severed (EOF). Hypervisor died.");
+                    }
+                    let len = u32::from_le_bytes(len_buf) as usize;
+                    let mut buf = vec![0u8; len];
+                    if stdout.read_exact(&mut buf).is_err() {
+                        panic!("[System] Gap Junction severed reading payload.");
+                    }
+
+                    // Decode Signal
+                    let archived = cell_model::rkyv::check_archived_root::<MitosisPhase>(&buf)
+                        .expect("Invalid signal from Daughter");
+                    let phase: MitosisPhase = archived.deserialize(&mut cell_model::rkyv::Infallible).unwrap();
+
+                    match phase {
+                        MitosisPhase::Prophase => {
+                            println!("[System] Hypervisor is gestating (Compiling)...");
+                        }
+                        MitosisPhase::Prometaphase { socket_path } => {
+                            println!("[System] Hypervisor membrane bound at: {}", socket_path);
+                        }
+                        MitosisPhase::Metaphase => {
+                            // Hypervisor doesn't wait for identity on stdin in this mode, but if it did:
+                            // We would write to child.stdin here.
+                        }
+                        MitosisPhase::Cytokinesis => {
+                            println!("[System] Hypervisor Cytokinesis complete. System Active.");
+                            break; // Success!
+                        }
+                        MitosisPhase::Apoptosis { reason } => {
+                            panic!("[System] Hypervisor Apoptosis: {}", reason);
+                        }
+                        MitosisPhase::Necrosis => {
+                            panic!("[System] Hypervisor Necrosis (Panic).");
+                        }
+                    }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            
-            // Give it a moment to start bootstrapping children inside the daemon
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            });
+
+            // Wait for the thread to finish (blocking the async task, but that's fine for ignite)
+            handle.join().expect("Monitoring thread panicked");
 
         }).await;
         
