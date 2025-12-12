@@ -24,22 +24,24 @@ pub struct System;
 
 impl System {
     /// Request the Daemon to spawn a new Cell.
-    /// Uses the current environment (CELL_ORGANISM) to calculate placement.
     pub async fn spawn(cell_name: &str, mut config: Option<CellInitConfig>) -> Result<String> {
-        // Resolve Daemon Socket (Always system scope or overridden env)
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        
+        // Daemon is always in system scope (unless overridden)
+        // If we are in a test, CELL_SOCKET_DIR might point to the test root.
+        // But the Daemon listens on 'mitosis.sock' in the root of that dir.
         let system_dir = if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
             std::path::PathBuf::from(p)
         } else {
             home.join(".cell/runtime/system")
         };
+        
         let umbilical = system_dir.join("mitosis.sock");
 
         if !umbilical.exists() {
             return Err(anyhow!("System Daemon not found at {:?}. Is the Root running?", umbilical));
         }
 
-        // Auto-populate config if missing, using current context
         if config.is_none() {
             let org = std::env::var("CELL_ORGANISM").unwrap_or_else(|_| "system".to_string());
             let socket_dir = resolve_socket_dir(); // Respects CELL_ORGANISM
@@ -97,20 +99,21 @@ impl System {
             }
             std::fs::create_dir_all(&target_dir).unwrap();
 
-            // Set Env Vars for the Daemon
-            // NOTE: We do NOT set CELL_SOCKET_DIR here to allow hierarchy resolution logic to work.
-            // We set HOME to fake home, so defaults resolve to target/cell-cluster/home/.cell/runtime/system
+            // Set Environment for the isolated cluster
+            // We set CELL_SOCKET_DIR to the *System* scope for the daemon.
+            std::env::set_var("CELL_SOCKET_DIR", target_dir.join("runtime/system").to_str().unwrap());
+            std::env::set_var("CELL_REGISTRY_DIR", target_dir.join("registry").to_str().unwrap());
+            std::env::set_var("CELL_DISABLE_SHM", "0");
+            std::env::set_var("CELL_NODE_ID", "100");
+            
             let fake_home = target_dir.join("home");
             std::fs::create_dir_all(&fake_home).unwrap();
             std::env::set_var("HOME", fake_home.to_str().unwrap());
-            
-            // Force SHM off for testing simplicity
-            std::env::set_var("CELL_DISABLE_SHM", "0");
-            std::env::set_var("CELL_NODE_ID", "100"); // Root ID
 
-            // 2. Populate Test Registry
+            // Populate Registry via Symlinks
             if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
                 let current = std::path::Path::new(&manifest);
+                // Heuristic search for workspace root
                 let potential_roots = [
                     current.to_path_buf(),
                     current.parent().unwrap().to_path_buf(),
@@ -118,15 +121,11 @@ impl System {
                     current.join("../../"),
                 ];
                 
-                let registry = fake_home.join(".cell/registry");
+                let registry = target_dir.join("registry");
                 std::fs::create_dir_all(&registry).unwrap();
 
                 for root in potential_roots {
-                    let candidates = [
-                        root.join("cells"),
-                        root.join("examples"),
-                    ];
-                    
+                    let candidates = [root.join("cells"), root.join("examples")];
                     for candidate in candidates {
                         if candidate.exists() {
                             if let Ok(entries) = std::fs::read_dir(candidate) {
@@ -148,13 +147,18 @@ impl System {
                 .with_test_writer()
                 .try_init();
 
+            // Start Root (which spawns Builder & Hypervisor)
             let root = MyceliumRoot::ignite().await.expect("Failed to start Mycelium Root");
             
-            // Spawn Core Services (System Scope)
+            // Spawn other core services via System API (which goes to Root -> Hypervisor)
+            // Wait for Root to settle first
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
             for _ in 0..50 {
                 if Self::spawn("nucleus", None).await.is_ok() { break; }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
+            
             System::spawn("axon", None).await.expect("Failed to spawn Axon");
 
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;

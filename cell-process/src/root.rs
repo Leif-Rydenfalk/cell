@@ -1,62 +1,59 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use crate::capsid::Capsid;
-use crate::ribosome::Ribosome;
-use cell_model::protocol::{MitosisRequest, MitosisResponse, ArchivedMitosisRequest};
-use cell_model::config::CellInitConfig;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{info, error};
-use rkyv::option::ArchivedOption;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::{info, error, warn};
+use cell_model::protocol::{MitosisRequest, MitosisResponse};
+use cell_model::config::CellInitConfig;
+use cell_sdk::cell_remote;
 use rkyv::Deserialize;
 
+// Define remote interface to talk to Hypervisor
+cell_remote!(Hypervisor = "hypervisor");
+
 pub struct MyceliumRoot {
-    // Root always binds to system scope
-    system_socket_dir: PathBuf,
-    registry_path: PathBuf,
-    umbilical_path: PathBuf,
+    socket_dir: PathBuf,
 }
 
 impl MyceliumRoot {
     pub async fn ignite() -> Result<Self> {
-        // Root always lives in the 'system' runtime directory unless forced by CELL_SOCKET_DIR
-        let system_socket_dir = if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
+        let home = dirs::home_dir().expect("No HOME");
+        
+        // System Scope
+        let socket_dir = if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
             PathBuf::from(p)
         } else {
-            let home = dirs::home_dir().context("Home dir not found")?;
             home.join(".cell/runtime/system")
         };
 
-        let registry_path = if let Ok(p) = std::env::var("CELL_REGISTRY_DIR") {
-            PathBuf::from(p)
-        } else {
-            let home = dirs::home_dir().context("Home dir not found")?;
-            home.join(".cell/registry")
-        };
+        tokio::fs::create_dir_all(&socket_dir).await?;
+        let umbilical = socket_dir.join("mitosis.sock");
 
-        let umbilical_path = system_socket_dir.join("mitosis.sock");
+        if umbilical.exists() { tokio::fs::remove_file(&umbilical).await?; }
+        let listener = UnixListener::bind(&umbilical)?;
 
-        tokio::fs::create_dir_all(&system_socket_dir).await?;
-        tokio::fs::create_dir_all(&registry_path).await?;
+        info!("[Root] Daemon Booting...");
 
-        if umbilical_path.exists() { tokio::fs::remove_file(&umbilical_path).await?; }
-        let listener = UnixListener::bind(&umbilical_path)?;
-        
-        info!("[Root] System Hypervisor Active at {:?}", umbilical_path);
+        // 1. Bootstrap Phase: Ensure Kernel Cells are running
+        // We must spawn 'builder' and 'hypervisor' manually since they are the means of production.
+        Self::bootstrap_kernel_cell("builder").await?;
+        Self::bootstrap_kernel_cell("hypervisor").await?;
 
-        let root = Self { system_socket_dir, registry_path, umbilical_path };
+        info!("[Root] Kernel Active. Listening on {:?}", umbilical);
+
+        let root = Self { socket_dir };
         let r = root.clone();
-        
+
         tokio::spawn(async move {
             loop {
                 if let Ok((stream, _)) = listener.accept().await {
-                    let mut r_inner = r.clone();
+                    let r_inner = r.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = r_inner.handle_child(stream).await {
-                            error!("[Root] Spawn Error: {}", e);
+                        if let Err(e) = r_inner.handle_request(stream).await {
+                            error!("[Root] Request Error: {}", e);
                         }
                     });
                 }
@@ -67,14 +64,63 @@ impl MyceliumRoot {
     }
 
     fn clone(&self) -> Self {
-        Self { 
-            system_socket_dir: self.system_socket_dir.clone(), 
-            registry_path: self.registry_path.clone(),
-            umbilical_path: self.umbilical_path.clone(),
-        }
+        Self { socket_dir: self.socket_dir.clone() }
     }
 
-    async fn handle_child(&mut self, mut stream: UnixStream) -> Result<()> {
+    /// Rudimentary process spawner for the Kernel Cells (Builder/Hypervisor).
+    /// These must exist as compiled binaries in ~/.cell/bin (or be built via cargo run for now).
+    async fn bootstrap_kernel_cell(name: &str) -> Result<()> {
+        use std::process::Command;
+        
+        // Check if already running
+        let socket = cell_discovery::resolve_socket_dir().join(format!("{}.sock", name));
+        if socket.exists() {
+            // Simple probe
+            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                info!("[Root] {} is already running", name);
+                return Ok(());
+            }
+            tokio::fs::remove_file(&socket).await.ok();
+        }
+
+        info!("[Root] Bootstrapping {}...", name);
+
+        // Fallback: Use 'cargo run' logic if binary not found (Dev Mode)
+        // In Prod, we would look in ~/.cell/bin
+        // Since we are in the workspace, we can use cargo run -p
+        
+        let mut cmd = Command::new("cargo");
+        cmd.arg("run").arg("--release").arg("-p").arg(name);
+        
+        // Detach
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::inherit()); // Log errors
+        
+        // Pass essential env
+        if let Ok(s) = std::env::var("CELL_SOCKET_DIR") { cmd.env("CELL_SOCKET_DIR", s); }
+        if let Ok(r) = std::env::var("CELL_REGISTRY_DIR") { cmd.env("CELL_REGISTRY_DIR", r); }
+        if let Ok(h) = std::env::var("HOME") { cmd.env("HOME", h); }
+        cmd.env("CELL_NODE_ID", "0"); // System ID
+
+        // Spawn detached
+        std::thread::spawn(move || {
+            let _ = cmd.spawn();
+        });
+
+        // Wait for socket
+        for _ in 0..50 {
+            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                info!("[Root] {} online.", name);
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        anyhow::bail!("Failed to bootstrap {}", name);
+    }
+
+    async fn handle_request(&self, mut stream: UnixStream) -> Result<()> {
+        // 1. Read Request
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
@@ -84,63 +130,47 @@ impl MyceliumRoot {
         let req = cell_model::rkyv::check_archived_root::<MitosisRequest>(&buf)
             .map_err(|e| anyhow::anyhow!("Protocol Violation: {}", e))?;
 
+        // 2. Delegate to Hypervisor Cell
+        // We connect to Hypervisor via SDK Transport
+        let mut hypervisor = Hypervisor::Client::connect().await
+            .context("Kernel Panic: Hypervisor unreachable")?;
+
         match req {
-            ArchivedMitosisRequest::Spawn { cell_name, config: maybe_config } => { 
-                let name_str = cell_name.to_string();
-                let source = self.registry_path.join(&name_str);
+            cell_model::protocol::ArchivedMitosisRequest::Spawn { cell_name, config } => {
+                let name = cell_name.to_string();
                 
-                if !source.exists() {
-                    return self.deny(&mut stream, &format!("Cell not found in registry: {}", name_str)).await;
-                }
-
-                // 1. Compile
-                let binary = match Ribosome::synthesize(&source, &name_str) {
-                    Ok(b) => b,
-                    Err(e) => return self.deny(&mut stream, &e.to_string()).await,
-                };
-
-                // 2. Resolve Configuration
-                let final_config = match maybe_config {
-                    ArchivedOption::Some(archived_cfg) => {
-                        let cfg: CellInitConfig = archived_cfg.deserialize(&mut rkyv::Infallible).unwrap();
-                        cfg
-                    },
-                    ArchivedOption::None => {
-                        // Fallback defaults: assumes System scope if not specified
-                        let default_sock_path = self.system_socket_dir.join(format!("{}.sock", name_str));
-                        CellInitConfig {
-                            node_id: rand::random(),
-                            cell_name: name_str.clone(),
-                            peers: vec![],
-                            socket_path: default_sock_path.to_string_lossy().to_string(),
-                            organism: "system".to_string(),
-                        }
+                // Resolve Config
+                let final_config = if let rkyv::option::ArchivedOption::Some(c) = config {
+                    c.deserialize(&mut rkyv::Infallible).unwrap()
+                } else {
+                    // Root Default: System Scope
+                    let socket_path = self.socket_dir.join(format!("{}.sock", name));
+                    CellInitConfig {
+                        node_id: rand::random(),
+                        cell_name: name.clone(),
+                        peers: vec![],
+                        socket_path: socket_path.to_string_lossy().to_string(),
+                        organism: "system".to_string(),
                     }
                 };
 
-                // 3. Determine Runtime Directory
-                // The cell might live in an organism directory, not the system root.
-                // We derive the bind directory from the requested socket path.
-                let socket_path = PathBuf::from(&final_config.socket_path);
-                let runtime_dir = socket_path.parent().unwrap_or(&self.system_socket_dir);
-                
-                tokio::fs::create_dir_all(runtime_dir).await?;
+                let spawn_req = Hypervisor::SpawnRequest {
+                    cell_name: name,
+                    config: final_config.clone(),
+                };
 
-                // 4. Inject & Spawn
-                match Capsid::spawn(&binary, runtime_dir, &self.umbilical_path, &[], &final_config) {
+                match hypervisor.spawn(spawn_req).await {
                     Ok(_) => {
                         let resp = MitosisResponse::Ok { socket_path: final_config.socket_path };
                         self.send_resp(&mut stream, resp).await?;
-                    },
-                    Err(e) => return self.deny(&mut stream, &e.to_string()).await,
+                    }
+                    Err(e) => {
+                        self.send_resp(&mut stream, MitosisResponse::Denied { reason: e.to_string() }).await?;
+                    }
                 }
             }
         }
         Ok(())
-    }
-
-    async fn deny(&self, stream: &mut UnixStream, reason: &str) -> Result<()> {
-        self.send_resp(stream, MitosisResponse::Denied { reason: reason.to_string() }).await
     }
 
     async fn send_resp(&self, stream: &mut UnixStream, resp: MitosisResponse) -> Result<()> {
