@@ -141,22 +141,20 @@ impl System {
             // Detach and run
             std::thread::spawn(move || { let _ = cmd.spawn(); });
 
-            // Wait for system to be ready (Hypervisor will spawn builder/nucleus/axon)
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            
-            // Wait for Axon specifically (System::spawn("axon") is now handled inside hypervisor ignite)
-            // Actually, we should check if Axon is up. Hypervisor bootstrap spawns Builder.
-            // Hypervisor does NOT automatically spawn Nucleus/Axon in current implementation,
-            // the SDK test harness usually requests them.
-            // Let's spawn them here to complete the cluster.
-            
-            for _ in 0..50 {
-                if Self::spawn("nucleus", None).await.is_ok() { break; }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            // Wait for system to be ready.
+            // The Hypervisor manages spawning core services (builder, nucleus, axon).
+            // Once the umbilical socket exists, the Hypervisor is active.
+            // Requests sent to it will be queued until it finishes bootstrapping.
+            let umbilical = target_dir.join("runtime/system/mitosis.sock");
+            for _ in 0..100 {
+                if umbilical.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             
-            let _ = Self::spawn("axon", None).await;
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // Give it a moment to start bootstrapping children inside the daemon
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
         }).await;
         

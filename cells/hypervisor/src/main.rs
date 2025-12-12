@@ -48,7 +48,11 @@ impl Hypervisor {
         };
 
         // 1. Bootstrap: Ensure Kernel Cells are running
+        // The order matters: Builder is needed to compile others.
+        // Nucleus/Axon are needed for registration and networking.
         hv.bootstrap_kernel_cell("builder").await?;
+        hv.bootstrap_kernel_cell("nucleus").await?;
+        hv.bootstrap_kernel_cell("axon").await?;
         
         // 2. Serve Requests
         let hv_arc = std::sync::Arc::new(hv);
