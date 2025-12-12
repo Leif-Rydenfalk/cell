@@ -14,15 +14,16 @@ use rkyv::option::ArchivedOption;
 use rkyv::Deserialize;
 
 pub struct MyceliumRoot {
-    socket_dir: PathBuf,
+    // Root always binds to system scope
+    system_socket_dir: PathBuf,
     registry_path: PathBuf,
     umbilical_path: PathBuf,
 }
 
 impl MyceliumRoot {
     pub async fn ignite() -> Result<Self> {
-        // Respect environment variables for paths to support testing/custom layouts
-        let socket_dir = if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
+        // Root always lives in the 'system' runtime directory unless forced by CELL_SOCKET_DIR
+        let system_socket_dir = if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
             PathBuf::from(p)
         } else {
             let home = dirs::home_dir().context("Home dir not found")?;
@@ -36,9 +37,9 @@ impl MyceliumRoot {
             home.join(".cell/registry")
         };
 
-        let umbilical_path = socket_dir.join("mitosis.sock");
+        let umbilical_path = system_socket_dir.join("mitosis.sock");
 
-        tokio::fs::create_dir_all(&socket_dir).await?;
+        tokio::fs::create_dir_all(&system_socket_dir).await?;
         tokio::fs::create_dir_all(&registry_path).await?;
 
         if umbilical_path.exists() { tokio::fs::remove_file(&umbilical_path).await?; }
@@ -46,7 +47,7 @@ impl MyceliumRoot {
         
         info!("[Root] System Hypervisor Active at {:?}", umbilical_path);
 
-        let root = Self { socket_dir, registry_path, umbilical_path };
+        let root = Self { system_socket_dir, registry_path, umbilical_path };
         let r = root.clone();
         
         tokio::spawn(async move {
@@ -67,7 +68,7 @@ impl MyceliumRoot {
 
     fn clone(&self) -> Self {
         Self { 
-            socket_dir: self.socket_dir.clone(), 
+            system_socket_dir: self.system_socket_dir.clone(), 
             registry_path: self.registry_path.clone(),
             umbilical_path: self.umbilical_path.clone(),
         }
@@ -92,7 +93,7 @@ impl MyceliumRoot {
                     return self.deny(&mut stream, &format!("Cell not found in registry: {}", name_str)).await;
                 }
 
-                // 1. Compile (Ribosome handles caching in ~/.cell/bin)
+                // 1. Compile
                 let binary = match Ribosome::synthesize(&source, &name_str) {
                     Ok(b) => b,
                     Err(e) => return self.deny(&mut stream, &e.to_string()).await,
@@ -105,18 +106,28 @@ impl MyceliumRoot {
                         cfg
                     },
                     ArchivedOption::None => {
-                        // Auto-Generate defaults
+                        // Fallback defaults: assumes System scope if not specified
+                        let default_sock_path = self.system_socket_dir.join(format!("{}.sock", name_str));
                         CellInitConfig {
                             node_id: rand::random(),
                             cell_name: name_str.clone(),
                             peers: vec![],
-                            socket_path: self.socket_dir.join(format!("{}.sock", name_str)).to_string_lossy().to_string(),
+                            socket_path: default_sock_path.to_string_lossy().to_string(),
+                            organism: "system".to_string(),
                         }
                     }
                 };
 
-                // 3. Inject & Spawn
-                match Capsid::spawn(&binary, &self.socket_dir, &self.umbilical_path, &[], &final_config) {
+                // 3. Determine Runtime Directory
+                // The cell might live in an organism directory, not the system root.
+                // We derive the bind directory from the requested socket path.
+                let socket_path = PathBuf::from(&final_config.socket_path);
+                let runtime_dir = socket_path.parent().unwrap_or(&self.system_socket_dir);
+                
+                tokio::fs::create_dir_all(runtime_dir).await?;
+
+                // 4. Inject & Spawn
+                match Capsid::spawn(&binary, runtime_dir, &self.umbilical_path, &[], &final_config) {
                     Ok(_) => {
                         let resp = MitosisResponse::Ok { socket_path: final_config.socket_path };
                         self.send_resp(&mut stream, resp).await?;

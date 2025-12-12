@@ -21,8 +21,11 @@ pub struct CellInitConfig {
     pub peers: Vec<PeerConfig>,
     
     /// The specific Unix socket path this cell should bind its Membrane to.
-    /// Assigned by the Orchestrator/Root.
     pub socket_path: String,
+
+    /// The organism (namespace) this cell belongs to.
+    /// Used for service discovery scope resolution.
+    pub organism: String,
 }
 
 #[derive(Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize, Debug, Clone)]

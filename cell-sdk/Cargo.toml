@@ -28,3 +28,5 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4.5", features = ["derive"] }
+dirs = { workspace = true }
+rand = { workspace = true }

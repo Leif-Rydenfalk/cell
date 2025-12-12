@@ -4,7 +4,8 @@
 extern crate self as cell_sdk;
 
 // === CORE RE-EXPORTS ===
-pub use cell_core::*;
+// Explicitly re-export core primitives to avoid 'error' module collision with cell-model
+pub use cell_core::{CellError, channel, Codec, Transport, Connection, Listener, Vesicle, Wire};
 pub use cell_model::*;
 
 // === MACROS ===

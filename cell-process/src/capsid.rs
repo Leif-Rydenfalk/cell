@@ -21,7 +21,7 @@ impl Capsid {
             .context("Binary path invalid or does not exist")?;
         
         if let Some(home) = dirs::home_dir() {
-            let _trusted_root = home.join(".cell/cache/proteins");
+            let _trusted_root = home.join(".cell/bin");
             if !binary_canonical.is_file() {
                 bail!("Target is not a file");
             }
@@ -36,7 +36,7 @@ impl Capsid {
             .arg("--new-session")
             .arg("--cap-drop").arg("ALL")
             
-            // 1. Filesystem: Whitelist, don't Blacklist.
+            // 1. Filesystem: Whitelist
             .arg("--ro-bind").arg("/usr").arg("/usr")
             .arg("--ro-bind").arg("/bin").arg("/bin")
             .arg("--ro-bind").arg("/sbin").arg("/sbin")
@@ -45,7 +45,9 @@ impl Capsid {
             .arg("--tmpfs").arg("/tmp")
             
             // 2. Cell runtime requirements
+            // Bind the specific socket directory where this cell lives
             .arg("--bind").arg(socket_dir).arg("/tmp/cell")
+            // Bind the umbilical cord (Daemon socket)
             .arg("--bind").arg(umbilical_path).arg("/tmp/mitosis.sock")
             
             // 3. The Payload
@@ -58,34 +60,32 @@ impl Capsid {
         // 5. Inject Identity via STDIN (Umbilical Cord)
         cmd.stdin(Stdio::piped());
 
-        // 6. Config - Only strictly necessary ENV vars allowed (path locations)
+        // 6. Config
         cmd.env("CELL_SOCKET_DIR", "/tmp/cell");
         cmd.env("CELL_UMBILICAL", "/tmp/mitosis.sock");
-        // NOTE: CELL_NODE_ID and others are purposely REMOVED.
+        
+        // Inject the Organism ID so the cell knows its context for discovery
+        cmd.env("CELL_ORGANISM", &config.organism);
+
         cmd.env_remove("CELL_NODE_ID");
         cmd.env_remove("CELL_IDENTITY");
 
         cmd.args(args);
-        // The binary is generic; it doesn't even know its name until we inject it.
         cmd.arg("/tmp/dna/payload");
 
         let mut child = cmd.spawn().context("Failed to spawn Capsid (bwrap)")?;
 
         // --- THE INJECTION ---
         if let Some(mut stdin) = child.stdin.take() {
-            // Serialize Config to Bytes (Zero-Copy compatible format)
             let bytes = cell_model::rkyv::to_bytes::<_, 1024>(config)
                 .context("Failed to serialize init config")?
                 .into_vec();
             
-            // Wire Protocol: [Length u32][Data...]
             let len = (bytes.len() as u32).to_le_bytes();
             
             stdin.write_all(&len).context("Failed to inject config length")?;
             stdin.write_all(&bytes).context("Failed to inject config payload")?;
             stdin.flush().context("Failed to flush umbilical cord")?;
-            
-            // Dropping stdin closes the pipe, signaling EOF to the child.
         }
 
         Ok(child)

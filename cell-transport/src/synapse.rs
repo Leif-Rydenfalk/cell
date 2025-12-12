@@ -62,8 +62,6 @@ impl Synapse {
         Self::grow_with_config(connection_string, SynapseConfig::default()).await
     }
 
-    /// Attempts to connect to a cell, retrying until successful or timeout.
-    /// Useful when spawning a cell and waiting for it to be ready.
     pub async fn grow_await(connection_string: &str) -> Result<Self> {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
@@ -80,14 +78,12 @@ impl Synapse {
 
         let (gateway_name, target) = Self::resolve_gateway(connection_string);
 
-        // 1. Try Direct Local Connection
         if gateway_name.is_none() {
             if let Ok(syn) = Self::connect_local(target, &config).await {
                 return Ok(syn);
             }
         }
 
-        // 2. Gateway Routing (Axon Bridge)
         let gateway = gateway_name.unwrap_or("axon");
         debug!("[Synapse] Routing '{}' via gateway '{}'", target, gateway);
 
@@ -96,7 +92,6 @@ impl Synapse {
             Err(_) => bail!("Target '{}' not found and gateway '{}' is not running.", target, gateway),
         };
 
-        // Handshake: Ask gateway to mount the target
         let req = BridgeRequest::Mount { target: target.to_string() };
         let req_bytes = rkyv::to_bytes::<_, 256>(&req)?.into_vec();
         
@@ -139,10 +134,20 @@ impl Synapse {
     }
 
     async fn connect_local(cell_name: &str, config: &SynapseConfig) -> Result<Self> {
-        let socket_dir = resolve_socket_dir();
-        let socket_path = socket_dir.join(format!("{}.sock", cell_name));
-        let path_str = socket_path.to_string_lossy().to_string();
-        Self::connect_to_path(&path_str, cell_name, config).await
+        // Hierarchy Lookup: Check local organism first, then system
+        let search_paths = cell_discovery::get_search_paths();
+        
+        for dir in search_paths {
+            let socket_path = dir.join(format!("{}.sock", cell_name));
+            let path_str = socket_path.to_string_lossy().to_string();
+            
+            // Try connection
+            if let Ok(syn) = Self::connect_to_path(&path_str, cell_name, config).await {
+                return Ok(syn);
+            }
+        }
+        
+        bail!("Failed to connect to local cell '{}' (checked all scopes)", cell_name);
     }
 
     async fn connect_to_path(path: &str, cell_name: &str, config: &SynapseConfig) -> Result<Self> {
@@ -160,14 +165,11 @@ impl Synapse {
                         )));
                         shm_client = Some(client);
                     }
-                    Err(_) => {
-                        // Fallback to Unix
-                    }
+                    Err(_) => { }
                 }
             }
             
             if transport.is_none() {
-                // Reconnect for clean stream if upgrade failed
                 if let Ok(clean_stream) = UnixStream::connect(path).await {
                     transport = Some(Box::new(UnixTransport::new(clean_stream)));
                 }
@@ -192,6 +194,7 @@ impl Synapse {
         }
     }
     
+    // ... [Rest of file: try_upgrade_to_shm, recv_fds, heal, call_transport, fire_on_channel, fire remain same] ...
     #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
     async fn try_upgrade_to_shm(stream: &mut UnixStream) -> Result<ShmClient> {
         let cred = stream.peer_cred()?;
@@ -250,17 +253,13 @@ impl Synapse {
         Ok(fds)
     }
 
-    // Break async recursion cycle
     fn heal(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
             warn!("[Synapse] Connection lost to '{}'. Healing...", self.cell_name);
-            
             const RECONNECT_ATTEMPTS: usize = 5;
             const BASE_DELAY: u64 = 200;
-
             for i in 0..RECONNECT_ATTEMPTS {
                 tokio::time::sleep(Duration::from_millis(BASE_DELAY * (1 << i))).await;
-                
                 match Synapse::grow(&self.cell_name).await {
                     Ok(new_syn) => {
                         info!("[Synapse] Reconnected to '{}'.", self.cell_name);
@@ -270,9 +269,7 @@ impl Synapse {
                         self.circuit_breaker = new_syn.circuit_breaker;
                         return Ok(());
                     },
-                    Err(e) => {
-                        warn!("[Synapse] Reconnect attempt {}/{} failed: {}", i+1, RECONNECT_ATTEMPTS, e);
-                    }
+                    Err(e) => { warn!("[Synapse] Reconnect attempt {}/{} failed: {}", i+1, RECONNECT_ATTEMPTS, e); }
                 }
             }
             bail!("Failed to heal connection to '{}' after {} attempts", self.cell_name, RECONNECT_ATTEMPTS)
@@ -285,7 +282,6 @@ impl Synapse {
              Err(e) => {
                  match e {
                      CellError::IoError | CellError::ConnectionReset | CellError::Timeout => {
-                         // Attempt healing
                          if self.heal().await.is_ok() {
                              self.transport.call(data).await
                          } else {
@@ -299,51 +295,31 @@ impl Synapse {
     }
 
     pub async fn fire_on_channel(&mut self, channel_id: u8, data: &[u8]) -> Result<Response<Vec<u8>>, CellError> {
-        if self.circuit_breaker.is_open() {
-            return Err(CellError::CircuitBreakerOpen);
-        }
-
+        if self.circuit_breaker.is_open() { return Err(CellError::CircuitBreakerOpen); }
         #[cfg(feature = "shm")]
         if let Some(client) = &self.shm_client {
-             if let Ok(msg) = client.request_raw(data, channel_id).await {
-                 return Ok(Response::Owned(msg.get_bytes().to_vec()));
-             }
+             if let Ok(msg) = client.request_raw(data, channel_id).await { return Ok(Response::Owned(msg.get_bytes().to_vec())); }
         }
-
         let data_vec = data.to_vec();
         let mut attempt = 0;
         let mut delay = self.retry_policy.base_delay;
-        
         loop {
             attempt += 1;
-            
             let res = self.default_deadline.execute({
                 let data_ref = &data_vec;
                 let breaker = self.circuit_breaker.clone();
-                
                 async move {
-                    if let Err(_) = breaker.call(|| { Ok(()) }) {
-                        return Err(anyhow::Error::new(CellError::CircuitBreakerOpen));
-                    }
-                    
+                    if let Err(_) = breaker.call(|| { Ok(()) }) { return Err(anyhow::Error::new(CellError::CircuitBreakerOpen)); }
                     let mut frame = Vec::with_capacity(1 + data_ref.len());
                     frame.push(channel_id);
                     frame.extend_from_slice(data_ref);
-                    
                     Ok(frame)
                 }
             }).await;
-
             let frame = match res {
                 Ok(f) => f,
-                Err(e) => {
-                    if let Some(ce) = e.downcast_ref::<CellError>() {
-                        return Err(*ce);
-                    }
-                    return Err(CellError::Timeout);
-                }
+                Err(e) => { if let Some(ce) = e.downcast_ref::<CellError>() { return Err(*ce); } return Err(CellError::Timeout); }
             };
-            
             match self.call_transport(&frame).await {
                 Ok(resp_bytes) => return Ok(Response::Owned(resp_bytes)),
                 Err(e) => {
@@ -365,14 +341,10 @@ impl Synapse {
             Ok(b) => b.into_vec(),
             Err(_) => return Err(CellError::SerializationFailure),
         };
-
         #[cfg(feature = "shm")]
         if let Some(client) = &self.shm_client {
-             if let Ok(msg) = client.request::<Req, Resp>(request, channel::APP).await {
-                 return Ok(Response::ZeroCopy(msg));
-             }
+             if let Ok(msg) = client.request::<Req, Resp>(request, channel::APP).await { return Ok(Response::ZeroCopy(msg)); }
         }
-
         match self.fire_on_channel(channel::APP, &req_bytes).await? {
             Response::Owned(vec) => Ok(Response::Owned(vec)),
             _ => Err(CellError::SerializationFailure),
