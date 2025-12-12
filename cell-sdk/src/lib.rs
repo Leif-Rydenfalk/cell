@@ -22,8 +22,8 @@ pub mod system;
 pub use system::System;
 
 // === PROCESS MANAGEMENT (Daemon) ===
-#[cfg(feature = "process")]
-pub use cell_process as process;
+// #[cfg(feature = "process")]
+// pub use cell_process as process;
 
 // === TISSUE ===
 #[cfg(feature = "transport")]

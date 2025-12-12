@@ -13,7 +13,7 @@ use cell_transport::Response;
 pub struct Tissue {
     cell_name: String,
     synapses: Arc<RwLock<Vec<Synapse>>>,
-    balancer: Arc<LoadBalancer>,
+    _balancer: Arc<LoadBalancer>,
 }
 
 impl Tissue {
@@ -38,7 +38,7 @@ impl Tissue {
         Ok(Self {
             cell_name: cell_name.to_string(),
             synapses: Arc::new(RwLock::new(synapses)),
-            balancer: LoadBalancer::new(LoadBalanceStrategy::RoundRobin),
+            _balancer: LoadBalancer::new(LoadBalanceStrategy::RoundRobin),
         })
     }
 

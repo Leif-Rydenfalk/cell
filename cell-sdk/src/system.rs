@@ -172,7 +172,6 @@ impl System {
                         }
                         MitosisSignal::Apoptosis { reason } => panic!("[System] Hypervisor Apoptosis: {}", reason),
                         MitosisSignal::Necrosis => panic!("[System] Hypervisor Necrosis."),
-                        _ => {}
                     }
                 }
             });
