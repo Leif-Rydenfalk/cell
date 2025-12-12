@@ -1,17 +1,12 @@
 use cell_sdk::*;
-use cell_sdk::test_utils::bootstrap;
 use anyhow::Result;
 
 cell_remote!(Registry = "registry");
 
-#[ctor::ctor]
-fn setup() {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    rt.block_on(async { bootstrap().await; });
-}
-
 #[tokio::test]
 async fn registry_publish_flow() {
+    cell_sdk::System::ignite_local_cluster().await.unwrap();
+
     System::spawn("registry", None).await.expect("Failed to spawn");
     let synapse = Synapse::grow_await("registry").await.expect("Failed to connect");
     let mut r = Registry::Client::new(synapse);

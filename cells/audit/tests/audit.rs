@@ -1,17 +1,12 @@
 use cell_sdk::*;
-use cell_sdk::test_utils::bootstrap;
 use anyhow::Result;
 
 cell_remote!(Audit = "audit");
 
-#[ctor::ctor]
-fn setup() {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    rt.block_on(async { bootstrap().await; });
-}
-
 #[tokio::test]
 async fn audit_chain_integrity() {
+    cell_sdk::System::ignite_local_cluster().await.unwrap();
+
     System::spawn("audit", None).await.expect("Failed to spawn");
     let synapse = Synapse::grow_await("audit").await.expect("Failed to connect");
     let mut audit = Audit::Client::new(synapse);

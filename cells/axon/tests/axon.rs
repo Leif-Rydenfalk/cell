@@ -1,18 +1,13 @@
 use cell_sdk::*;
-use cell_sdk::test_utils::bootstrap;
 use anyhow::Result;
 
 cell_remote!(Axon = "axon");
 
-#[ctor::ctor]
-fn setup() {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    rt.block_on(async { bootstrap().await; });
-}
-
 #[tokio::test]
 async fn axon_gateway_mounts_remote_cell() {
-    // Axon is auto-spawned by bootstrap.
+    cell_sdk::System::ignite_local_cluster().await.unwrap();
+
+    // Axon is auto-spawned by ignite_local_cluster.
     // We need a target cell to bridge.
     System::spawn("ledger-v2", None).await.unwrap();
     let _ = Synapse::grow_await("ledger-v2").await.unwrap();

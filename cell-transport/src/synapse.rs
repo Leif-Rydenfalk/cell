@@ -62,6 +62,19 @@ impl Synapse {
         Self::grow_with_config(connection_string, SynapseConfig::default()).await
     }
 
+    /// Attempts to connect to a cell, retrying until successful or timeout.
+    /// Useful when spawning a cell and waiting for it to be ready.
+    pub async fn grow_await(connection_string: &str) -> Result<Self> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Ok(syn) = Self::grow(connection_string).await {
+                return Ok(syn);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        bail!("Timed out waiting for '{}' to become ready", connection_string);
+    }
+
     pub async fn grow_with_config(connection_string: &str, config: SynapseConfig) -> Result<Self> {
         info!("[Synapse] Connecting to '{}'...", connection_string);
 

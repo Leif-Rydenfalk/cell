@@ -6,7 +6,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream}, parse_macro_input, DeriveInput, Item, ItemImpl, Type, FnArg, Pat, 
-    ReturnType, spanned::Spanned, Attribute, GenericArgument, PathArguments, Token, Ident, LitStr, LitBool
+    ReturnType, spanned::Spanned, Attribute, GenericArgument, PathArguments, Token, Ident, LitStr
 };
 use convert_case::{Case, Casing};
 use std::path::PathBuf;
@@ -15,7 +15,6 @@ use std::hash::{Hash, Hasher};
 use cell_transport::coordination::MacroCoordinator;
 use cell_model::macro_coordination::ExpansionContext;
 
-// [Helpers omitted for brevity...]
 fn normalize_ty(ty: &Type) -> Type {
     if let Type::Reference(type_ref) = ty {
         if let Type::Path(type_path) = &*type_ref.elem {
@@ -79,25 +78,39 @@ fn has_attr(attrs: &[Attribute], name: &str) -> bool {
 }
 
 fn locate_dna(cell_name: &str) -> PathBuf {
+    // 1. Check override
     if let Ok(p) = std::env::var("CELL_SCHEMA_PATH") {
         let path = PathBuf::from(p).join(format!("{}.rs", cell_name));
         if path.exists() { return path; }
     }
+    
+    // 2. Check global cache
     if let Some(home) = dirs::home_dir() {
         let global = home.join(".cell/schema").join(format!("{}.rs", cell_name));
         if global.exists() { return global; }
     }
+    
+    // 3. Check Workspace locations
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("No MANIFEST_DIR");
     let current_dir = std::path::Path::new(&manifest);
     
-    // We try to find the workspace root or look relative to current dir
-    // This list attempts to find the cell source from various potential calling locations (root, sdk, etc)
+    // Fix: Check if we are ALREADY inside the cell directory (common during `cargo test -p consensus`)
+    // If we are in `cells/consensus`, and cell_name is `consensus`, then `src/main.rs` is the DNA.
+    let local_src = current_dir.join("src/main.rs");
+    if local_src.exists() {
+        // Verify package name matches if possible, or just assume testing context implies match
+        // Or check `Cargo.toml`. For now, heuristic:
+        if current_dir.ends_with(cell_name) {
+            return local_src;
+        }
+    }
+
     let potential_roots = [
         current_dir.to_path_buf(),
         current_dir.parent().unwrap_or(current_dir).to_path_buf(),
-        current_dir.join("../"), // e.g. if inside cell-sdk
-        current_dir.join("../../"), // e.g. if inside examples/foo
-        current_dir.join("../../../"), // e.g. if inside examples/foo/bar
+        current_dir.join("../"), 
+        current_dir.join("../../"), 
+        current_dir.join("../../../"), 
     ];
 
     for root in potential_roots {
@@ -106,16 +119,11 @@ fn locate_dna(cell_name: &str) -> PathBuf {
             root.join("examples").join("cell-market").join(cell_name).join("src/main.rs"),
             root.join("examples").join("cell-market-bench").join("cells").join(cell_name).join("src/main.rs"),
             root.join("examples").join("cell-tissue").join(cell_name).join("src/main.rs"),
-            root.join("examples").join("cell-consensus-raft").join("src/main.rs"),
+            // Fallback for names like 'consensus-raft' mapping to 'consensus' if needed, but better to fix call site
+            root.join("cells").join(cell_name.replace("-raft", "")).join("src/main.rs"),
         ];
 
         for p in check_paths {
-            if p.exists() { return p; }
-        }
-        
-        // Fallback for special naming like consensus-raft -> cell-consensus-raft
-        if cell_name == "consensus-raft" {
-            let p = root.join("examples").join("cell-consensus-raft").join("src/main.rs");
             if p.exists() { return p; }
         }
     }
@@ -246,7 +254,6 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     });
 
-    // Fix: Cast explicitly to u64 to prevent i32 overflow type check error during macro expansion
     let mut hasher = DefaultHasher::new();
     service_name.to_string().hash(&mut hasher);
     for (n, _, _, _) in &methods { n.to_string().hash(&mut hasher); }
@@ -324,9 +331,8 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let cell_name = args.cell_name;
 
     let dna_path = locate_dna(&cell_name);
-    // If not found, panic with helpful message including search paths attempted if debug needed
     if dna_path.to_string_lossy() == "DNA_NOT_FOUND" {
-        panic!("Could not locate DNA for '{}'. Ensure the cell source exists in the workspace (cells/ or examples/).", cell_name);
+        panic!("Could not locate DNA for '{}'. Ensure the cell source exists in the workspace (cells/ or examples/). Checked CWD: {}", cell_name, std::env::current_dir().unwrap().display());
     }
 
     let file = match cell_build::load_and_flatten_source(&dna_path) {
@@ -428,7 +434,10 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
             pub struct #client_struct { conn: ::cell_sdk::Synapse }
             impl #client_struct {
                 pub fn new(conn: ::cell_sdk::Synapse) -> Self { Self { conn } }
-                pub async fn connect() -> ::anyhow::Result<Self> { Ok(Self::new(::cell_sdk::Synapse::grow(#cell_name).await?)) }
+                pub async fn connect() -> ::anyhow::Result<Self> { 
+                    // Note: This relies on "cell_name" being the socket name.
+                    Ok(Self::new(::cell_sdk::Synapse::grow(#cell_name).await?)) 
+                }
                 pub fn connection(&mut self) -> &mut ::cell_sdk::Synapse { &mut self.conn }
                 #(#client_methods)*
             }

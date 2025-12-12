@@ -1,19 +1,14 @@
 use cell_sdk::*;
-use cell_sdk::test_utils::bootstrap;
 use anyhow::Result;
 
-cell_remote!(Consensus = "consensus-raft");
-
-#[ctor::ctor]
-fn setup() {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    rt.block_on(async { bootstrap().await; });
-}
+cell_remote!(Consensus = "consensus");
 
 #[tokio::test]
 async fn consensus_raft_single_node() {
-    System::spawn("consensus-raft", None).await.expect("Failed to spawn consensus");
-    let synapse = Synapse::grow_await("consensus-raft").await.expect("Failed to connect");
+    cell_sdk::System::ignite_local_cluster().await.unwrap();
+
+    System::spawn("consensus", None).await.expect("Failed to spawn consensus");
+    let synapse = Synapse::grow_await("consensus").await.expect("Failed to connect");
     let mut c = Consensus::Client::new(synapse);
     
     let cmd = Consensus::Command { data: b"hello".to_vec() };

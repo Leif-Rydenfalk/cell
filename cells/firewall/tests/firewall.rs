@@ -1,17 +1,12 @@
 use cell_sdk::*;
-use cell_sdk::test_utils::bootstrap;
 use anyhow::Result;
 
 cell_remote!(Firewall = "firewall");
 
-#[ctor::ctor]
-fn setup() {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    rt.block_on(async { bootstrap().await; });
-}
-
 #[tokio::test]
 async fn firewall_rate_limiting() {
+    cell_sdk::System::ignite_local_cluster().await.unwrap();
+
     System::spawn("firewall", None).await.expect("Failed to spawn");
     let synapse = Synapse::grow_await("firewall").await.expect("Failed to connect");
     let mut f = Firewall::Client::new(synapse);

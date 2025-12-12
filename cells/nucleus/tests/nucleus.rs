@@ -1,18 +1,13 @@
 use cell_sdk::*;
-use cell_sdk::test_utils::bootstrap;
 use anyhow::Result;
 
 cell_remote!(Nucleus = "nucleus");
 
-#[ctor::ctor]
-fn setup() {
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    rt.block_on(async { bootstrap().await; });
-}
-
 #[tokio::test]
 async fn nucleus_keeps_registry_across_restart() {
-    // Nucleus is auto-spawned by bootstrap, but we can verify/re-connect
+    cell_sdk::System::ignite_local_cluster().await.unwrap();
+
+    // Nucleus is auto-spawned by ignite_local_cluster, but we can verify/re-connect
     let mut n = Nucleus::Client::connect().await.expect("Nucleus not running");
     
     let reg = Nucleus::CellRegistration {
