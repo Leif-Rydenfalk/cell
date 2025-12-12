@@ -15,7 +15,7 @@ impl Capsid {
     pub fn spawn(
         binary: &Path,
         socket_dir: &Path,
-        daemon_socket_path: &Path, // Renamed from umbilical_path
+        daemon_socket_path: &Path,
         args: &[&str],
         config: &CellInitConfig,
     ) -> Result<Child> {
@@ -48,30 +48,22 @@ impl Capsid {
             
             // 2. Cell runtime requirements
             .arg("--bind").arg(socket_dir).arg("/tmp/cell")
-            // Map the daemon socket (mitosis.sock) to a known location if needed, 
-            // though the Cell should find it via standard paths or just use Gap Junction for boot.
-            // We keep the bind but rename the internal target to be clear.
             .arg("--bind").arg(daemon_socket_path).arg("/tmp/mitosis.sock")
             
             // 3. The Payload
             .arg("--ro-bind").arg(binary_canonical).arg("/tmp/dna/payload");
 
-        // 4. Bind optional libs
         if Path::new("/lib").exists() { cmd.arg("--ro-bind").arg("/lib").arg("/lib"); }
         if Path::new("/lib64").exists() { cmd.arg("--ro-bind").arg("/lib64").arg("/lib64"); }
 
-        // 5. Clean IO
-        cmd.stdin(Stdio::null()); // Explicitly Null. No Umbilical.
-        cmd.stdout(Stdio::null()); // Using Gap Junction on FD 3
+        // 5. Clean IO (Gap Junction uses FD 3)
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::inherit()); 
 
         // 6. Config
         cmd.env("CELL_SOCKET_DIR", "/tmp/cell");
-        // REMOVED: cmd.env("CELL_UMBILICAL", ...); 
-        // The cell finds the daemon socket via standard paths or we don't need it for boot.
-        // If the cell needs to talk to the daemon later, it uses resolve_socket_dir joined with "mitosis.sock".
-        // In the container, that is mapped to /tmp/mitosis.sock.
-        // We can optionally set CELL_DAEMON_SOCKET env if we want to be explicit, but the standard path logic covers it.
+        // No UMBILICAL variable. Using standard path /tmp/mitosis.sock if needed.
         
         cmd.env("CELL_ORGANISM", &config.organism);
         cmd.env_remove("CELL_NODE_ID"); 
@@ -81,7 +73,6 @@ impl Capsid {
         cmd.arg("/tmp/dna/payload");
 
         // --- SPAWN WITH GAP JUNCTION ---
-        // This maps a socketpair to FD 3 in the child
         let (child, mut junction) = spawn_with_gap_junction(cmd)
             .context("Failed to spawn Capsid with Gap Junction")?;
 
@@ -89,7 +80,6 @@ impl Capsid {
         let config_clone = config.clone();
         
         std::thread::spawn(move || {
-            // Monitor the birth
             loop {
                 match junction.wait_for_signal() {
                     Ok(signal) => {
@@ -98,7 +88,6 @@ impl Capsid {
                                 let _ = junction.send_control(MitosisControl::InjectIdentity(config_clone.clone()));
                             }
                             MitosisSignal::Cytokinesis => {
-                                // Cell is independent. Close junction.
                                 break;
                             }
                             MitosisSignal::Apoptosis { reason } => {
@@ -109,10 +98,10 @@ impl Capsid {
                                 tracing::error!("Cell Necrosis.");
                                 break;
                             }
-                            _ => {} // Ignore status updates
+                            _ => {}
                         }
                     }
-                    Err(_) => break, // Connection lost
+                    Err(_) => break, 
                 }
             }
         });

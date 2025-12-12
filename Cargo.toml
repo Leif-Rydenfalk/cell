@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "cell-cli",
     "cell-core",
     "cell-codec",
     "cell-model",

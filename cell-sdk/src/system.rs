@@ -10,6 +10,7 @@ use anyhow::{Result, Context, anyhow};
 use cell_model::rkyv::Deserialize;
 use tokio::sync::OnceCell;
 use std::process::{Command, Stdio};
+use std::path::PathBuf;
 use cell_transport::gap_junction::spawn_with_gap_junction;
 
 // Tracks if we have already ignited a local cluster in this process
@@ -29,7 +30,6 @@ impl System {
             home.join(".cell/runtime/system")
         };
         
-        // Renamed from umbilical to daemon_socket
         let daemon_socket = system_dir.join("mitosis.sock");
 
         if !daemon_socket.exists() {
@@ -102,7 +102,7 @@ impl System {
             std::fs::create_dir_all(&fake_home).unwrap();
             std::env::set_var("HOME", fake_home.to_str().unwrap());
 
-            // Populate Registry logic (kept same as before)
+            // Populate Registry logic
             if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
                 let current = std::path::Path::new(&manifest);
                 let potential_roots = [
@@ -131,11 +131,21 @@ impl System {
                 }
             }
 
-            // Launch Hypervisor Daemon via Cargo
-            // Isolate build to prevent lock contention with the test runner
-            let mut cmd = Command::new("cargo");
-            cmd.arg("run").arg("--release").arg("-p").arg("hypervisor");
-            cmd.env("CARGO_TARGET_DIR", target_dir.join("target-inner")); // ISOLATION
+            // --- Binary Optimization Strategy ---
+            // If we can find the `hypervisor` binary in the build directory (because `cargo test` just built it),
+            // we execute it directly. This avoids `cargo run` trying to re-acquire the lock on `target/`.
+            
+            let mut cmd = if let Some(bin_path) = find_local_binary("hypervisor") {
+                // Optimization: Direct Execution
+                Command::new(bin_path)
+            } else {
+                // Fallback: Cargo Run with Build Isolation
+                // We use a separate target-inner dir so we don't deadlock against the outer `cargo test` lock.
+                let mut c = Command::new("cargo");
+                c.arg("run").arg("--release").arg("-p").arg("hypervisor");
+                c.env("CARGO_TARGET_DIR", target_dir.join("target-inner"));
+                c
+            };
             
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::null()); 
@@ -151,7 +161,6 @@ impl System {
                     
                     match signal {
                         MitosisSignal::RequestIdentity => {
-                            // The Hypervisor constructs its own identity, but we must send config
                             let socket_path = target_dir.join("runtime/system/mitosis.sock");
                             let config = CellInitConfig {
                                 node_id: 100, // System Node
@@ -164,14 +173,13 @@ impl System {
                             junction.send_control(MitosisControl::InjectIdentity(config))
                                 .expect("Failed to inject identity");
                         }
-                        MitosisSignal::Prophase => { /* Gestating... */ }
-                        MitosisSignal::Prometaphase { socket_path: _ } => { /* Binding... */ }
                         MitosisSignal::Cytokinesis => {
                             println!("[System] Hypervisor Cytokinesis complete.");
                             break; // Success
                         }
                         MitosisSignal::Apoptosis { reason } => panic!("[System] Hypervisor Apoptosis: {}", reason),
                         MitosisSignal::Necrosis => panic!("[System] Hypervisor Necrosis."),
+                        _ => {}
                     }
                 }
             });
@@ -181,5 +189,23 @@ impl System {
         }).await;
         
         Ok(())
+    }
+}
+
+fn find_local_binary(name: &str) -> Option<PathBuf> {
+    // Current exe is usually target/debug/deps/testname-hash
+    let current_exe = std::env::current_exe().ok()?;
+    
+    // We assume standard cargo structure:
+    // exe -> deps -> debug/release -> target
+    let build_dir = current_exe.parent()?.parent()?;
+    
+    let binary_name = if cfg!(windows) { format!("{}.exe", name) } else { name.to_string() };
+    let candidate = build_dir.join(&binary_name);
+    
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
     }
 }

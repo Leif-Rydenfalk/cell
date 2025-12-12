@@ -31,7 +31,6 @@ impl MyceliumRoot {
         };
 
         tokio::fs::create_dir_all(&socket_dir).await?;
-        // Renamed from umbilical to daemon_socket
         let daemon_socket = socket_dir.join("mitosis.sock");
 
         if daemon_socket.exists() { tokio::fs::remove_file(&daemon_socket).await?; }
@@ -39,7 +38,7 @@ impl MyceliumRoot {
 
         info!("[Root] Daemon Booting...");
 
-        // 1. Bootstrap Phase: Ensure Kernel Cells are running
+        // 1. Bootstrap Phase
         Self::bootstrap_kernel_cell("builder").await?;
         Self::bootstrap_kernel_cell("hypervisor").await?;
 
@@ -74,7 +73,6 @@ impl MyceliumRoot {
         use cell_transport::gap_junction::spawn_with_gap_junction;
         use cell_model::protocol::{MitosisSignal, MitosisControl};
         
-        // Check if already running
         let socket = cell_sdk::resolve_socket_dir().join(format!("{}.sock", name));
         if socket.exists() {
             if tokio::net::UnixStream::connect(&socket).await.is_ok() {
@@ -94,14 +92,12 @@ impl MyceliumRoot {
         if let Ok(h) = std::env::var("HOME") { cmd.env("HOME", h); }
         cmd.env("CELL_NODE_ID", "0"); 
 
-        // Gap Junction setup - NO UMBILICAL ENV VAR
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null()); 
         cmd.stderr(std::process::Stdio::inherit());
 
         let (_child, mut junction) = spawn_with_gap_junction(cmd)?;
 
-        // Handshake
         let config = CellInitConfig {
             node_id: 0,
             cell_name: name.to_string(),
@@ -129,7 +125,6 @@ impl MyceliumRoot {
     }
 
     async fn handle_request(&self, mut stream: UnixStream) -> Result<()> {
-        // 1. Read Request
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
@@ -139,7 +134,6 @@ impl MyceliumRoot {
         let req = rkyv::check_archived_root::<MitosisRequest>(&buf)
             .map_err(|e| anyhow::anyhow!("Protocol Violation: {}", e))?;
 
-        // 2. Delegate to Hypervisor Cell
         let mut hypervisor = Hypervisor::Client::connect().await
             .context("Kernel Panic: Hypervisor unreachable")?;
 
@@ -147,11 +141,9 @@ impl MyceliumRoot {
             ArchivedMitosisRequest::Spawn { cell_name, config } => {
                 let name = cell_name.to_string();
                 
-                // Resolve Config
                 let final_config = if let rkyv::option::ArchivedOption::Some(c) = config {
                     c.deserialize(&mut rkyv::Infallible).unwrap()
                 } else {
-                    // Root Default: System Scope
                     let socket_path = self.socket_dir.join(format!("{}.sock", name));
                     CellInitConfig {
                         node_id: rand::random(),
@@ -162,7 +154,6 @@ impl MyceliumRoot {
                     }
                 };
 
-                // Use the generated client method `spawn`
                 match hypervisor.spawn(name, Some(final_config.clone())).await {
                     Ok(_) => {
                         let resp = MitosisResponse::Ok { socket_path: final_config.socket_path };
