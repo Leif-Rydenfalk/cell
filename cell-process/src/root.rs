@@ -15,7 +15,7 @@ use rkyv::Deserialize;
 
 pub struct MyceliumRoot {
     socket_dir: PathBuf,
-    dna_path: PathBuf,
+    registry_path: PathBuf,
     umbilical_path: PathBuf,
 }
 
@@ -26,27 +26,27 @@ impl MyceliumRoot {
             PathBuf::from(p)
         } else {
             let home = dirs::home_dir().context("Home dir not found")?;
-            home.join(".cell/run")
+            home.join(".cell/runtime/system")
         };
 
-        let dna_path = if let Ok(p) = std::env::var("CELL_DNA_DIR") {
+        let registry_path = if let Ok(p) = std::env::var("CELL_REGISTRY_DIR") {
             PathBuf::from(p)
         } else {
             let home = dirs::home_dir().context("Home dir not found")?;
-            home.join(".cell/dna")
+            home.join(".cell/registry")
         };
 
         let umbilical_path = socket_dir.join("mitosis.sock");
 
         tokio::fs::create_dir_all(&socket_dir).await?;
-        tokio::fs::create_dir_all(&dna_path).await?;
+        tokio::fs::create_dir_all(&registry_path).await?;
 
         if umbilical_path.exists() { tokio::fs::remove_file(&umbilical_path).await?; }
         let listener = UnixListener::bind(&umbilical_path)?;
         
         info!("[Root] System Hypervisor Active at {:?}", umbilical_path);
 
-        let root = Self { socket_dir, dna_path, umbilical_path };
+        let root = Self { socket_dir, registry_path, umbilical_path };
         let r = root.clone();
         
         tokio::spawn(async move {
@@ -68,7 +68,7 @@ impl MyceliumRoot {
     fn clone(&self) -> Self {
         Self { 
             socket_dir: self.socket_dir.clone(), 
-            dna_path: self.dna_path.clone(),
+            registry_path: self.registry_path.clone(),
             umbilical_path: self.umbilical_path.clone(),
         }
     }
@@ -86,13 +86,13 @@ impl MyceliumRoot {
         match req {
             ArchivedMitosisRequest::Spawn { cell_name, config: maybe_config } => { 
                 let name_str = cell_name.to_string();
-                let source = self.dna_path.join(&name_str);
+                let source = self.registry_path.join(&name_str);
                 
                 if !source.exists() {
-                    return self.deny(&mut stream, &format!("DNA not found: {}", name_str)).await;
+                    return self.deny(&mut stream, &format!("Cell not found in registry: {}", name_str)).await;
                 }
 
-                // 1. Compile
+                // 1. Compile (Ribosome handles caching in ~/.cell/bin)
                 let binary = match Ribosome::synthesize(&source, &name_str) {
                     Ok(b) => b,
                     Err(e) => return self.deny(&mut stream, &e.to_string()).await,
@@ -101,18 +101,16 @@ impl MyceliumRoot {
                 // 2. Resolve Configuration
                 let final_config = match maybe_config {
                     ArchivedOption::Some(archived_cfg) => {
-                        // Deserialize the strict config from the request
-                        // We use rkyv::Infallible because CellInitConfig is simple data
                         let cfg: CellInitConfig = archived_cfg.deserialize(&mut rkyv::Infallible).unwrap();
                         cfg
                     },
                     ArchivedOption::None => {
-                        // Default / Auto-Generate
+                        // Auto-Generate defaults
                         CellInitConfig {
                             node_id: rand::random(),
                             cell_name: name_str.clone(),
                             peers: vec![],
-                            socket_path: format!("/tmp/cell/{}.sock", name_str),
+                            socket_path: self.socket_dir.join(format!("{}.sock", name_str)).to_string_lossy().to_string(),
                         }
                     }
                 };

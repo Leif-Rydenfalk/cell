@@ -10,10 +10,50 @@ use syn::visit_mut::VisitMut;
 use quote::{quote, format_ident, ToTokens};
 use convert_case::{Case, Casing};
 
+/// Registers the current project in the local Cell Registry.
+/// Should be called from build.rs.
+pub fn register() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let pkg_name = std::env::var("CARGO_PKG_NAME").unwrap();
+    
+    // Default registry path
+    let home = dirs::home_dir().expect("No HOME directory");
+    let registry = home.join(".cell/registry");
+    
+    if let Err(e) = fs::create_dir_all(&registry) {
+        println!("cargo:warning=Failed to create cell registry: {}", e);
+        return;
+    }
+    
+    let link_path = registry.join(&pkg_name);
+    let target_path = Path::new(&manifest_dir);
+
+    // Idempotent symlink creation
+    if link_path.exists() {
+        if let Ok(existing) = fs::read_link(&link_path) {
+            if existing == target_path {
+                return; // Already registered
+            }
+        }
+        let _ = fs::remove_file(&link_path);
+    }
+
+    #[cfg(unix)]
+    {
+        if let Err(e) = std::os::unix::fs::symlink(target_path, &link_path) {
+            println!("cargo:warning=Failed to register cell '{}': {}", pkg_name, e);
+        } else {
+            println!("cargo:warning=Registered cell '{}' in ~/.cell/registry", pkg_name);
+        }
+    }
+}
+
 pub struct CellBuilder {
     cell_name: String,
     source_path: PathBuf,
 }
+
+// ... [Rest of file remains unchanged] ...
 
 /// Helper for recursive module flattening, exposed for use by cell-macros
 pub fn load_and_flatten_source(entry_path: &Path) -> Result<File> {
@@ -39,14 +79,9 @@ pub fn load_and_flatten_source(entry_path: &Path) -> Result<File> {
 
 impl CellBuilder {
     pub fn configure() -> Self {
-        // Auto-detection logic for "Industrial One-Liner" support
         let cell_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "unknown".to_string());
         let source_path = PathBuf::from(".");
-        
-        Self {
-            cell_name,
-            source_path,
-        }
+        Self { cell_name, source_path }
     }
 
     pub fn register(mut self, name: &str, path: impl AsRef<Path>) -> Self {
@@ -85,8 +120,6 @@ impl CellBuilder {
         fs::create_dir_all(&macro_dir)?;
         fs::create_dir_all(macro_dir.join("src"))?;
         
-        // Generate Cargo.toml
-        // We now depend on cell-transport to use MacroCoordinator
         let cargo_toml = format!(r#"[package]
 name = "{}-macros"
 version = "0.1.0"
@@ -108,11 +141,9 @@ tokio = {{ version = "1", features = ["full"] }}
         
         fs::write(macro_dir.join("Cargo.toml"), cargo_toml)?;
         
-        // Generate lib.rs
         let lib_rs = self.generate_macro_lib_code(macros)?;
         fs::write(macro_dir.join("src/lib.rs"), lib_rs)?;
         
-        // Compile it
         let status = Command::new("cargo")
             .arg("build")
             .arg("--release")
@@ -126,7 +157,6 @@ tokio = {{ version = "1", features = ["full"] }}
             bail!("Failed to compile macro crate for {}", self.cell_name);
         }
         
-        // Generate manifest.json for caching macro definitions
         let manifest = self.generate_macro_manifest(macros)?;
         fs::write(macro_dir.join("manifest.json"), manifest)?;
 
@@ -187,7 +217,6 @@ tokio = {{ version = "1", features = ["full"] }}
     }
 
     pub fn generate(self) -> Result<()> {
-        // Ensure OUT_DIR exists
         let out_dir = std::env::var("OUT_DIR").context("OUT_DIR not set. Are you running this from build.rs?")?;
         let dest_path = Path::new(&out_dir).join(format!("{}_client.rs", self.cell_name));
 
@@ -202,7 +231,6 @@ tokio = {{ version = "1", features = ["full"] }}
             lib_path
         };
 
-        // Flatten source
         let file = load_and_flatten_source(&entry_point)?;
 
         let mut proteins = Vec::new();
@@ -337,7 +365,7 @@ tokio = {{ version = "1", features = ["full"] }}
     }
 }
 
-// Helpers
+// ... [ModuleFlattener and helpers remain unchanged] ...
 fn visit_items_for_dna<'a>(
     items: &'a [Item], 
     proteins: &mut Vec<&'a Item>, 
@@ -417,30 +445,18 @@ impl VisitMut for ModuleFlattener {
     }
 }
 
-// Data structure for proc macros
 struct ProcMacroItem {
     item: Item,
 }
 
-#[allow(dead_code)]
-enum ProcMacroKind {
-    Attribute,
-    Derive,
-    Function,
-}
-
-// Extract all #[cell_macro] items that are proc macros
 fn extract_proc_macros(file: &File) -> Vec<ProcMacroItem> {
     let mut macros = Vec::new();
-    
     fn visit_items(items: &[Item], macros: &mut Vec<ProcMacroItem>) {
         for item in items {
-            // Check if item has #[cell_macro]
             let has_cell_macro = match item {
                 Item::Fn(_) => has_attr(item, "cell_macro"),
                 _ => false,
             };
-            
             if !has_cell_macro {
                 if let Item::Mod(m) = item {
                     if let Some((_, items)) = &m.content {
@@ -449,12 +465,9 @@ fn extract_proc_macros(file: &File) -> Vec<ProcMacroItem> {
                 }
                 continue;
             }
-            
-            // It is a cell macro, keep it
             macros.push(ProcMacroItem { item: item.clone() });
         }
     }
-    
     visit_items(&file.items, &mut macros);
     macros
 }
@@ -464,7 +477,5 @@ fn has_attr(item: &Item, name: &str) -> bool {
         Item::Fn(f) => &f.attrs,
         _ => return false,
     };
-    
-    attrs.iter().any(|a| a.path().is_ident(name) || 
-        (a.path().segments.len() == 2 && a.path().segments[1].ident == name))
+    attrs.iter().any(|a| a.path().is_ident(name) || (a.path().segments.len() == 2 && a.path().segments[1].ident == name))
 }

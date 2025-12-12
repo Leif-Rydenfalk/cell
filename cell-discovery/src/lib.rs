@@ -59,17 +59,13 @@ impl Discovery {
         }
 
         // Add Local nodes
-        // Note: For local nodes, we might not know the instance_id without connecting.
-        // We assume 0 or derive from hash for now to distinguish them if needed.
         let socket_dir = resolve_socket_dir();
         for name in local_names {
             let path = socket_dir.join(format!("{}.sock", name));
             
-            // Check if we already have this node via LAN (unlikely if loopback is filtered, but possible)
-            // For now, treat local sockets as distinct "instances" of the cell name.
             nodes.push(CellNode {
                 name,
-                instance_id: 0, // Unknown without handshake
+                instance_id: 0, 
                 lan_address: None,
                 local_socket: Some(path),
                 status: CellStatus::default(),
@@ -82,15 +78,19 @@ impl Discovery {
 }
 
 pub fn resolve_socket_dir() -> PathBuf {
+    // 1. Env Override (CI/Test)
     if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
         return PathBuf::from(p);
     }
-    let container_dir = std::path::Path::new("/tmp/cell");
-    if container_dir.exists() {
-        return container_dir.to_path_buf();
+
+    // 2. Default Hierarchy
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let base = home.join(".cell/runtime");
+
+    // 3. Scope Resolution (System vs Organism)
+    if let Ok(org) = std::env::var("CELL_ORGANISM") {
+        base.join(org)
+    } else {
+        base.join("system")
     }
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".cell/run");
-    }
-    PathBuf::from("/tmp/cell")
 }

@@ -18,12 +18,15 @@ impl Ribosome {
             anyhow::bail!("Invalid cell name length");
         }
 
-        let cache_dir = dirs::home_dir().unwrap().join(".cell/cache");
-        let protein_dir = cache_dir.join("proteins").join(cell_name);
+        // New Layout: ~/.cell/bin (was .cell/cache/proteins)
+        let home = dirs::home_dir().unwrap();
+        let bin_dir = home.join(".cell/bin");
+        let meta_dir = home.join(".cell/bin/.meta").join(cell_name);
 
-        fs::create_dir_all(&protein_dir)?;
+        fs::create_dir_all(&bin_dir)?;
+        fs::create_dir_all(&meta_dir)?;
 
-        let lock_path = protein_dir.join("ribosome.lock");
+        let lock_path = meta_dir.join("ribosome.lock");
         let lock_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -33,10 +36,15 @@ impl Ribosome {
         let mut locker = RwLock::new(lock_file);
         let _guard = locker.write()?;
 
-        let binary_path = protein_dir.join("release").join(cell_name);
-        let hash_file_path = protein_dir.join("dna.hash");
-
-        let current_hash = Self::compute_dna_hash(source_path)?;
+        // Resolve symlink to get actual source for hashing
+        let actual_source = fs::canonicalize(source_path).context("Failed to resolve source path")?;
+        
+        let current_hash = Self::compute_dna_hash(&actual_source)?;
+        
+        // Binary name includes hash for content addressing? 
+        // Or we keep simple name and check hash? Simple name is easier for Capsid.
+        let binary_path = bin_dir.join(cell_name);
+        let hash_file_path = meta_dir.join("dna.hash");
 
         if binary_path.exists() && hash_file_path.exists() {
             let cached_hash = fs::read_to_string(&hash_file_path).unwrap_or_default();
@@ -55,13 +63,13 @@ impl Ribosome {
         let mut cmd = Command::new("cargo");
         cmd.arg("build").arg("--release");
 
-        if source_path.join("vendor").exists() {
+        if actual_source.join("vendor").exists() {
             cmd.arg("--offline");
         }
 
         let status = cmd
-            .current_dir(source_path)
-            .env("CARGO_TARGET_DIR", &protein_dir)
+            .current_dir(&actual_source)
+            .env("CARGO_TARGET_DIR", &meta_dir.join("target")) // Build artifacts in meta to keep bin clean
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::inherit())
             .status()
@@ -71,10 +79,14 @@ impl Ribosome {
             anyhow::bail!("Ribosome failed to compile {}", cell_name);
         }
 
-        if !binary_path.exists() {
-            anyhow::bail!("Compiler finished but binary missing at {:?}", binary_path);
+        // Locate the artifact
+        let built_binary = meta_dir.join("target/release").join(cell_name);
+        if !built_binary.exists() {
+            anyhow::bail!("Compiler finished but binary missing at {:?}", built_binary);
         }
 
+        // Install to bin
+        fs::copy(&built_binary, &binary_path)?;
         fs::write(&hash_file_path, current_hash)?;
 
         Ok(binary_path)
@@ -84,7 +96,6 @@ impl Ribosome {
         let mut hasher = blake3::Hasher::new();
         let mut files = Vec::new();
 
-        // Include Toolchain Version in Hash for Reproducibility
         let rustc_version = Command::new("rustc")
             .arg("--version")
             .output()
@@ -92,7 +103,6 @@ impl Ribosome {
             .unwrap_or_else(|_| "unknown".to_string());
         hasher.update(rustc_version.as_bytes());
 
-        // Include Cargo.lock if present
         let lockfile = path.join("Cargo.lock");
         if lockfile.exists() {
              if let Ok(content) = fs::read(&lockfile) {
