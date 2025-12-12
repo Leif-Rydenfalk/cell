@@ -10,9 +10,19 @@ pub use cell_model::*;
 // === MACROS ===
 pub use cell_macros::{cell_remote, handler, protein, service, cell_macro, expand};
 
-// === TRANSPORT (Required for basic RPC) ===
+// === TRANSPORT ===
 #[cfg(feature = "transport")]
 pub use cell_transport::{Membrane, Synapse, Response, resolve_socket_dir};
+
+// === SYSTEM CLIENT (Orchestration) ===
+#[cfg(feature = "transport")]
+pub mod system;
+#[cfg(feature = "transport")]
+pub use system::System;
+
+// === PROCESS MANAGEMENT (Daemon) ===
+#[cfg(feature = "process")]
+pub use cell_process as process;
 
 // === TISSUE ===
 #[cfg(feature = "transport")]
