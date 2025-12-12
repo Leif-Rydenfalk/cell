@@ -1,12 +1,12 @@
 use anyhow::{Result, bail};
 use cell_sdk::{cell_remote, service, handler, protein};
 use cell_sdk as cell;
-use tracing::{info, error};
+use tracing::{info};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 cell_remote!(Ledger = "ledger");
-cell_remote!(Consensus = "consensus-raft");
+cell_remote!(Consensus = "consensus"); // Changed from "consensus-raft" to "consensus" to match DNA
 
 #[protein]
 pub enum Side { Buy, Sell }
@@ -32,7 +32,10 @@ impl EngineService {
         };
 
         let mut client = self.state.ledger.lock().await;
-        let result = client.lock_funds(user, asset, lock_amt).await?;
+        
+        // Ledger returns Result<bool, CellError> (unwrapped by macro from Result<Result<bool, AppError>>)
+        // Let's assume the macro fix is applied, so it returns Result<bool, CellError>
+        let result = client.lock_funds(user, asset, lock_amt).await;
 
         match result {
             Ok(true) => {
@@ -41,6 +44,9 @@ impl EngineService {
                 let cmd = Consensus::Command { data: order_data };
                 
                 let mut consensus = self.state.consensus.lock().await;
+                // Propose returns Result<u64, CellError> (or ProposeResult?)
+                // Consensus handler returns Result<ProposeResult>
+                // So client returns Result<ProposeResult, CellError>
                 let _ = consensus.propose(cmd).await?;
                 
                 info!("[Engine] Order logged to consensus");
@@ -57,6 +63,10 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
     info!("[Engine] Online");
 
+    // Hydrate Identity (Critical for 'stem cell' behavior if this was being deployed)
+    // But this is an example app.
+    
+    // Connect to dependencies
     let ledger_client = Ledger::connect().await?;
     let consensus_client = Consensus::connect().await?;
 

@@ -21,9 +21,21 @@ pub struct MyceliumRoot {
 
 impl MyceliumRoot {
     pub async fn ignite() -> Result<Self> {
-        let home = dirs::home_dir().context("Home dir not found")?;
-        let socket_dir = home.join(".cell/run");
-        let dna_path = home.join(".cell/dna");
+        // Respect environment variables for paths to support testing/custom layouts
+        let socket_dir = if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
+            PathBuf::from(p)
+        } else {
+            let home = dirs::home_dir().context("Home dir not found")?;
+            home.join(".cell/run")
+        };
+
+        let dna_path = if let Ok(p) = std::env::var("CELL_DNA_DIR") {
+            PathBuf::from(p)
+        } else {
+            let home = dirs::home_dir().context("Home dir not found")?;
+            home.join(".cell/dna")
+        };
+
         let umbilical_path = socket_dir.join("mitosis.sock");
 
         tokio::fs::create_dir_all(&socket_dir).await?;
@@ -90,6 +102,7 @@ impl MyceliumRoot {
                 let final_config = match maybe_config {
                     ArchivedOption::Some(archived_cfg) => {
                         // Deserialize the strict config from the request
+                        // We use rkyv::Infallible because CellInitConfig is simple data
                         let cfg: CellInitConfig = archived_cfg.deserialize(&mut rkyv::Infallible).unwrap();
                         cfg
                     },
@@ -105,7 +118,6 @@ impl MyceliumRoot {
                 };
 
                 // 3. Inject & Spawn
-                // Note: Passing empty args list &[]
                 match Capsid::spawn(&binary, &self.socket_dir, &self.umbilical_path, &[], &final_config) {
                     Ok(_) => {
                         let resp = MitosisResponse::Ok { socket_path: final_config.socket_path };

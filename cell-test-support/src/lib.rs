@@ -10,7 +10,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use std::sync::Arc;
 use std::collections::HashMap;
-use tracing::info;
 use cell_sdk::rkyv::Deserialize;
 
 static ROOT: OnceCell<Arc<MyceliumRoot>> = OnceCell::const_new();
@@ -38,7 +37,7 @@ pub async fn spawn(cell_name: &str) -> Synapse {
 }
 
 /// Spawn with specific configuration (environment variables)
-pub async fn spawn_with_config(cell_name: &str, _config: HashMap<String, String>) -> Synapse {
+pub async fn spawn_with_config(cell_name: &str, config: HashMap<String, String>) -> Synapse {
     let _ = root().await;
     let socket_dir = cell_transport::resolve_socket_dir();
     let umbilical = socket_dir.join("mitosis.sock");
@@ -53,13 +52,57 @@ pub async fn spawn_with_config(cell_name: &str, _config: HashMap<String, String>
     }
     let mut stream = stream.expect("Failed to connect to Umbilical");
 
-    // In the new architecture, the Test Harness acts as the Orchestrator.
-    // We construct the strict configuration here.
-    let init_config = CellInitConfig {
-        node_id: rand::random(),
-        cell_name: cell_name.to_string(),
-        peers: vec![],
-        socket_path: format!("/tmp/cell/{}.sock", cell_name),
+    // ORCHESTRATOR LOGIC (Test Harness implementation)
+    // Map the string configuration to the strict CellInitConfig
+    // NOTE: This logic was previously hardcoded in the SDK. It has been moved here
+    // because specific topology knowledge belongs in the deployment/test layer, not the library.
+    let init_config = if let Some(identity_str) = config.get("CELL_IDENTITY") {
+        match identity_str.as_str() {
+            "Alpha" => CellInitConfig {
+                node_id: 1,
+                cell_name: cell_name.to_string(),
+                peers: vec![
+                    PeerConfig { node_id: 2, address: "Beta".to_string() },
+                    PeerConfig { node_id: 3, address: "Gamma".to_string() },
+                ],
+                socket_path: format!("/tmp/cell/{}.sock", cell_name),
+            },
+            "Beta" => CellInitConfig {
+                node_id: 2,
+                cell_name: cell_name.to_string(),
+                peers: vec![
+                    PeerConfig { node_id: 1, address: "Alpha".to_string() },
+                    PeerConfig { node_id: 3, address: "Gamma".to_string() },
+                ],
+                socket_path: format!("/tmp/cell/{}.sock", cell_name),
+            },
+            "Gamma" => CellInitConfig {
+                node_id: 3,
+                cell_name: cell_name.to_string(),
+                peers: vec![
+                    PeerConfig { node_id: 1, address: "Alpha".to_string() },
+                    PeerConfig { node_id: 2, address: "Beta".to_string() },
+                ],
+                socket_path: format!("/tmp/cell/{}.sock", cell_name),
+            },
+            _ => {
+                // Fallback for custom named identities
+                CellInitConfig {
+                    node_id: rand::random(),
+                    cell_name: cell_name.to_string(),
+                    peers: vec![],
+                    socket_path: format!("/tmp/cell/{}.sock", cell_name),
+                }
+            }
+        }
+    } else {
+        // No Identity provided, generic dynamic node
+        CellInitConfig {
+            node_id: rand::random(),
+            cell_name: cell_name.to_string(),
+            peers: vec![],
+            socket_path: format!("/tmp/cell/{}.sock", cell_name),
+        }
     };
 
     let req = MitosisRequest::Spawn { 
