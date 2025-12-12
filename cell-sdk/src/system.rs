@@ -87,71 +87,65 @@ impl System {
             target_dir.push("target");
             target_dir.push("cell-cluster");
             
-            if target_dir.exists() {
-                let _ = std::fs::remove_dir_all(&target_dir);
+            // Only clean runtime state to preserve build artifacts if they exist
+            let runtime_dir = target_dir.join("runtime");
+            if runtime_dir.exists() {
+                let _ = std::fs::remove_dir_all(&runtime_dir);
             }
             std::fs::create_dir_all(&target_dir).unwrap();
+            std::fs::create_dir_all(target_dir.join("registry")).unwrap();
+            
+            let fake_home = target_dir.join("home");
+            std::fs::create_dir_all(&fake_home).unwrap();
 
-            // Config for the Daemon Process
+            // Env Config
             std::env::set_var("CELL_SOCKET_DIR", target_dir.join("runtime/system").to_str().unwrap());
             std::env::set_var("CELL_REGISTRY_DIR", target_dir.join("registry").to_str().unwrap());
             std::env::set_var("CELL_DISABLE_SHM", "0");
             std::env::set_var("CELL_NODE_ID", "100");
-            
-            let fake_home = target_dir.join("home");
-            std::fs::create_dir_all(&fake_home).unwrap();
             std::env::set_var("HOME", fake_home.to_str().unwrap());
 
-            // Populate Registry logic
+            // Populate Registry (Symlinks)
             if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
                 let current = std::path::Path::new(&manifest);
-                let potential_roots = [
-                    current.to_path_buf(),
-                    current.parent().unwrap().to_path_buf(),
-                    current.join("../"),
-                    current.join("../../"),
-                ];
                 let registry = target_dir.join("registry");
-                std::fs::create_dir_all(&registry).unwrap();
-                for root in potential_roots {
-                    let candidates = [root.join("cells"), root.join("examples")];
-                    for candidate in candidates {
-                        if candidate.exists() {
-                            if let Ok(entries) = std::fs::read_dir(candidate) {
-                                for entry in entries.flatten() {
-                                    if entry.path().is_dir() && entry.path().join("Cargo.toml").exists() {
-                                        let name = entry.file_name();
-                                        #[cfg(unix)]
-                                        let _ = std::os::unix::fs::symlink(entry.path(), registry.join(name));
-                                    }
+                let link_cells = |root: PathBuf| {
+                    if root.exists() {
+                        if let Ok(entries) = std::fs::read_dir(root) {
+                            for entry in entries.flatten() {
+                                if entry.path().is_dir() && entry.path().join("Cargo.toml").exists() {
+                                    let name = entry.file_name();
+                                    #[cfg(unix)]
+                                    let _ = std::os::unix::fs::symlink(entry.path(), registry.join(name));
                                 }
                             }
                         }
                     }
-                }
+                };
+                link_cells(current.join("cells"));
+                link_cells(current.join("examples"));
+                link_cells(current.parent().unwrap().join("cells")); 
             }
 
             // --- Binary Optimization Strategy ---
-            // If we can find the `hypervisor` binary in the build directory (because `cargo test` just built it),
-            // we execute it directly. This avoids `cargo run` trying to re-acquire the lock on `target/`.
-            
             let mut cmd = if let Some(bin_path) = find_local_binary("hypervisor") {
-                // Optimization: Direct Execution
+                // Best Case: Binary already exists from previous build
                 Command::new(bin_path)
             } else {
-                // Fallback: Cargo Run with Build Isolation
-                // We use a separate target-inner dir so we don't deadlock against the outer `cargo test` lock.
+                // Fallback: Build it now.
+                // KEY FIX: Removed `--release` and `CARGO_TARGET_DIR` override.
+                // This allows reusing the artifacts `cargo test` just compiled (debug profile, main target dir).
+                // It prevents recompiling libc/syn/serde from scratch.
                 let mut c = Command::new("cargo");
-                c.arg("run").arg("--release").arg("-p").arg("hypervisor");
-                c.env("CARGO_TARGET_DIR", target_dir.join("target-inner"));
+                c.arg("run").arg("-p").arg("hypervisor");
                 c
             };
             
+            // Setup Gap Junction
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::null()); 
             cmd.stderr(Stdio::inherit()); 
 
-            // Spawn with Gap Junction (FD 3)
             let (_child, mut junction) = spawn_with_gap_junction(cmd).expect("Failed to spawn Hypervisor with Gap Junction");
 
             // The Progenitor Loop (Blocking wait on Junction)
@@ -173,13 +167,14 @@ impl System {
                             junction.send_control(MitosisControl::InjectIdentity(config))
                                 .expect("Failed to inject identity");
                         }
+                        MitosisSignal::Prophase => { /* Gestating... */ }
+                        MitosisSignal::Prometaphase { socket_path: _ } => { /* Binding... */ }
                         MitosisSignal::Cytokinesis => {
                             println!("[System] Hypervisor Cytokinesis complete.");
                             break; // Success
                         }
                         MitosisSignal::Apoptosis { reason } => panic!("[System] Hypervisor Apoptosis: {}", reason),
                         MitosisSignal::Necrosis => panic!("[System] Hypervisor Necrosis."),
-                        _ => {}
                     }
                 }
             });
@@ -193,19 +188,21 @@ impl System {
 }
 
 fn find_local_binary(name: &str) -> Option<PathBuf> {
-    // Current exe is usually target/debug/deps/testname-hash
+    // Attempt to find binary in standard cargo locations
     let current_exe = std::env::current_exe().ok()?;
-    
-    // We assume standard cargo structure:
-    // exe -> deps -> debug/release -> target
     let build_dir = current_exe.parent()?.parent()?;
     
     let binary_name = if cfg!(windows) { format!("{}.exe", name) } else { name.to_string() };
-    let candidate = build_dir.join(&binary_name);
     
-    if candidate.exists() {
-        Some(candidate)
-    } else {
-        None
+    // Prioritize debug since we are likely in `cargo test`
+    let candidates = [
+        build_dir.join("debug").join(&binary_name),
+        build_dir.join("release").join(&binary_name),
+        current_exe.parent()?.join(&binary_name),
+    ];
+    
+    for c in candidates {
+        if c.exists() { return Some(c); }
     }
+    None
 }

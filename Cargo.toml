@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "cell-cli",
     "cell-core",
     "cell-codec",
     "cell-model",
@@ -12,6 +11,7 @@ members = [
     "cell-macros",
     "cell-build",
     "cell-bind",
+    "cell-cli",
     "cells/consensus",
     "cells/dht",
     "cells/registry",
@@ -22,6 +22,20 @@ members = [
     "cells/metrics",
     "cells/builder",
     "cells/hypervisor",
+    "cells/axon",          # <--- Added
+    "cells/firewall",
+    "cells/drift",
+    "cells/iam",
+    "cells/audit",
+    "cells/vault",
+    "cells/backup",
+    "cells/loadbalancer",
+    "cells/trace",
+    "cells/canary",
+    "cells/config",
+    "cells/chaos",
+    "cells/ca",
+    "cells/observer",
     "examples/cell-market/ledger",
     "examples/cell-market/engine",
     "examples/cell-market/gateway",

@@ -6,9 +6,10 @@ mod capsid;
 
 use capsid::Capsid;
 use cell_sdk::cell_remote;
-use cell_model::protocol::{MitosisRequest, MitosisResponse, TestEvent};
+use cell_model::protocol::{MitosisRequest, MitosisResponse, MitosisSignal, MitosisControl, TestEvent};
 use cell_model::config::CellInitConfig;
-use anyhow::{Context, Result};
+use cell_transport::GapJunction;
+use anyhow::{Context, Result, anyhow};
 use std::path::PathBuf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -18,7 +19,6 @@ use rkyv::Deserialize;
 // Remote interface to Builder
 cell_remote!(Builder = "builder");
 
-// --- INTERFACE DEFINITION FOR CELL_REMOTE! SCANNER ---
 #[cell_sdk::service]
 struct HypervisorService;
 
@@ -30,7 +30,6 @@ impl HypervisorService {
         Ok(())
     }
 }
-// ----------------------------------------------------
 
 pub struct Hypervisor {
     system_socket_dir: PathBuf,
@@ -39,8 +38,22 @@ pub struct Hypervisor {
 
 impl Hypervisor {
     pub async fn ignite() -> Result<()> {
-        let home = dirs::home_dir().expect("No HOME");
+        // 1. Establish Gap Junction immediately
+        let mut junction = unsafe { GapJunction::open_daughter().expect("Failed to open Gap Junction") };
         
+        // 2. Prophase
+        junction.signal(MitosisSignal::Prophase)?;
+
+        // 3. Request Identity (Handshake)
+        junction.signal(MitosisSignal::RequestIdentity)?;
+        let control = junction.wait_for_control()?;
+        let _identity = match control {
+            MitosisControl::InjectIdentity(c) => c,
+            MitosisControl::Terminate => return Err(anyhow!("Terminated by System")),
+        };
+
+        // 4. Setup Environment
+        let home = dirs::home_dir().expect("No HOME");
         let system_socket_dir = if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
             PathBuf::from(p)
         } else {
@@ -53,6 +66,11 @@ impl Hypervisor {
         if daemon_socket_path.exists() { tokio::fs::remove_file(&daemon_socket_path).await?; }
         let listener = UnixListener::bind(&daemon_socket_path)?;
 
+        // 5. Prometaphase (Membrane Bound)
+        junction.signal(MitosisSignal::Prometaphase { 
+            socket_path: daemon_socket_path.to_string_lossy().to_string() 
+        })?;
+
         info!("[Hypervisor] Kernel Active. Listening on {:?}", daemon_socket_path);
 
         let hv = Self { 
@@ -60,10 +78,18 @@ impl Hypervisor {
             daemon_socket_path: daemon_socket_path.clone()
         };
 
-        hv.bootstrap_kernel_cell("builder").await?;
+        // 6. Bootstrap Kernel Cells
+        // Crucial: We must spawn Nucleus BEFORE Builder to avoid deadlock in Builder's boot.
         hv.bootstrap_kernel_cell("nucleus").await?;
         hv.bootstrap_kernel_cell("axon").await?;
+        hv.bootstrap_kernel_cell("builder").await?;
         
+        // 7. Cytokinesis (Ready to serve)
+        junction.signal(MitosisSignal::Cytokinesis)?;
+        // Drop junction to close FD 3 (or keep if we want to log health later, but protocol says close)
+        drop(junction);
+
+        // 8. Event Loop
         let hv_arc = std::sync::Arc::new(hv);
         
         loop {
@@ -79,6 +105,9 @@ impl Hypervisor {
     }
 
     async fn bootstrap_kernel_cell(&self, name: &str) -> Result<()> {
+        use std::process::Command;
+        use cell_transport::gap_junction::spawn_with_gap_junction;
+        
         let socket = self.system_socket_dir.join(format!("{}.sock", name));
         
         if socket.exists() {
@@ -91,27 +120,48 @@ impl Hypervisor {
 
         info!("[Hypervisor] Bootstrapping {}...", name);
 
-        let mut cmd = std::process::Command::new("cargo");
+        // Try to find binary first to avoid recompilation loop
+        let mut cmd = Command::new("cargo");
         cmd.arg("run").arg("--release").arg("-p").arg(name);
         
+        // Propagate env
         if let Ok(s) = std::env::var("CELL_SOCKET_DIR") { cmd.env("CELL_SOCKET_DIR", s); }
         if let Ok(r) = std::env::var("CELL_REGISTRY_DIR") { cmd.env("CELL_REGISTRY_DIR", r); }
         if let Ok(h) = std::env::var("HOME") { cmd.env("HOME", h); }
+        if let Ok(t) = std::env::var("CARGO_TARGET_DIR") { cmd.env("CARGO_TARGET_DIR", t); }
         cmd.env("CELL_NODE_ID", "0");
 
+        cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::inherit());
 
-        std::thread::spawn(move || { let _ = cmd.spawn(); });
+        let (_child, mut junction) = spawn_with_gap_junction(cmd)?;
 
-        for _ in 0..100 {
-            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
-                info!("[Hypervisor] {} online.", name);
-                return Ok(());
+        // Configuration for the child
+        let config = CellInitConfig {
+            node_id: 0,
+            cell_name: name.to_string(),
+            peers: vec![],
+            socket_path: socket.to_string_lossy().to_string(),
+            organism: "system".to_string(),
+        };
+
+        // Handshake Loop
+        loop {
+            match junction.wait_for_signal()? {
+                MitosisSignal::RequestIdentity => {
+                    junction.send_control(MitosisControl::InjectIdentity(config.clone()))?;
+                }
+                MitosisSignal::Cytokinesis => {
+                    info!("[Hypervisor] {} online.", name);
+                    break;
+                }
+                MitosisSignal::Apoptosis { reason } => anyhow::bail!("{} died: {}", name, reason),
+                MitosisSignal::Necrosis => anyhow::bail!("{} panicked", name),
+                _ => {} // Ignore progress signals
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        anyhow::bail!("Failed to bootstrap {}", name);
+        Ok(())
     }
 
     async fn handle_request(&self, mut stream: UnixStream) -> Result<()> {
@@ -151,8 +201,10 @@ impl Hypervisor {
                     }
                 }
             }
-            cell_model::protocol::ArchivedMitosisRequest::Test { target_cell, filter } => {
-                self.handle_test(target_cell.to_string(), filter.as_ref().map(|s| s.to_string()), &mut stream).await?;
+            cell_model::protocol::ArchivedMitosisRequest::Test { .. } => {
+                // Test Logic Placeholder
+                let event = TestEvent::Error("Test execution not yet implemented in v0.4.0".to_string());
+                self.send_event(&mut stream, event).await?;
             }
         }
         Ok(())
@@ -174,28 +226,6 @@ impl Hypervisor {
 
         Capsid::spawn(&binary_path, runtime_dir, &self.daemon_socket_path, &[], config)?;
         
-        Ok(())
-    }
-
-    async fn handle_test(&self, target: String, _filter: Option<String>, stream: &mut UnixStream) -> Result<()> {
-        // Streaming Test response logic
-        // 1. Ask Builder to compile test artifact
-        // For v0.4.0, we simulate this by running cargo test --no-run and finding binary
-        
-        let start_event = TestEvent::Log(format!("Compiling tests for {}...", target));
-        self.send_event(stream, start_event).await?;
-
-        // STUB: Real logic would involve Builder Cell
-        // We will just run the test binary if found for demonstration
-        let test_bin_name = format!("{}-test", target);
-        
-        // Assuming test binary exists in DNA dir for now
-        let event = TestEvent::Log("Test execution not fully implemented in Hypervisor stub.".to_string());
-        self.send_event(stream, event).await?;
-        
-        let finish = TestEvent::SuiteFinished { total: 0, passed: 0, failed: 0 };
-        self.send_event(stream, finish).await?;
-
         Ok(())
     }
 

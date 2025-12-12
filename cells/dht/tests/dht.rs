@@ -1,5 +1,4 @@
 use cell_sdk::*;
-use anyhow::Result;
 
 cell_remote!(Dht = "dht");
 
