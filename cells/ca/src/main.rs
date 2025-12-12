@@ -6,7 +6,7 @@ use cell_sdk::*;
 use anyhow::{Result, Context};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use rcgen::{Certificate, CertificateParams, KeyPair, DistinguishedName, DnType, IsCa};
+use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType, IsCa};
 use time::{Duration, OffsetDateTime};
 
 // === PROTOCOL ===
@@ -76,10 +76,6 @@ impl CaService {
         tracing::info!("[CA] Enrolling request for '{}'", req.cell_name);
 
         // 2. Generate Leaf Certificate
-        // Note: For simplicity in this demo without parsing arbitrary CSRs securely via FFI,
-        // we generate a fresh pair on behalf of the requestor or treat the input as parameters.
-        // A full implementation would parse req.csr_pem using `x509-parser` or `openssl`.
-        
         let mut params = CertificateParams::new(vec![req.cell_name.clone()]);
         let now = OffsetDateTime::now_utc();
         params.not_before = now;
@@ -120,7 +116,9 @@ async fn main() -> Result<()> {
     
     tracing::info!("[CA] Initializing Hardware Security Module (Simulated)...");
     let root = CaService::generate_root()?;
-    tracing::info!("[CA] Root of Trust established: {}", root.get_params().distinguished_name.get(&DnType::CommonName).unwrap());
+    
+    // Fixed: Use Debug formatting for DnValue
+    tracing::info!("[CA] Root of Trust established: {:?}", root.get_params().distinguished_name.get(&DnType::CommonName).unwrap());
 
     let service = CaService {
         state: Arc::new(RwLock::new(CaState {

@@ -1,5 +1,4 @@
 use cell_sdk::*;
-use anyhow::Result;
 
 cell_remote!(Axon = "axon");
 
@@ -16,8 +15,8 @@ async fn axon_gateway_mounts_remote_cell() {
     
     // Ask Axon to bridge "ledger-v2"
     let resp = axon.mount("ledger-v2".into()).await.unwrap();
-    
-    if let Axon::BridgeResponse::Mounted { socket_path } = resp {
+
+    if let BridgeResponse::Mounted { socket_path } = resp {
         assert!(std::path::Path::new(&socket_path).exists());
     } else {
         panic!("Axon failed to mount local cell: {:?}", resp);

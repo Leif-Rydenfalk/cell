@@ -1,3 +1,4 @@
+// cells/axon/src/axon.rs
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
@@ -8,12 +9,14 @@ use cell_model::rkyv::ser::serializers::AllocSerializer;
 use cell_model::rkyv::{self, Archive};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+// Removed unused Async imports
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tracing::{info, warn};
 use webpki_roots;
 
 pub struct AxonServer {
+    #[allow(dead_code)] // Stored for future use / liveness
     endpoints: Vec<(SocketAddr, quinn::Endpoint)>,
     _pheromones: Arc<PheromoneSystem>,
 }
@@ -52,6 +55,7 @@ impl AxonServer {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn accept(&self) -> Option<quinn::Connecting> {
         use futures::stream::{FuturesUnordered, StreamExt};
         let mut acceptors: FuturesUnordered<_> = self
@@ -70,6 +74,7 @@ impl AxonServer {
         }
     }
     
+    #[allow(dead_code)]
     pub async fn handle_rpc_stream<F, Req, Resp>(
         mut send: quinn::SendStream,
         mut recv: quinn::RecvStream,
@@ -138,6 +143,7 @@ impl AxonClient {
         Ok(None)
     }
 
+    #[allow(dead_code)]
     pub async fn connect_exact(addr: &str) -> Result<Option<quinn::Connection>> {
         if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
             try_connect(socket_addr).await
@@ -156,6 +162,7 @@ impl AxonClient {
         Ok(None)
     }
 
+    #[allow(dead_code)]
     pub fn make_endpoint() -> Result<quinn::Endpoint> {
         make_client_endpoint()
     }

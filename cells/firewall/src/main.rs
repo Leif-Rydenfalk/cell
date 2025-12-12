@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::net::IpAddr;
 use tokio::sync::RwLock;
 use ipnet::IpNet;
-use std::time::{Instant, Duration};
+use std::time::Instant; // Removed unused Duration
 
 // === PROTOCOL ===
 
@@ -126,8 +126,13 @@ impl FirewallService {
         let mut state = self.state.write().await;
         let ip: IpAddr = req.source_ip.parse().unwrap_or_else(|_| "0.0.0.0".parse().unwrap());
 
-        for rule in &state.rules {
-            if Self::matches(rule, ip, &req.target_cell) {
+        // Fix E0502: Iterate by index to allow mutating state.rate_limiters while reading rules
+        let rule_count = state.rules.len();
+        for i in 0..rule_count {
+            // Clone the rule to detach it from the 'state' borrow, allowing us to mutate 'state' later
+            let rule = state.rules[i].clone();
+            
+            if Self::matches(&rule, ip, &req.target_cell) {
                 // Rate Limit Check
                 if let Some(rps) = rule.rate_limit_rps {
                     let key = format!("{}:{}", req.source_ip, rule.id);
@@ -141,9 +146,9 @@ impl FirewallService {
                     }
                 }
 
-                return match rule.action {
-                    RuleAction::Allow => Ok(CheckDecision { allowed: true, reason: format!("Matched Rule {}", rule.id) }),
-                    RuleAction::Deny => Ok(CheckDecision { allowed: false, reason: format!("Denied by Rule {}", rule.id) }),
+                match rule.action {
+                    RuleAction::Allow => return Ok(CheckDecision { allowed: true, reason: format!("Matched Rule {}", rule.id) }),
+                    RuleAction::Deny => return Ok(CheckDecision { allowed: false, reason: format!("Denied by Rule {}", rule.id) }),
                     RuleAction::LogOnly => {
                         tracing::info!("[Firewall] LOG: {} -> {} matched rule {}", req.source_ip, req.target_cell, rule.id);
                         continue; // Continue processing lower priority rules

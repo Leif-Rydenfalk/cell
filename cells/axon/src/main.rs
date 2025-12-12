@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: MIT
 // The Network Gateway Cell. Handles QUIC, Pheromones, and WAN routing.
 
+mod axon;
+mod pheromones;
+
 use cell_sdk::*;
 use cell_sdk::resolve_socket_dir;
-use cell_axon_lib::{AxonServer, AxonClient, pheromones::PheromoneSystem};
-use cell_model::bridge::{BridgeRequest, BridgeResponse};
+use axon::{AxonServer, AxonClient};
+use pheromones::PheromoneSystem;
+use cell_model::bridge::{BridgeResponse}; // Removed BridgeRequest
 use cell_model::protocol::{SHM_UPGRADE_REQUEST, SHM_UPGRADE_ACK};
 use anyhow::{Result, Context};
 use tracing::{info, warn, error};
@@ -14,7 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::collections::{HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::path::PathBuf;
+// Removed PathBuf
 use std::os::unix::io::AsRawFd;
 
 // Import SHM internals from the SDK transport layer
@@ -67,9 +71,10 @@ impl ProxyManager {
                     Ok((stream, _)) => {
                         let target = target_clone.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_smart_proxy_connection(&target, stream).await {
+                            // Fixed: _e to suppress unused variable warning
+                            if let Err(_e) = handle_smart_proxy_connection(&target, stream).await {
                                 // Log debug only to avoid spam on disconnects
-                                // debug!("[Axon] Proxy tunnel error: {}", e);
+                                // debug!("[Axon] Proxy tunnel error: {}", _e);
                             }
                         });
                     }
@@ -111,10 +116,6 @@ async fn handle_smart_proxy_connection(target: &str, mut unix_stream: UnixStream
 
     // Check if it's an SHM Upgrade Request. 
     // Format on wire: [Channel u8][SHM_UPGRADE_REQUEST bytes...]
-    // The transport::UnixConnection adds the channel byte. Synapse.try_upgrade sends raw request though?
-    // Let's check `try_upgrade_to_shm` in synapse.rs:
-    // It sends: frame = [0x00, SHM_UPGRADE_REQUEST...]
-    // So yes, body[0] is channel 0, body[1..] is request.
     
     let is_shm_request = body.len() > 1 && body[1..] == SHM_UPGRADE_REQUEST[..];
 
@@ -141,7 +142,6 @@ async fn handle_smart_proxy_connection(target: &str, mut unix_stream: UnixStream
         }
 
         // Create RingBuffers for this session
-        // Note: In proxy mode, we create new rings for every connection.
         let rx_name = format!("axon_proxy_{}_rx", rand::random::<u32>());
         let tx_name = format!("axon_proxy_{}_tx", rand::random::<u32>());
         
@@ -155,9 +155,6 @@ async fn handle_smart_proxy_connection(target: &str, mut unix_stream: UnixStream
         send_fds(unix_stream.as_raw_fd(), &[rx_fd, tx_fd])?;
 
         // Pump Data: SHM <-> QUIC
-        // rx_ring: Client writes here, Axon reads.
-        // tx_ring: Client reads here, Axon writes.
-        
         let shm_reader = rx_ring;
         let shm_writer = tx_ring;
 
@@ -202,8 +199,6 @@ async fn handle_smart_proxy_connection(target: &str, mut unix_stream: UnixStream
                 // Write to SHM
                 let mut slot = shm_writer.wait_for_slot(data_len).await;
                 
-                // Read directly into temporary buffer then write to slot
-                // (Optimally we'd read into slot but wait_for_slot gives us write access via &mut [u8] implicitly)
                 let mut buf = vec![0u8; data_len];
                 quic_recv.read_exact(&mut buf).await?;
                 
@@ -253,12 +248,13 @@ struct AxonService {
 #[handler]
 impl AxonService {
     // Implements the Bridge Protocol
-    async fn mount(&self, target: String) -> BridgeResponse {
+    // Returns Result<BridgeResponse> to be compatible with macro expansion await?
+    async fn mount(&self, target: String) -> Result<BridgeResponse> {
         match self.proxy_manager.ensure_proxy(&target).await {
-            Ok(path) => BridgeResponse::Mounted { socket_path: path },
+            Ok(path) => Ok(BridgeResponse::Mounted { socket_path: path }),
             Err(e) => {
                 error!("[Axon] Mount failed: {}", e);
-                BridgeResponse::Error { message: e.to_string() }
+                Ok(BridgeResponse::Error { message: e.to_string() })
             }
         }
     }
@@ -284,6 +280,5 @@ async fn main() -> Result<()> {
     // 3. Serve the Axon Bridge Service
     let service = AxonService { proxy_manager };
     
-    // This creates ~/.cell/run/axon.sock
     service.serve("axon").await
 }

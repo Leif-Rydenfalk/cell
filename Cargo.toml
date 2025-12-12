@@ -6,7 +6,6 @@ members = [
     "cell-model",
     "cell-transport",
     "cell-discovery",
-    "cell-axon",
     "cell-sdk",
     "cell-macros",
     "cell-build",
@@ -22,7 +21,7 @@ members = [
     "cells/metrics",
     "cells/builder",
     "cells/hypervisor",
-    "cells/axon",          # <--- Added
+    "cells/axon",
     "cells/firewall",
     "cells/drift",
     "cells/iam",
@@ -61,7 +60,7 @@ cell-codec = { path = "./cell-codec", version = "0.4.0" }
 cell-model = { path = "./cell-model", version = "0.4.0" }
 cell-transport = { path = "./cell-transport", version = "0.4.0", features = ["std", "shm"] }
 cell-discovery = { path = "./cell-discovery", version = "0.4.0" }
-cell-axon = { path = "./cell-axon", version = "0.4.0" }
+# cell-axon removed
 cell-sdk = { path = "./cell-sdk", version = "0.4.0" }
 cell-macros = { path = "./cell-macros", version = "0.3.0" }
 cell-build = { path = "./cell-build", version = "0.1.0" }

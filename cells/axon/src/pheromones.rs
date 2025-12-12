@@ -1,8 +1,9 @@
+// cells/axon/src/pheromones.rs
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use anyhow::Result;
-use rkyv::{Deserialize};
+use cell_model::rkyv::{self, Deserialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -116,6 +117,7 @@ impl PheromoneSystem {
         self.broadcast_to_all_interfaces(&bytes).await
     }
 
+    #[allow(dead_code)]
     pub async fn secrete(&self, cell_name: &str, port: u16) -> Result<()> {
         let ip = get_best_local_ip();
         self.secrete_specific(cell_name, &ip, port).await

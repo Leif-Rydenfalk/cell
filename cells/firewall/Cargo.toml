@@ -11,3 +11,4 @@ tracing = "0.1"
 ipnet = "2.9"
 dashmap = "5.5"
 serde = { version = "1.0", features = ["derive"] }
+tracing-subscriber = "0.3" # Added to fix compilation error
