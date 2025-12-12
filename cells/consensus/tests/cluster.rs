@@ -1,5 +1,6 @@
 use cell_sdk::*;
-use cell_model::config::{CellInitConfig, PeerConfig};
+// Import directly from SDK re-exports
+use cell_sdk::{CellInitConfig, PeerConfig};
 use anyhow::Result;
 use std::time::Duration;
 use tracing::info;

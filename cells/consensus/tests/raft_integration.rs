@@ -1,31 +1,40 @@
 #[cfg(test)]
 mod tests {
-    use cell_test_support::*;
     use cell_sdk::*;
+    use anyhow::Result;
+
+    // Define the remote interface for the consensus cell
+    cell_remote!(Raft = "consensus");
 
     #[tokio::test]
     async fn raft_survives_follower_crash() {
-        let mut n1 = spawn("consensus").await;
+        // Boot the test environment
+        cell_sdk::System::ignite_local_cluster().await.unwrap();
 
-        #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        // Spawn a consensus node
+        System::spawn("consensus", None).await.expect("Failed to spawn consensus");
+        
+        // Wait for it to be ready
+        let mut synapse = Synapse::grow_await("consensus").await.expect("Failed to connect");
+        
+        // Construct the low-level request bytes manually as we are testing raw firing
+        // (Or use the typed client if we preferred, but preserving the spirit of the original test)
+        #[derive(cell_sdk::rkyv::Archive, cell_sdk::rkyv::Serialize, cell_sdk::rkyv::Deserialize)]
         #[archive(check_bytes)]
-        struct Propose {
-            cmd: Command
-        }
-        #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-        #[archive(check_bytes)]
+        #[archive(crate = "cell_sdk::rkyv")]
         struct Command {
             data: Vec<u8>
         }
         
-        let req = Propose { cmd: Command { data: b"test_datum".to_vec() } };
-        let req_bytes = rkyv::to_bytes::<_, 1024>(&req).unwrap().into_vec();
-
-        // Fixed import: cell_sdk::channel instead of cell_core::channel if re-exported
-        // or ensure cell_core is accessible. 
-        // cell-sdk re-exports cell_core content at top level.
-        // so cell_sdk::channel should work.
-        let resp = n1.fire_on_channel(cell_sdk::channel::APP, &req_bytes).await;
+        // The protocol expects Command inside a wrapper usually, but checking main.rs:
+        // Service methods: propose(data: Vec<u8>) -> Result<u64>
+        // So the wire format matches the generated protocol from `cell_remote!`.
+        
+        // Let's use the typed client to be safe and robust
+        let mut client = Raft::Client::new(synapse);
+        
+        let cmd = Raft::Command { data: b"test_datum".to_vec() };
+        let resp = client.propose(cmd).await;
         
         assert!(resp.is_ok(), "Leader should accept proposal");
     }
