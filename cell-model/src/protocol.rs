@@ -89,13 +89,20 @@ pub enum Primitive {
     Bool,
 }
 
+// Top-level Daemon Request
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
 #[archive(check_bytes)]
 pub enum MitosisRequest {
+    /// Spawn a standard long-lived Cell
     Spawn { 
         cell_name: String,
         config: Option<CellInitConfig>,
     },
+    /// Run a test suite as an ephemeral Cell
+    Test {
+        target_cell: String,
+        filter: Option<String>,
+    }
 }
 
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
@@ -103,6 +110,18 @@ pub enum MitosisRequest {
 pub enum MitosisResponse {
     Ok { socket_path: String },
     Denied { reason: String },
+    // Test responses are streamed as TestEvent, not returned as a single MitosisResponse
+}
+
+/// Events streamed back from Hypervisor -> CLI during a test run
+#[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
+#[archive(check_bytes)]
+pub enum TestEvent {
+    Log(String),
+    CaseStarted(String),
+    CaseFinished { name: String, success: bool, duration_ms: u64 },
+    SuiteFinished { total: u32, passed: u32, failed: u32 },
+    Error(String),
 }
 
 /// Signals sent from the Daughter Cell to the Progenitor (System/Hypervisor) via the Gap Junction.

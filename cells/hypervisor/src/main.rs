@@ -6,7 +6,7 @@ mod capsid;
 
 use capsid::Capsid;
 use cell_sdk::cell_remote;
-use cell_model::protocol::{MitosisRequest, MitosisResponse};
+use cell_model::protocol::{MitosisRequest, MitosisResponse, TestEvent};
 use cell_model::config::CellInitConfig;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -33,9 +33,8 @@ impl HypervisorService {
 // ----------------------------------------------------
 
 pub struct Hypervisor {
-    // Socket directory for the system scope (where this daemon lives)
     system_socket_dir: PathBuf,
-    daemon_socket_path: PathBuf, // Renamed from umbilical_path
+    daemon_socket_path: PathBuf,
 }
 
 impl Hypervisor {
@@ -61,12 +60,10 @@ impl Hypervisor {
             daemon_socket_path: daemon_socket_path.clone()
         };
 
-        // 1. Bootstrap: Ensure Kernel Cells are running
         hv.bootstrap_kernel_cell("builder").await?;
         hv.bootstrap_kernel_cell("nucleus").await?;
         hv.bootstrap_kernel_cell("axon").await?;
         
-        // 2. Serve Requests
         let hv_arc = std::sync::Arc::new(hv);
         
         loop {
@@ -81,7 +78,6 @@ impl Hypervisor {
         }
     }
 
-    /// Spawns a kernel cell (like 'builder') if not already running.
     async fn bootstrap_kernel_cell(&self, name: &str) -> Result<()> {
         let socket = self.system_socket_dir.join(format!("{}.sock", name));
         
@@ -155,6 +151,9 @@ impl Hypervisor {
                     }
                 }
             }
+            cell_model::protocol::ArchivedMitosisRequest::Test { target_cell, filter } => {
+                self.handle_test(target_cell.to_string(), filter.as_ref().map(|s| s.to_string()), &mut stream).await?;
+            }
         }
         Ok(())
     }
@@ -178,8 +177,37 @@ impl Hypervisor {
         Ok(())
     }
 
+    async fn handle_test(&self, target: String, _filter: Option<String>, stream: &mut UnixStream) -> Result<()> {
+        // Streaming Test response logic
+        // 1. Ask Builder to compile test artifact
+        // For v0.4.0, we simulate this by running cargo test --no-run and finding binary
+        
+        let start_event = TestEvent::Log(format!("Compiling tests for {}...", target));
+        self.send_event(stream, start_event).await?;
+
+        // STUB: Real logic would involve Builder Cell
+        // We will just run the test binary if found for demonstration
+        let test_bin_name = format!("{}-test", target);
+        
+        // Assuming test binary exists in DNA dir for now
+        let event = TestEvent::Log("Test execution not fully implemented in Hypervisor stub.".to_string());
+        self.send_event(stream, event).await?;
+        
+        let finish = TestEvent::SuiteFinished { total: 0, passed: 0, failed: 0 };
+        self.send_event(stream, finish).await?;
+
+        Ok(())
+    }
+
     async fn send_resp(&self, stream: &mut UnixStream, resp: MitosisResponse) -> Result<()> {
         let bytes = cell_model::rkyv::to_bytes::<_, 256>(&resp)?.into_vec();
+        stream.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
+        stream.write_all(&bytes).await?;
+        Ok(())
+    }
+
+    async fn send_event(&self, stream: &mut UnixStream, event: TestEvent) -> Result<()> {
+        let bytes = cell_model::rkyv::to_bytes::<_, 1024>(&event)?.into_vec();
         stream.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
         stream.write_all(&bytes).await?;
         Ok(())
