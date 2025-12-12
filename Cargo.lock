@@ -443,29 +443,13 @@ dependencies = [
  "cell-process",
  "cell-transport",
  "clap",
+ "dirs",
+ "rand",
  "rkyv",
  "serde",
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "cell-test-support"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cell-model",
- "cell-process",
- "cell-sdk",
- "cell-transport",
- "ctor",
- "dirs",
- "memmap2",
- "nix",
- "rand",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -562,8 +546,6 @@ dependencies = [
  "anyhow",
  "bincode",
  "cell-sdk",
- "cell-test-support",
- "fs_extra",
  "rand",
  "rkyv",
  "serde",
@@ -652,16 +634,6 @@ checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
  "typenum",
-]
-
-[[package]]
-name = "ctor"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
-dependencies = [
- "quote",
- "syn 2.0.108",
 ]
 
 [[package]]
@@ -797,12 +769,6 @@ checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
 ]
-
-[[package]]
-name = "fs_extra"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "funty"
