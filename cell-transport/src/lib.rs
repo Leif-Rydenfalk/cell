@@ -7,6 +7,9 @@ pub mod shm;
 pub mod transport;
 pub mod response;
 
+// New Module
+pub mod gap_junction;
+
 #[cfg(feature = "std")]
 pub mod synapse;
 
@@ -36,5 +39,7 @@ pub use transport::{UnixTransport};
 pub use transport::{ShmTransport, ShmConnection};
 #[cfg(feature = "shm")]
 pub use shm::ShmClient;
+
+pub use gap_junction::GapJunction;
 
 pub use cell_discovery::resolve_socket_dir;

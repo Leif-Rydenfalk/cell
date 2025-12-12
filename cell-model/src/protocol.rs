@@ -11,6 +11,9 @@ pub const GENOME_REQUEST: &[u8] = b"__CELL_GENOME_REQUEST__";
 pub const SHM_UPGRADE_REQUEST: &[u8] = b"__SHM_UPGRADE_REQUEST__";
 pub const SHM_UPGRADE_ACK: &[u8] = b"__SHM_UPGRADE_ACK__";
 
+// The Gap Junction File Descriptor index
+pub const GAP_JUNCTION_FD: i32 = 3;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CellGenome {
     pub name: String,
@@ -53,10 +56,10 @@ pub struct MacroSchema {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum MacroKind {
-    Declarative,   // macro_rules!
-    Attribute,     // #[proc_macro_attribute]
-    Derive,        // #[proc_macro_derive]
-    Function,      // proc_macro
+    Declarative,
+    Attribute,
+    Derive,
+    Function,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -91,8 +94,6 @@ pub enum Primitive {
 pub enum MitosisRequest {
     Spawn { 
         cell_name: String,
-        /// The strict configuration to inject into the process.
-        /// If None, Root will generate a default configuration.
         config: Option<CellInitConfig>,
     },
 }
@@ -104,21 +105,30 @@ pub enum MitosisResponse {
     Denied { reason: String },
 }
 
-/// The biological phases of a Cell's startup lifecycle.
-/// Sent from Daughter to Progenitor via the Gap Junction (Stdout).
+/// Signals sent from the Daughter Cell to the Progenitor (System/Hypervisor) via the Gap Junction.
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
 #[archive(check_bytes)]
-pub enum MitosisPhase {
-    /// Chromatin condensation (Compiling/Initializing)
+pub enum MitosisSignal {
+    /// "I am alive, but building my internal structures."
     Prophase,
-    /// Nuclear envelope breakdown & Attachment (Membrane Bound)
+    /// "I need my genetic sequence (Configuration)."
+    RequestIdentity,
+    /// "My membrane is bound at this address."
     Prometaphase { socket_path: String },
-    /// Alignment (Waiting for Identity/Config)
-    Metaphase,
-    /// Separation (Fully Active)
+    /// "I am fully independent. Sever the connection."
     Cytokinesis,
-    /// Programmed Death (Error)
+    /// "I am dying cleanly."
     Apoptosis { reason: String },
-    /// Traumatic Death (Panic)
+    /// "I have sustained fatal trauma."
     Necrosis,
+}
+
+/// Control messages sent from the Progenitor to the Daughter via the Gap Junction.
+#[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
+#[archive(check_bytes)]
+pub enum MitosisControl {
+    /// "Here is your genetic sequence."
+    InjectIdentity(CellInitConfig),
+    /// "Die."
+    Terminate,
 }

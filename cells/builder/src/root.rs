@@ -31,19 +31,19 @@ impl MyceliumRoot {
         };
 
         tokio::fs::create_dir_all(&socket_dir).await?;
-        let umbilical = socket_dir.join("mitosis.sock");
+        // Renamed from umbilical to daemon_socket
+        let daemon_socket = socket_dir.join("mitosis.sock");
 
-        if umbilical.exists() { tokio::fs::remove_file(&umbilical).await?; }
-        let listener = UnixListener::bind(&umbilical)?;
+        if daemon_socket.exists() { tokio::fs::remove_file(&daemon_socket).await?; }
+        let listener = UnixListener::bind(&daemon_socket)?;
 
         info!("[Root] Daemon Booting...");
 
         // 1. Bootstrap Phase: Ensure Kernel Cells are running
-        // We must spawn 'builder' and 'hypervisor' manually since they are the means of production.
         Self::bootstrap_kernel_cell("builder").await?;
         Self::bootstrap_kernel_cell("hypervisor").await?;
 
-        info!("[Root] Kernel Active. Listening on {:?}", umbilical);
+        info!("[Root] Kernel Active. Listening on {:?}", daemon_socket);
 
         let root = Self { socket_dir };
         let r = root.clone();
@@ -69,14 +69,14 @@ impl MyceliumRoot {
     }
 
     /// Rudimentary process spawner for the Kernel Cells (Builder/Hypervisor).
-    /// These must exist as compiled binaries in ~/.cell/bin (or be built via cargo run for now).
     async fn bootstrap_kernel_cell(name: &str) -> Result<()> {
         use std::process::Command;
+        use cell_transport::gap_junction::spawn_with_gap_junction;
+        use cell_model::protocol::{MitosisSignal, MitosisControl};
         
-        // Check if already running. Use SDK resolver.
+        // Check if already running
         let socket = cell_sdk::resolve_socket_dir().join(format!("{}.sock", name));
         if socket.exists() {
-            // Simple probe
             if tokio::net::UnixStream::connect(&socket).await.is_ok() {
                 info!("[Root] {} is already running", name);
                 return Ok(());
@@ -86,38 +86,46 @@ impl MyceliumRoot {
 
         info!("[Root] Bootstrapping {}...", name);
 
-        // Fallback: Use 'cargo run' logic if binary not found (Dev Mode)
-        // In Prod, we would look in ~/.cell/bin
-        // Since we are in the workspace, we can use cargo run -p
-        
         let mut cmd = Command::new("cargo");
         cmd.arg("run").arg("--release").arg("-p").arg(name);
         
-        // Detach
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::inherit()); // Log errors
-        
-        // Pass essential env
         if let Ok(s) = std::env::var("CELL_SOCKET_DIR") { cmd.env("CELL_SOCKET_DIR", s); }
         if let Ok(r) = std::env::var("CELL_REGISTRY_DIR") { cmd.env("CELL_REGISTRY_DIR", r); }
         if let Ok(h) = std::env::var("HOME") { cmd.env("HOME", h); }
-        cmd.env("CELL_NODE_ID", "0"); // System ID
+        cmd.env("CELL_NODE_ID", "0"); 
 
-        // Spawn detached
-        std::thread::spawn(move || {
-            let _ = cmd.spawn();
-        });
+        // Gap Junction setup - NO UMBILICAL ENV VAR
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null()); 
+        cmd.stderr(std::process::Stdio::inherit());
 
-        // Wait for socket
-        for _ in 0..50 {
-            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
-                info!("[Root] {} online.", name);
-                return Ok(());
+        let (_child, mut junction) = spawn_with_gap_junction(cmd)?;
+
+        // Handshake
+        let config = CellInitConfig {
+            node_id: 0,
+            cell_name: name.to_string(),
+            peers: vec![],
+            socket_path: socket.to_string_lossy().to_string(),
+            organism: "system".to_string(),
+        };
+
+        loop {
+            match junction.wait_for_signal()? {
+                MitosisSignal::RequestIdentity => {
+                    junction.send_control(MitosisControl::InjectIdentity(config.clone()))?;
+                }
+                MitosisSignal::Cytokinesis => {
+                    info!("[Root] {} online.", name);
+                    break;
+                }
+                MitosisSignal::Apoptosis { reason } => anyhow::bail!("{} died: {}", name, reason),
+                MitosisSignal::Necrosis => anyhow::bail!("{} panicked", name),
+                _ => {}
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        anyhow::bail!("Failed to bootstrap {}", name);
+        Ok(())
     }
 
     async fn handle_request(&self, mut stream: UnixStream) -> Result<()> {
@@ -132,7 +140,6 @@ impl MyceliumRoot {
             .map_err(|e| anyhow::anyhow!("Protocol Violation: {}", e))?;
 
         // 2. Delegate to Hypervisor Cell
-        // We connect to Hypervisor via SDK Transport
         let mut hypervisor = Hypervisor::Client::connect().await
             .context("Kernel Panic: Hypervisor unreachable")?;
 

@@ -2,15 +2,15 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use crate::resolve_socket_dir;
-use cell_model::protocol::{MitosisRequest, MitosisResponse, MitosisPhase};
+use cell_model::protocol::{MitosisRequest, MitosisResponse, MitosisSignal, MitosisControl};
 use cell_model::config::CellInitConfig;
 use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use anyhow::{Result, Context, anyhow, bail};
+use anyhow::{Result, Context, anyhow};
 use cell_model::rkyv::Deserialize;
 use tokio::sync::OnceCell;
 use std::process::{Command, Stdio};
-use std::io::Read;
+use cell_transport::gap_junction::spawn_with_gap_junction;
 
 // Tracks if we have already ignited a local cluster in this process
 static CLUSTER_INIT: OnceCell<()> = OnceCell::const_new();
@@ -29,10 +29,11 @@ impl System {
             home.join(".cell/runtime/system")
         };
         
-        let umbilical = system_dir.join("mitosis.sock");
+        // Renamed from umbilical to daemon_socket
+        let daemon_socket = system_dir.join("mitosis.sock");
 
-        if !umbilical.exists() {
-            return Err(anyhow!("System Daemon not found at {:?}. Is the Hypervisor running?", umbilical));
+        if !daemon_socket.exists() {
+            return Err(anyhow!("System Daemon not found at {:?}. Is the Hypervisor running?", daemon_socket));
         }
 
         if config.is_none() {
@@ -49,7 +50,7 @@ impl System {
             });
         }
 
-        let mut stream = UnixStream::connect(&umbilical).await
+        let mut stream = UnixStream::connect(&daemon_socket).await
             .context("Failed to connect to Hypervisor")?;
 
         let req = MitosisRequest::Spawn {
@@ -101,7 +102,7 @@ impl System {
             std::fs::create_dir_all(&fake_home).unwrap();
             std::env::set_var("HOME", fake_home.to_str().unwrap());
 
-            // Populate Registry
+            // Populate Registry logic (kept same as before)
             if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
                 let current = std::path::Path::new(&manifest);
                 let potential_roots = [
@@ -110,10 +111,8 @@ impl System {
                     current.join("../"),
                     current.join("../../"),
                 ];
-                
                 let registry = target_dir.join("registry");
                 std::fs::create_dir_all(&registry).unwrap();
-
                 for root in potential_roots {
                     let candidates = [root.join("cells"), root.join("examples")];
                     for candidate in candidates {
@@ -138,58 +137,46 @@ impl System {
             cmd.arg("run").arg("--release").arg("-p").arg("hypervisor");
             cmd.env("CARGO_TARGET_DIR", target_dir.join("target-inner")); // ISOLATION
             
-            // Create the Gap Junction
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::inherit()); // Pass through logs
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::null()); 
+            cmd.stderr(Stdio::inherit()); 
 
-            let mut child = cmd.spawn().expect("Failed to spawn Hypervisor");
-            let mut stdout = child.stdout.take().expect("Failed to open Gap Junction (stdout)");
+            // Spawn with Gap Junction (FD 3)
+            let (_child, mut junction) = spawn_with_gap_junction(cmd).expect("Failed to spawn Hypervisor with Gap Junction");
 
-            // The Progenitor Loop
+            // The Progenitor Loop (Blocking wait on Junction)
             let handle = std::thread::spawn(move || {
-                let mut len_buf = [0u8; 4];
                 loop {
-                    // Block until signal arrives
-                    if stdout.read_exact(&mut len_buf).is_err() {
-                        panic!("[System] Gap Junction severed (EOF). Hypervisor died.");
-                    }
-                    let len = u32::from_le_bytes(len_buf) as usize;
-                    let mut buf = vec![0u8; len];
-                    if stdout.read_exact(&mut buf).is_err() {
-                        panic!("[System] Gap Junction severed reading payload.");
-                    }
-
-                    // Decode Signal
-                    let archived = cell_model::rkyv::check_archived_root::<MitosisPhase>(&buf)
-                        .expect("Invalid signal from Daughter");
-                    let phase: MitosisPhase = archived.deserialize(&mut cell_model::rkyv::Infallible).unwrap();
-
-                    match phase {
-                        MitosisPhase::Prophase => {
-                            println!("[System] Hypervisor is gestating (Compiling)...");
+                    let signal = junction.wait_for_signal().expect("Gap Junction severed");
+                    
+                    match signal {
+                        MitosisSignal::RequestIdentity => {
+                            // The Hypervisor constructs its own identity, but we must send config
+                            let socket_path = target_dir.join("runtime/system/mitosis.sock");
+                            let config = CellInitConfig {
+                                node_id: 100, // System Node
+                                cell_name: "hypervisor".to_string(),
+                                peers: vec![],
+                                socket_path: socket_path.to_string_lossy().to_string(),
+                                organism: "system".to_string(),
+                            };
+                            
+                            junction.send_control(MitosisControl::InjectIdentity(config))
+                                .expect("Failed to inject identity");
                         }
-                        MitosisPhase::Prometaphase { socket_path } => {
-                            println!("[System] Hypervisor membrane bound at: {}", socket_path);
+                        MitosisSignal::Prophase => { /* Gestating... */ }
+                        MitosisSignal::Prometaphase { socket_path: _ } => { /* Binding... */ }
+                        MitosisSignal::Cytokinesis => {
+                            println!("[System] Hypervisor Cytokinesis complete.");
+                            break; // Success
                         }
-                        MitosisPhase::Metaphase => {
-                            // Hypervisor doesn't wait for identity on stdin in this mode, but if it did:
-                            // We would write to child.stdin here.
-                        }
-                        MitosisPhase::Cytokinesis => {
-                            println!("[System] Hypervisor Cytokinesis complete. System Active.");
-                            break; // Success!
-                        }
-                        MitosisPhase::Apoptosis { reason } => {
-                            panic!("[System] Hypervisor Apoptosis: {}", reason);
-                        }
-                        MitosisPhase::Necrosis => {
-                            panic!("[System] Hypervisor Necrosis (Panic).");
-                        }
+                        MitosisSignal::Apoptosis { reason } => panic!("[System] Hypervisor Apoptosis: {}", reason),
+                        MitosisSignal::Necrosis => panic!("[System] Hypervisor Necrosis."),
+                        _ => {}
                     }
                 }
             });
 
-            // Wait for the thread to finish (blocking the async task, but that's fine for ignite)
             handle.join().expect("Monitoring thread panicked");
 
         }).await;

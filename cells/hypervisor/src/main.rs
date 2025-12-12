@@ -19,13 +19,11 @@ use rkyv::Deserialize;
 cell_remote!(Builder = "builder");
 
 // --- INTERFACE DEFINITION FOR CELL_REMOTE! SCANNER ---
-// This allows other cells (like builder/root) to generate a client for the Hypervisor.
 #[cell_sdk::service]
 struct HypervisorService;
 
 #[cell_sdk::handler]
 impl HypervisorService {
-    // This signature matches what root.rs expects to call
     async fn spawn(&self, cell_name: String, config: Option<CellInitConfig>) -> Result<()> {
         let _ = cell_name;
         let _ = config;
@@ -37,7 +35,7 @@ impl HypervisorService {
 pub struct Hypervisor {
     // Socket directory for the system scope (where this daemon lives)
     system_socket_dir: PathBuf,
-    umbilical_path: PathBuf,
+    daemon_socket_path: PathBuf, // Renamed from umbilical_path
 }
 
 impl Hypervisor {
@@ -51,16 +49,16 @@ impl Hypervisor {
         };
 
         tokio::fs::create_dir_all(&system_socket_dir).await?;
-        let umbilical_path = system_socket_dir.join("mitosis.sock");
+        let daemon_socket_path = system_socket_dir.join("mitosis.sock");
 
-        if umbilical_path.exists() { tokio::fs::remove_file(&umbilical_path).await?; }
-        let listener = UnixListener::bind(&umbilical_path)?;
+        if daemon_socket_path.exists() { tokio::fs::remove_file(&daemon_socket_path).await?; }
+        let listener = UnixListener::bind(&daemon_socket_path)?;
 
-        info!("[Hypervisor] Kernel Active. Listening on {:?}", umbilical_path);
+        info!("[Hypervisor] Kernel Active. Listening on {:?}", daemon_socket_path);
 
         let hv = Self { 
             system_socket_dir: system_socket_dir.clone(), 
-            umbilical_path: umbilical_path.clone()
+            daemon_socket_path: daemon_socket_path.clone()
         };
 
         // 1. Bootstrap: Ensure Kernel Cells are running
@@ -175,7 +173,7 @@ impl Hypervisor {
         let runtime_dir = socket_path.parent().unwrap();
         tokio::fs::create_dir_all(runtime_dir).await?;
 
-        Capsid::spawn(&binary_path, runtime_dir, &self.umbilical_path, &[], config)?;
+        Capsid::spawn(&binary_path, runtime_dir, &self.daemon_socket_path, &[], config)?;
         
         Ok(())
     }
