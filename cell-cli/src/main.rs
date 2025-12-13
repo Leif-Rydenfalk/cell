@@ -45,6 +45,8 @@ enum Commands {
     Top,
     /// Follow distributed traces
     Logs { target: String },
+    /// Garbage collect unused cells
+    Prune,
 }
 
 #[derive(SerdeDeserialize)]
@@ -67,8 +69,11 @@ async fn main() -> Result<()> {
         Commands::Up { file } => run_up(file).await,
         Commands::Top => run_top().await,
         Commands::Logs { target } => tail_logs(target).await,
+        Commands::Prune => prune_cells().await,
     }
 }
+
+// ... (Existing helper functions connect_daemon, spawn_cell, run_up, run_test, apply_manifest, run_top, tail_logs, send_request, recv_response remain same) ...
 
 async fn connect_daemon() -> Result<UnixStream> {
     let home = dirs::home_dir().expect("No HOME");
@@ -269,10 +274,8 @@ async fn run_test(target: String, filter: Option<String>) -> Result<()> {
 
 async fn apply_manifest(path: String) -> Result<()> {
     let yaml = fs::read_to_string(&path).context("Failed to read manifest")?;
-    // Use the generated module Nucleus and its Client struct
     let mut nucleus = Nucleus::Client::connect().await.context("Nucleus unreachable")?;
     println!("{} Applying manifest from {}...", "→".blue(), path);
-    // Use the explicit enum path from the Nucleus module
     let success = nucleus.apply(Nucleus::ApplyManifest { yaml }).await?;
     if success {
         println!("{} Mesh converged.", "✔".green());
@@ -300,7 +303,6 @@ async fn run_top() -> Result<()> {
 }
 
 async fn tail_logs(target: String) -> Result<()> {
-    // Use the generated module Observer and its Client struct
     let mut observer = Observer::Client::connect().await.context("Observer unreachable")?;
     println!("{} Tailing logs for {}...", "→".blue(), target);
     loop {
@@ -312,6 +314,23 @@ async fn tail_logs(target: String) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+async fn prune_cells() -> Result<()> {
+    let mut nucleus = Nucleus::Client::connect().await.context("Nucleus unreachable")?;
+    println!("{} Calculating unused cells (garbage collection)...", "→".blue());
+    
+    let result = nucleus.vacuum().await?;
+    
+    if result.killed.is_empty() {
+        println!("{} No unused cells found.", "ℹ".blue());
+    } else {
+        println!("{} Pruned {} cells:", "✔".green(), result.killed.len());
+        for cell in result.killed {
+            println!("   - {}", cell.red());
+        }
+    }
+    Ok(())
 }
 
 async fn send_request<T: cell_model::rkyv::Serialize<cell_model::rkyv::ser::serializers::AllocSerializer<256>>>(

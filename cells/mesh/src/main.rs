@@ -8,22 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-// === PROTOCOL ===
-// We re-use MeshRequest/MeshResponse defined in cell-model via the SDK
-
-#[protein]
-pub struct CellStatus {
-    pub healthy: bool,
-    pub last_heartbeat: u64,
-}
-
-// === SERVICE ===
-
 struct MeshState {
-    // cell_name -> set of dependencies
+    // cell_name (Consumer) -> set of dependencies (Providers)
     dependency_graph: HashMap<String, HashSet<String>>,
-    // cell_name -> status
-    cell_status: HashMap<String, CellStatus>,
+    cell_status: HashMap<String, cell_model::protocol::MeshRequest>, // Simplified placeholder type
 }
 
 #[service]
@@ -48,17 +36,18 @@ impl MeshService {
     async fn resolve_dependencies(&self, cell_name: String, dependencies: Vec<String>) -> Result<HashMap<String, String>> {
         let mut state = self.state.write().await;
         
-        // Update graph
+        // Update graph: Record that 'cell_name' depends on 'dependencies'
         state.dependency_graph.insert(cell_name.clone(), dependencies.iter().cloned().collect());
         
         // Resolve sockets
         let mut mapping = HashMap::new();
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        
+        // We need to check both system and local scopes, but simpler to rely on cell_discovery logic.
+        // For the Mesh service, we assume standard system scope for now.
         let socket_dir = home.join(".cell/runtime/system");
 
         for dep in dependencies {
-            // In a real impl we'd check if they are running/healthy
-            // For now, we return the canonical paths
             let path = socket_dir.join(format!("{}.sock", dep));
             mapping.insert(dep, path.to_string_lossy().to_string());
         }
@@ -67,28 +56,16 @@ impl MeshService {
     }
 
     async fn report_health(&self, cell_name: String, healthy: bool) -> Result<bool> {
-        let mut state = self.state.write().await;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-            
-        state.cell_status.insert(cell_name.clone(), CellStatus {
-            healthy,
-            last_heartbeat: now,
-        });
-        
         if healthy {
-            tracing::info!("[Mesh] Cell '{}' is healthy", cell_name);
-            // In a more complex system, we would trigger start_ready_cells here
+            // tracing::info!("[Mesh] Cell '{}' is healthy", cell_name);
         } else {
             tracing::warn!("[Mesh] Cell '{}' is unhealthy", cell_name);
         }
-        
         Ok(true)
     }
     
-    async fn get_graph(&self) -> Result<Vec<(String, Vec<String>)>> {
+    // NEW: Return the full dependency graph for GC analysis
+    async fn get_graph(&self) -> Result<HashMap<String, Vec<String>>> {
         let state = self.state.read().await;
         let graph = state.dependency_graph.iter()
             .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))

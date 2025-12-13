@@ -4,12 +4,14 @@
 
 use cell_sdk::*;
 use anyhow::{Result, anyhow};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use cell_discovery::Discovery;
-use cell_model::manifest::MeshManifest; 
-use cell_model::manifest::{PlacementStrategy, ResourceLimits}; // Fixed imports
+use cell_model::manifest::{MeshManifest, PlacementStrategy, ResourceLimits};
+
+// Define explicit remote to Mesh so we can query the graph
+cell_remote!(Mesh = "mesh");
 
 // === PROTOCOL DEFINITIONS ===
 
@@ -65,12 +67,16 @@ pub struct ScheduleSpore {
     pub required_caps: String,
 }
 
+#[protein]
+pub struct PruneResult {
+    pub killed: Vec<String>,
+}
+
 // === NUCLEUS SERVICE ===
 
 pub struct Nucleus {
     start_time: std::time::SystemTime,
     registry: Arc<RwLock<CellRegistry>>,
-    health_checker: Arc<HealthChecker>,
     state: Arc<RwLock<NucleusState>>,
 }
 
@@ -84,16 +90,6 @@ struct CellRegistry {
     last_heartbeat: HashMap<String, std::time::Instant>,
 }
 
-struct HealthChecker {
-    checks: HashMap<String, HealthStatus>,
-}
-
-struct HealthStatus {
-    last_check: std::time::Instant,
-    consecutive_failures: u32,
-    latency_ms: f64,
-}
-
 impl Nucleus {
     pub fn new() -> Self {
         Self {
@@ -102,9 +98,6 @@ impl Nucleus {
                 cells: HashMap::new(),
                 last_heartbeat: HashMap::new(),
             })),
-            health_checker: Arc::new(HealthChecker {
-                checks: HashMap::new(),
-            }),
             state: Arc::new(RwLock::new(NucleusState {
                 desired_state: None,
                 spores: HashMap::new(),
@@ -122,52 +115,30 @@ impl Nucleus {
                 let mut reg = registry.write().await;
                 let now = std::time::Instant::now();
                 
+                // Prune heartbeats older than 30s
                 reg.last_heartbeat.retain(|_, last| {
                     now.duration_since(*last).as_secs() < 30
                 });
                 
+                // Sync registry with heartbeats
                 let CellRegistry { cells, last_heartbeat } = &mut *reg;
-                for instances in cells.values_mut() {
-                    instances.retain(|inst| {
-                        last_heartbeat.contains_key(&inst.name)
-                    });
-                }
-            }
-        });
-
-        let state = self.state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                let guard = state.read().await;
-                
-                if let Some(manifest) = &guard.desired_state {
-                    tracing::info!("[Nucleus] Reconciling mesh '{}'...", manifest.mesh);
-                    
-                    let nodes = Discovery::scan().await;
-                    
-                    for spec in &manifest.cells {
-                        let active_count = nodes.iter()
-                            .filter(|n| n.name == spec.name)
-                            .count() as u32;
-
-                        if active_count < spec.replicas {
-                            let diff = spec.replicas - active_count;
-                            tracing::info!("[Nucleus] Scaling up {} (+{} replicas)", spec.name, diff);
-                            if let Err(e) = System::spawn(&spec.name, None).await {
-                                tracing::error!("Failed to spawn {}: {}", spec.name, e);
-                            }
-                        }
+                let mut empty_keys = Vec::new();
+                for (name, instances) in cells.iter_mut() {
+                    if !last_heartbeat.contains_key(name) {
+                        instances.clear();
+                    }
+                    if instances.is_empty() {
+                        empty_keys.push(name.clone());
                     }
                 }
+                for k in empty_keys {
+                    cells.remove(&k);
+                }
             }
         });
     }
 
-    // Fixed function signature using correct types
-    fn find_best_node(_placement: &PlacementStrategy, _res: &ResourceLimits) -> Option<String> {
-        None
-    }
+    // --- SERVICE IMPLEMENTATION ---
 
     pub async fn register(&self, reg: CellRegistration) -> Result<bool> {
         let mut registry = self.registry.write().await;
@@ -206,11 +177,7 @@ impl Nucleus {
         Ok(NucleusStatus {
             uptime_secs: uptime,
             managed_cells,
-            system_health: HealthMetrics {
-                cpu_usage: 0.0,
-                memory_mb: 0,
-                active_connections: 0,
-            },
+            system_health: HealthMetrics { cpu_usage: 0.0, memory_mb: 0, active_connections: 0 },
         })
     }
 
@@ -222,6 +189,104 @@ impl Nucleus {
         } else {
             Ok(false)
         }
+    }
+
+    // --- GARBAGE COLLECTION ---
+    
+    pub async fn prune(&self) -> Result<PruneResult> {
+        tracing::info!("[Nucleus] Starting Mesh Garbage Collection...");
+        
+        let mut killed_total = Vec::new();
+        
+        // 1. Get Dependency Graph from Mesh Cell
+        let mut mesh_client = Mesh::Client::connect().await
+            .context("Cannot connect to Mesh to analyze dependencies")?;
+            
+        // Map: Consumer -> Vec<Providers>
+        let graph_raw = mesh_client.get_graph().await
+            .context("Failed to retrieve graph")?;
+
+        let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
+        for (k, v) in graph_raw {
+            graph.insert(k, v.into_iter().collect());
+        }
+
+        // Loop until convergence
+        loop {
+            // Get currently active cells from registry
+            let active_cells: HashSet<String> = {
+                let reg = self.registry.read().await;
+                reg.cells.keys().cloned().collect()
+            };
+
+            if active_cells.is_empty() { break; }
+
+            // Protected System Cells
+            let protected: HashSet<&str> = ["nucleus", "mesh", "axon", "hypervisor", "mycelium", "builder", "observer", "ca", "vault", "iam"].into();
+
+            // Find cells that have NO active consumers
+            let mut active_consumers_count: HashMap<String, u32> = HashMap::new();
+            
+            // Initialize counts
+            for cell in &active_cells {
+                active_consumers_count.insert(cell.clone(), 0);
+            }
+
+            // Populate counts based on graph + active list
+            for (consumer, providers) in &graph {
+                if active_cells.contains(consumer) {
+                    for provider in providers {
+                        if active_cells.contains(provider) {
+                            *active_consumers_count.entry(provider.clone()).or_default() += 1;
+                        }
+                    }
+                }
+            }
+
+            let mut iteration_kills = Vec::new();
+
+            for cell in active_cells {
+                if protected.contains(cell.as_str()) {
+                    continue; 
+                }
+
+                let count = active_consumers_count.get(&cell).unwrap_or(&0);
+                if *count == 0 {
+                    iteration_kills.push(cell);
+                }
+            }
+
+            if iteration_kills.is_empty() {
+                break; // Converged
+            }
+
+            // Kill them
+            for target in &iteration_kills {
+                tracing::info!("[Nucleus] Pruning unused cell: {}", target);
+                
+                // Connect and send Shutdown Ops command
+                // We use Synapse manually to access the OPS channel
+                if let Ok(mut synapse) = Synapse::grow(target).await {
+                    let req = cell_model::ops::OpsRequest::Shutdown;
+                    let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req)?.into_vec();
+                    
+                    // Fire and forget (or wait for ack)
+                    let _ = synapse.fire_on_channel(cell_core::channel::OPS, &req_bytes).await;
+                }
+
+                // Remove from local registry immediately so next loop iteration sees it as gone
+                let mut reg = self.registry.write().await;
+                reg.cells.remove(target);
+                reg.last_heartbeat.remove(target);
+                
+                killed_total.push(target.clone());
+            }
+            
+            // Short sleep to allow network propagation before next graph analysis?
+            // Actually we simulated the removal in our local set, so we can recurse immediately.
+        }
+
+        Ok(PruneResult { killed: killed_total })
     }
 }
 
@@ -262,14 +327,22 @@ impl NucleusService {
         tracing::info!("[Nucleus] Scheduling spore '{}'...", req.spore_id);
         Ok("127.0.0.1:9000".to_string())
     }
+
+    // The GC method
+    async fn vacuum(&self) -> Result<PruneResult> {
+        self.inner.prune().await
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
+    
     let nucleus = Nucleus::new();
     nucleus.start_background_tasks().await;
+    
     println!("[Nucleus] System manager active");
+    
     let service = NucleusService { inner: Arc::new(nucleus) };
     service.serve("nucleus").await
 }

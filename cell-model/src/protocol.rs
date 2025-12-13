@@ -12,9 +12,9 @@ pub const GENOME_REQUEST: &[u8] = b"__CELL_GENOME_REQUEST__";
 pub const SHM_UPGRADE_REQUEST: &[u8] = b"__SHM_UPGRADE_REQUEST__";
 pub const SHM_UPGRADE_ACK: &[u8] = b"__SHM_UPGRADE_ACK__";
 
-// The Gap Junction File Descriptor index
 pub const GAP_JUNCTION_FD: i32 = 3;
 
+// ... (Existing CellGenome structs remain unchanged) ...
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CellGenome {
     pub name: String,
@@ -23,30 +23,22 @@ pub struct CellGenome {
     pub types: Vec<TypeSchema>,
     pub macros: Vec<MacroSchema>,
 }
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MethodSchema {
     pub name: String,
     pub inputs: Vec<(String, TypeRef)>,
     pub output: TypeRef,
 }
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TypeSchema {
     pub name: String,
     pub kind: TypeKind,
 }
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TypeKind {
-    Struct {
-        fields: Vec<(String, TypeRef)>,
-    },
-    Enum {
-        variants: Vec<(String, Vec<TypeRef>)>,
-    },
+    Struct { fields: Vec<(String, TypeRef)> },
+    Enum { variants: Vec<(String, Vec<TypeRef>)> },
 }
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MacroSchema {
     pub name: String,
@@ -54,56 +46,18 @@ pub struct MacroSchema {
     pub source: String,
     pub dependencies: Vec<String>,
 }
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub enum MacroKind {
-    Declarative,
-    Attribute,
-    Derive,
-    Function,
-}
-
+pub enum MacroKind { Declarative, Attribute, Derive, Function }
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub enum TypeRef {
-    Named(String),
-    Primitive(Primitive),
-    Vec(Box<TypeRef>),
-    Option(Box<TypeRef>),
-    Result(Box<TypeRef>, Box<TypeRef>),
-    Unit,
-    Unknown,
-}
-
+pub enum TypeRef { Named(String), Primitive(Primitive), Vec(Box<TypeRef>), Option(Box<TypeRef>), Result(Box<TypeRef>, Box<TypeRef>), Unit, Unknown }
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-pub enum Primitive {
-    String,
-    U8,
-    U16,
-    U32,
-    U64,
-    I8,
-    I16,
-    I32,
-    I64,
-    F32,
-    F64,
-    Bool,
-}
+pub enum Primitive { String, U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool }
 
-// Top-level Daemon Request
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
 #[archive(check_bytes)]
 pub enum MitosisRequest {
-    /// Spawn a standard long-lived Cell
-    Spawn {
-        cell_name: String,
-        config: Option<CellInitConfig>,
-    },
-    /// Run a test suite as an ephemeral Cell
-    Test {
-        target_cell: String,
-        filter: Option<String>,
-    },
+    Spawn { cell_name: String, config: Option<CellInitConfig> },
+    Test { target_cell: String, filter: Option<String> },
 }
 
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
@@ -111,7 +65,6 @@ pub enum MitosisRequest {
 pub enum MitosisResponse {
     Ok { socket_path: String },
     Denied { reason: String },
-    // Test responses are streamed as TestEvent, not returned as a single MitosisResponse
 }
 
 // --- MESH PROTOCOL ---
@@ -119,75 +72,50 @@ pub enum MitosisResponse {
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
 #[archive(check_bytes)]
 pub enum MeshRequest {
-    // Sent when a cell needs its dependencies
-    ResolveDependencies {
-        cell_name: String,
-        dependencies: Vec<String>,
-    },
-    // Register a cell's health status
-    ReportHealth {
-        cell_name: String,
-        healthy: bool,
-    },
+    ResolveDependencies { cell_name: String, dependencies: Vec<String> },
+    ReportHealth { cell_name: String, healthy: bool },
+    // NEW: Request the full graph to perform GC analysis
+    GetFullGraph,
 }
 
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
 #[archive(check_bytes)]
 pub enum MeshResponse {
-    // Response with connection info
-    DependencyMapping {
-        cell_name: String,
-        socket_paths: HashMap<String, String>, // dependency -> socket
-    },
+    DependencyMapping { cell_name: String, socket_paths: HashMap<String, String> },
     Ack,
-    Error {
-        message: String,
-    },
+    // NEW: Return the graph (Consumer -> [Providers])
+    FullGraph(HashMap<String, Vec<String>>),
+    Error { message: String },
 }
 
-/// Events streamed back from Hypervisor -> CLI during a test run
+// --- NUCLEUS PROTOCOL EXTENSION (Handled via generic RPC usually, but defining here for clarity) ---
+// Note: Nucleus usually uses the `handler!` macro which generates specific enums. 
+// We will update main.rs in Nucleus to include the Vacuum method.
+
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
 #[archive(check_bytes)]
 pub enum TestEvent {
     Log(String),
     CaseStarted(String),
-    CaseFinished {
-        name: String,
-        success: bool,
-        duration_ms: u64,
-    },
-    SuiteFinished {
-        total: u32,
-        passed: u32,
-        failed: u32,
-    },
+    CaseFinished { name: String, success: bool, duration_ms: u64 },
+    SuiteFinished { total: u32, passed: u32, failed: u32 },
     Error(String),
 }
 
-/// Signals sent from the Daughter Cell to the Progenitor (System/Hypervisor) via the Gap Junction.
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
 #[archive(check_bytes)]
 pub enum MitosisSignal {
-    /// "I am alive, but building my internal structures."
     Prophase,
-    /// "I need my genetic sequence (Configuration)."
     RequestIdentity,
-    /// "My membrane is bound at this address."
     Prometaphase { socket_path: String },
-    /// "I am fully independent. Sever the connection."
     Cytokinesis,
-    /// "I am dying cleanly."
     Apoptosis { reason: String },
-    /// "I have sustained fatal trauma."
     Necrosis,
 }
 
-/// Control messages sent from the Progenitor to the Daughter via the Gap Junction.
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
 #[archive(check_bytes)]
 pub enum MitosisControl {
-    /// "Here is your genetic sequence."
     InjectIdentity(CellInitConfig),
-    /// "Die."
     Terminate,
 }
