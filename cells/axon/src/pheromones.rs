@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use cell_discovery::lan::{LanDiscovery, Signal};
+use cell_discovery::hardware::HardwareCaps;
 use cell_model::rkyv::{self, Deserialize};
 use if_addrs;
 use local_ip_address;
@@ -24,7 +25,6 @@ pub struct PheromoneSystem {
 
 impl PheromoneSystem {
     pub async fn ignite(node_id: u64) -> Result<Arc<Self>> {
-        // Setup ReusePort Socket to allow Mycelium supervisor to share the port
         let socket = Self::bind_reuse_port(PORT)?;
         socket.set_broadcast(true)?;
 
@@ -43,32 +43,25 @@ impl PheromoneSystem {
                     Err(_) => continue,
                 };
 
-                let sig: Signal = {
-                    let archived = match rkyv::check_archived_root::<Signal>(&buf[..len]) {
-                        Ok(a) => a,
-                        Err(_) => continue,
-                    };
-
-                    match archived.deserialize(&mut rkyv::Infallible) {
-                        Ok(s) => s,
-                        Err(_) => continue,
+                let sig_opt: Option<Signal> = {
+                    if let Ok(archived) = rkyv::check_archived_root::<Signal>(&buf[..len]) {
+                        archived.deserialize(&mut rkyv::Infallible).ok()
+                    } else {
+                        None
                     }
                 };
 
+                let sig = if let Some(s) = sig_opt { s } else { continue };
+
                 if let Ok(my_ip) = sys_clone.socket.local_addr() {
                     if addr.ip() == my_ip.ip() {
-                        // Don't ignore self in loopback tests, but in LAN we might want to?
-                        // For auto-discovery on same node (Mycelium), we need to hear local queries.
-                        // So we remove the self-filter for queries, but maybe keep for advertisements?
-                        // Let's keep it loose for now.
+                        // Don't ignore self in loopback tests
                     }
                 }
 
                 if sig.port == 0 {
-                    // Query Request
                     let local = sys_clone.local_signals.read().await;
                     for my_sig in local.iter() {
-                        // Respond if we match the queried name
                         if my_sig.cell_name == sig.cell_name {
                             let mut reply = my_sig.clone();
                             reply.timestamp = SystemTime::now()
@@ -82,7 +75,6 @@ impl PheromoneSystem {
                         }
                     }
                 } else {
-                    // Advertisement
                     LanDiscovery::global().update(sig.clone()).await;
                 }
             }
@@ -117,6 +109,7 @@ impl PheromoneSystem {
             ip: get_best_local_ip(),
             port: 0,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+            hardware: HardwareCaps::scan(),
         };
         let bytes = rkyv::to_bytes::<_, 256>(&sig)?;
         self.broadcast_to_all_interfaces(&bytes).await
@@ -129,6 +122,7 @@ impl PheromoneSystem {
             ip: ip.to_string(),
             port,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+            hardware: HardwareCaps::scan(),
         };
 
         {

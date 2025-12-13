@@ -7,8 +7,9 @@ use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use cell_discovery::{Discovery, LanDiscovery, hardware::HardwareCaps};
-use cell_model::manifest::MeshManifest;
+use cell_discovery::Discovery;
+use cell_model::manifest::MeshManifest; 
+use cell_model::manifest::{PlacementStrategy, ResourceLimits}; // Fixed imports
 
 // === PROTOCOL DEFINITIONS ===
 
@@ -61,7 +62,7 @@ pub struct ApplyManifest {
 #[protein]
 pub struct ScheduleSpore {
     pub spore_id: String,
-    pub required_caps: String, // e.g. "gpu"
+    pub required_caps: String,
 }
 
 // === NUCLEUS SERVICE ===
@@ -114,7 +115,6 @@ impl Nucleus {
     pub async fn start_background_tasks(&self) {
         let registry = self.registry.clone();
         
-        // Heartbeat monitor
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
             loop {
@@ -135,7 +135,6 @@ impl Nucleus {
             }
         });
 
-        // The Control Loop (Converges State)
         let state = self.state.clone();
         tokio::spawn(async move {
             loop {
@@ -155,9 +154,6 @@ impl Nucleus {
                         if active_count < spec.replicas {
                             let diff = spec.replicas - active_count;
                             tracing::info!("[Nucleus] Scaling up {} (+{} replicas)", spec.name, diff);
-                            
-                            // Hardware-Aware Placement would go here
-                            
                             if let Err(e) = System::spawn(&spec.name, None).await {
                                 tracing::error!("Failed to spawn {}: {}", spec.name, e);
                             }
@@ -168,16 +164,66 @@ impl Nucleus {
         });
     }
 
-    fn find_best_node(_placement: &cell_model::manifest::PlacementStrategy, _res: &cell_model::manifest::ResourceLimits) -> Option<String> {
-        // Access global LAN cache
-        // Filter by HardwareCaps (GPU, TEE, AVX)
-        // Sort by Thermal Headroom (thermal_zone_temp)
-        None // Placeholder implementation
+    // Fixed function signature using correct types
+    fn find_best_node(_placement: &PlacementStrategy, _res: &ResourceLimits) -> Option<String> {
+        None
+    }
+
+    pub async fn register(&self, reg: CellRegistration) -> Result<bool> {
+        let mut registry = self.registry.write().await;
+        let instances = registry.cells.entry(reg.name.clone()).or_insert_with(Vec::new);
+        instances.retain(|r| r.node_id != reg.node_id);
+        instances.push(reg.clone());
+        registry.last_heartbeat.insert(reg.name.clone(), std::time::Instant::now());
+        tracing::info!("[Nucleus] Registered cell '{}' (Node {})", reg.name, reg.node_id);
+        Ok(true)
+    }
+
+    pub async fn discover(&self, query: DiscoveryQuery) -> Result<DiscoveryResult> {
+        let registry = self.registry.read().await;
+        let mut instances = Vec::new();
+        if let Some(regs) = registry.cells.get(&query.cell_name) {
+            for reg in regs {
+                let address = reg.endpoints.first().cloned().unwrap_or_default();
+                instances.push(CellInstance {
+                    node_id: reg.node_id,
+                    address,
+                    latency_us: 0,
+                    health_score: 1.0,
+                });
+            }
+        }
+        Ok(DiscoveryResult { instances })
+    }
+
+    pub async fn status(&self) -> Result<NucleusStatus> {
+        let registry = self.registry.read().await;
+        let managed_cells = registry.cells.keys().cloned().collect();
+        let uptime = std::time::SystemTime::now()
+            .duration_since(self.start_time)
+            .unwrap_or_default()
+            .as_secs();
+        Ok(NucleusStatus {
+            uptime_secs: uptime,
+            managed_cells,
+            system_health: HealthMetrics {
+                cpu_usage: 0.0,
+                memory_mb: 0,
+                active_connections: 0,
+            },
+        })
+    }
+
+    pub async fn heartbeat(&self, cell_name: String) -> Result<bool> {
+        let mut registry = self.registry.write().await;
+        if registry.cells.contains_key(&cell_name) {
+            registry.last_heartbeat.insert(cell_name, std::time::Instant::now());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
-
-// === HANDLERS ===
-// We use the standard macro to expose these over RPC
 
 #[service]
 #[derive(Clone)]
@@ -206,28 +252,24 @@ impl NucleusService {
     async fn apply(&self, req: ApplyManifest) -> Result<bool> {
         let manifest: MeshManifest = serde_yaml::from_str(&req.yaml)
             .map_err(|e| anyhow!("Invalid YAML: {}", e))?;
-        
         let mut state = self.inner.state.write().await;
         state.desired_state = Some(manifest.clone());
-        
         tracing::info!("[Nucleus] Applied manifest for mesh '{}'", manifest.mesh);
         Ok(true)
     }
 
     async fn schedule(&self, req: ScheduleSpore) -> Result<String> {
-        // Lattice Scheduling Logic
-        tracing::info!("[Nucleus] Scheduling spore '{}' on GPU node...", req.spore_id);
+        tracing::info!("[Nucleus] Scheduling spore '{}'...", req.spore_id);
         Ok("127.0.0.1:9000".to_string())
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt().init();
     let nucleus = Nucleus::new();
     nucleus.start_background_tasks().await;
-    
     println!("[Nucleus] System manager active");
-    
     let service = NucleusService { inner: Arc::new(nucleus) };
     service.serve("nucleus").await
 }

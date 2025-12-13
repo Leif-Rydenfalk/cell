@@ -9,8 +9,7 @@ use cell_model::rkyv::ser::serializers::AllocSerializer;
 use cell_model::rkyv::{self, Archive};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-// Removed unused Async imports
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+// Removed unused AsyncReadExt/AsyncWriteExt to fix warnings
 use tokio::net::UdpSocket;
 use tracing::{info, warn};
 use webpki_roots;

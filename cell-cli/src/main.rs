@@ -15,6 +15,7 @@ use cell_sdk::cell_remote;
 use serde::Deserialize as SerdeDeserialize;
 
 // === SYSTEM CELLS ===
+// Declaring these creates the modules `Nucleus` and `Observer`
 cell_remote!(Nucleus = "nucleus");
 cell_remote!(Observer = "observer");
 
@@ -104,7 +105,6 @@ async fn spawn_cell(name: String) -> Result<()> {
 }
 
 async fn run_up(file: Option<String>) -> Result<()> {
-    // 1. Check for Cell.toml in current directory
     let cwd = std::env::current_dir()?;
     let toml_path = cwd.join("Cell.toml");
     
@@ -112,13 +112,11 @@ async fn run_up(file: Option<String>) -> Result<()> {
         return run_workspace_up(&toml_path).await;
     }
 
-    // 2. Fallback to explicit file or error
     let target = file.ok_or_else(|| anyhow!("No Cell.toml found and no file specified"))?;
     
     if target.ends_with(".toml") || target == "Cell.toml" {
         run_workspace_up(Path::new(&target)).await
     } else {
-        // Assume YAML manifest
         apply_manifest(target).await
     }
 }
@@ -136,7 +134,6 @@ async fn run_workspace_up(path: &Path) -> Result<()> {
 
     println!("{} Found {} members: {:?}", "ℹ".blue(), config.workspace.members.len(), config.workspace.members);
 
-    // Register all members first
     for member in &config.workspace.members {
         let member_path = root_dir.join(member);
         if !member_path.exists() {
@@ -146,7 +143,7 @@ async fn run_workspace_up(path: &Path) -> Result<()> {
 
         let link_path = registry_dir.join(member);
         if link_path.exists() {
-            let _ = fs::remove_file(&link_path); // Remove old symlink
+            let _ = fs::remove_file(&link_path); 
         }
 
         #[cfg(unix)]
@@ -156,10 +153,6 @@ async fn run_workspace_up(path: &Path) -> Result<()> {
         println!("   Linked {} -> Registry", member);
     }
 
-    // Convergent Spawning Loop
-    // Because compile-time dependencies (macros) might require other cells to be running,
-    // we attempt to spawn all. If some fail, we retry them.
-    
     let mut pending = config.workspace.members.clone();
     let mut attempt = 0;
     const MAX_ATTEMPTS: usize = 5;
@@ -182,10 +175,8 @@ async fn run_workspace_up(path: &Path) -> Result<()> {
                 Ok(_) => {
                     println!("{}", "OK".green());
                 }
-                Err(e) => {
+                Err(_e) => {
                     println!("{}", "Pending".yellow());
-                    // Simple heuristic: if it failed, it might be due to dependency.
-                    // We don't print the full error yet to avoid noise during convergence.
                     next_pending.push(cell);
                 }
             }
@@ -197,7 +188,6 @@ async fn run_workspace_up(path: &Path) -> Result<()> {
         println!("\n{} Failed to spawn the following cells after {} attempts:", "✘".red(), MAX_ATTEMPTS);
         for cell in pending {
             println!("   - {}", cell);
-            // Try one last time to show the error
             if let Err(e) = spawn_cell(cell).await {
                 println!("     Error: {}", e);
             }
@@ -226,8 +216,8 @@ async fn run_test(target: String, filter: Option<String>) -> Result<()> {
     );
     println!("");
 
-    let mut total_passed = 0;
-    let mut total_failed = 0;
+    let mut _total_passed = 0;
+    let mut _total_failed = 0;
 
     loop {
         let mut len_buf = [0u8; 4];
@@ -249,10 +239,10 @@ async fn run_test(target: String, filter: Option<String>) -> Result<()> {
             TestEvent::CaseFinished { name, success, duration_ms } => {
                 if success {
                     println!(" {} {} ({}ms)", "✔".green(), name, duration_ms);
-                    total_passed += 1;
+                    _total_passed += 1;
                 } else {
                     println!(" {} {} ({}ms)", "✘".red().bold(), name, duration_ms);
-                    total_failed += 1;
+                    _total_failed += 1;
                 }
             }
             TestEvent::SuiteFinished { total, passed, failed } => {
@@ -280,8 +270,10 @@ async fn run_test(target: String, filter: Option<String>) -> Result<()> {
 
 async fn apply_manifest(path: String) -> Result<()> {
     let yaml = fs::read_to_string(&path).context("Failed to read manifest")?;
+    // Use the generated module Nucleus and its Client struct
     let mut nucleus = Nucleus::Client::connect().await.context("Nucleus unreachable")?;
     println!("{} Applying manifest from {}...", "→".blue(), path);
+    // Use the explicit enum path from the Nucleus module
     let success = nucleus.apply(Nucleus::ApplyManifest { yaml }).await?;
     if success {
         println!("{} Mesh converged.", "✔".green());
@@ -309,6 +301,7 @@ async fn run_top() -> Result<()> {
 }
 
 async fn tail_logs(target: String) -> Result<()> {
+    // Use the generated module Observer and its Client struct
     let mut observer = Observer::Client::connect().await.context("Observer unreachable")?;
     println!("{} Tailing logs for {}...", "→".blue(), target);
     loop {

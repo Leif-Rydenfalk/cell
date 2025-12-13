@@ -8,6 +8,7 @@ use std::process::{Child, Command, Stdio};
 use cell_model::config::CellInitConfig;
 use cell_model::protocol::{MitosisSignal, MitosisControl};
 use cell_transport::gap_junction::{spawn_with_gap_junction, GapJunction};
+use tracing::{info, warn};
 
 pub struct Capsid;
 
@@ -29,48 +30,60 @@ impl Capsid {
             }
         }
 
-        let mut cmd = Command::new("bwrap");
+        // Check if bubblewrap (bwrap) is available
+        let has_bwrap = which::which("bwrap").is_ok();
 
-        // SECURITY: Strict Sandboxing Profile
-        cmd.arg("--unshare-all")
-            .arg("--share-net")
-            .arg("--die-with-parent")
-            .arg("--new-session")
-            .arg("--cap-drop").arg("ALL")
+        let mut cmd = if has_bwrap {
+            let mut c = Command::new("bwrap");
+            // SECURITY: Strict Sandboxing Profile
+            c.arg("--unshare-all")
+                .arg("--share-net")
+                .arg("--die-with-parent")
+                .arg("--new-session")
+                .arg("--cap-drop").arg("ALL")
+                
+                // 1. Filesystem: Whitelist
+                .arg("--ro-bind").arg("/usr").arg("/usr")
+                .arg("--ro-bind").arg("/bin").arg("/bin")
+                .arg("--ro-bind").arg("/sbin").arg("/sbin")
+                .arg("--dev").arg("/dev")
+                .arg("--proc").arg("/proc")
+                .arg("--tmpfs").arg("/tmp")
+                
+                // 2. Cell runtime requirements
+                .arg("--bind").arg(socket_dir).arg("/tmp/cell")
+                .arg("--bind").arg(daemon_socket_path).arg("/tmp/mitosis.sock")
+                
+                // 3. The Payload
+                .arg("--ro-bind").arg(&binary_canonical).arg("/tmp/dna/payload");
+
+            if Path::new("/lib").exists() { c.arg("--ro-bind").arg("/lib").arg("/lib"); }
+            if Path::new("/lib64").exists() { c.arg("--ro-bind").arg("/lib64").arg("/lib64"); }
+
+            c.args(args);
+            c.arg("/tmp/dna/payload");
             
-            // 1. Filesystem: Whitelist
-            .arg("--ro-bind").arg("/usr").arg("/usr")
-            .arg("--ro-bind").arg("/bin").arg("/bin")
-            .arg("--ro-bind").arg("/sbin").arg("/sbin")
-            .arg("--dev").arg("/dev")
-            .arg("--proc").arg("/proc")
-            .arg("--tmpfs").arg("/tmp")
+            // Config for bwrap env
+            c.env("CELL_SOCKET_DIR", "/tmp/cell");
             
-            // 2. Cell runtime requirements
-            .arg("--bind").arg(socket_dir).arg("/tmp/cell")
-            .arg("--bind").arg(daemon_socket_path).arg("/tmp/mitosis.sock")
-            
-            // 3. The Payload
-            .arg("--ro-bind").arg(binary_canonical).arg("/tmp/dna/payload");
+            c
+        } else {
+            warn!("[Capsid] 'bwrap' not found. Falling back to raw process spawning (NO SANDBOX).");
+            let mut c = Command::new(&binary_canonical);
+            c.args(args);
+            c.env("CELL_SOCKET_DIR", socket_dir);
+            c
+        };
 
-        if Path::new("/lib").exists() { cmd.arg("--ro-bind").arg("/lib").arg("/lib"); }
-        if Path::new("/lib64").exists() { cmd.arg("--ro-bind").arg("/lib64").arg("/lib64"); }
-
-        // 5. Clean IO (Gap Junction uses FD 3)
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::inherit()); 
-
-        // 6. Config
-        cmd.env("CELL_SOCKET_DIR", "/tmp/cell");
-        // No UMBILICAL variable. Using standard path /tmp/mitosis.sock if needed.
-        
+        // Common Config
         cmd.env("CELL_ORGANISM", &config.organism);
         cmd.env_remove("CELL_NODE_ID"); 
         cmd.env_remove("CELL_IDENTITY");
 
-        cmd.args(args);
-        cmd.arg("/tmp/dna/payload");
+        // Clean IO (Gap Junction uses FD 3)
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::inherit());
 
         // --- SPAWN WITH GAP JUNCTION ---
         let (child, mut junction) = spawn_with_gap_junction(cmd)
