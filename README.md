@@ -158,3 +158,20 @@ container images, SaaS, or embedded firmware) in one of these forms:
   - A file named ATTRIBUTION in the root/top-level directory, or  
   - A visible "About"/"Credits" page/UI element, or  
   - A command-line flag --about that prints the notice.
+
+---
+
+# Start the mesh
+$ cell up
+
+# Check status  
+$ cell status
+
+# Live dashboard
+$ cell top
+
+# Hot-swap a cell
+$ cell swap ledger
+
+# Stop everything
+$ cell down
