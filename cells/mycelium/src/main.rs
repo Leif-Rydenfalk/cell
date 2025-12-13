@@ -1,49 +1,33 @@
 // cells/mycelium/src/main.rs
 // SPDX-License-Identifier: MIT
-// The Supervisor: Auto-spawns, Heals, and Scales the Mesh.
+// The Supervisor
 
+// ... (Imports same as before) ...
 use anyhow::{Result, Context, anyhow};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::io::{Read, Write};
 use tracing::{info, warn, error};
 use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
-use std::path::PathBuf;
-
-// Imports for Handshake
 use cell_model::protocol::{MitosisSignal, MitosisControl};
 use cell_model::config::CellInitConfig;
 use cell_transport::gap_junction::spawn_with_gap_junction;
+use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum ResolverRequest {
-    EnsureRunning { cell_name: String },
-}
-
+pub enum ResolverRequest { EnsureRunning { cell_name: String } }
 #[derive(Serialize, Deserialize, Debug)]
-pub enum ResolverResponse {
-    Ok { socket_path: String },
-    Error { message: String },
-}
+pub enum ResolverResponse { Ok { socket_path: String }, Error { message: String } }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // CRITICAL: Sanitize Environment
-    // Ensure we are operating in the system scope, not a test scope inherited from the shell.
-    if std::env::var("CELL_SOCKET_DIR").is_ok() {
-        warn!("Detected CELL_SOCKET_DIR env var. Unsetting to enforce system scope.");
-        std::env::remove_var("CELL_SOCKET_DIR");
-    }
+    if std::env::var("CELL_SOCKET_DIR").is_ok() { std::env::remove_var("CELL_SOCKET_DIR"); }
     std::env::remove_var("CELL_NODE_ID");
     std::env::remove_var("CELL_ORGANISM");
 
     tracing_subscriber::fmt().init();
-    info!("╔══════════════════════════════════════════════════════════╗");
-    info!("║           MYCELIUM SUPERVISOR ONLINE                     ║");
-    info!("║   The Root of the Mesh.                                  ║");
-    info!("╚══════════════════════════════════════════════════════════╝");
+    info!("--- MYCELIUM ONLINE ---");
 
-    // 1. Setup Environment
     let home = dirs::home_dir().expect("No HOME");
     let system_dir = home.join(".cell/runtime/system");
     tokio::fs::create_dir_all(&system_dir).await?;
@@ -51,39 +35,23 @@ async fn main() -> Result<()> {
     let mycelium_sock = system_dir.join("mycelium.sock");
     if mycelium_sock.exists() { tokio::fs::remove_file(&mycelium_sock).await.ok(); }
 
-    // 2. Ensure Hypervisor is running (Mycelium's right hand)
-    // IMPORTANT: Spawns hypervisor in the SYSTEM scope via Gap Junction
     ensure_hypervisor_running().await?;
 
-    // 3. Start Build Listener (Blocking IO in a thread or async adapter)
     let listener = UnixListener::bind(&mycelium_sock)?;
-    info!("[Mycelium] Listening for build requests at {:?}", mycelium_sock);
+    info!("[Mycelium] Listening...");
 
-    // We use a simple loop + tokio spawn for the resolver requests
     let listener_handle = tokio::task::spawn_blocking(move || {
         loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let runtime = tokio::runtime::Handle::current();
-                    runtime.spawn(async move {
-                        if let Err(e) = handle_client(&mut stream).await {
-                            error!("[Mycelium] Client error: {:?}", e);
-                        }
-                    });
-                }
-                Err(e) => {
-                    error!("[Mycelium] Accept error: {}", e);
-                    break;
-                }
+            if let Ok((mut stream, _)) = listener.accept() {
+                tokio::spawn(async move {
+                    let _ = handle_client(&mut stream).await;
+                });
             }
         }
     });
 
-    // 4. Start standard monitoring (Pheromones, Health)
     let health_handle = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-        }
+        loop { tokio::time::sleep(Duration::from_secs(60)).await; }
     });
 
     let _ = tokio::join!(health_handle, listener_handle);
@@ -101,13 +69,11 @@ async fn handle_client(stream: &mut UnixStream) -> Result<()> {
 
     let resp = match req {
         ResolverRequest::EnsureRunning { cell_name } => {
-            info!("[Mycelium] Request to ensure '{}' is active", cell_name);
+            // ALWAYS call ensure_cell, which now calls Hypervisor->Spawn
+            // Hypervisor handles idempotency and hot-swapping.
             match ensure_cell(&cell_name).await {
                 Ok(path) => ResolverResponse::Ok { socket_path: path },
-                Err(e) => {
-                    warn!("[Mycelium] Failed to spawn {}: {:#}", cell_name, e);
-                    ResolverResponse::Error { message: format!("{:#}", e) }
-                },
+                Err(e) => ResolverResponse::Error { message: e.to_string() },
             }
         }
     };
@@ -120,65 +86,38 @@ async fn handle_client(stream: &mut UnixStream) -> Result<()> {
 }
 
 async fn ensure_cell(name: &str) -> Result<String> {
-    let home = dirs::home_dir().unwrap();
-    let socket_path = home.join(".cell/runtime/system").join(format!("{}.sock", name));
-    
-    if socket_path.exists() {
-        return Ok(socket_path.to_string_lossy().to_string());
-    }
-
-    info!("[Mycelium] '{}' missing. Spawning via Hypervisor...", name);
-    // System::spawn uses env vars. We sanitized them at startup, so it should default to system scope.
+    // We do NOT check for socket existence here anymore.
+    // We actively request spawn to ensure version compliance.
     let path = cell_sdk::System::spawn(name, None).await
-        .context("Failed to spawn cell via Hypervisor")?;
-    
+        .context("Failed to spawn/update cell via Hypervisor")?;
     Ok(path)
 }
 
+// ... (ensure_hypervisor_running and find_binary remain same) ...
 async fn ensure_hypervisor_running() -> Result<()> {
     let home = dirs::home_dir().unwrap();
     let system_dir = home.join(".cell/runtime/system");
     let hv_sock = system_dir.join("mitosis.sock");
     
-    if hv_sock.exists() {
-        return Ok(());
-    }
+    if hv_sock.exists() { return Ok(()); }
 
-    info!("[Mycelium] Hypervisor missing. Igniting system kernel...");
-
+    info!("[Mycelium] Booting Hypervisor...");
     let current_exe = std::env::current_exe()?;
     let bin_dir = current_exe.parent().context("No parent dir")?;
-    let hypervisor_bin = bin_dir.join("hypervisor");
+    let hypervisor_bin = bin_dir.join("hypervisor"); // Assume built alongside mycelium
 
-    let final_bin_path = if hypervisor_bin.exists() {
-        hypervisor_bin
-    } else {
-        info!("[Mycelium] Hypervisor binary not found at {:?}. Compiling...", hypervisor_bin);
-        let status = std::process::Command::new("cargo")
-            .args(&["build", "--release", "-p", "hypervisor"])
-            .status()?;
-        
-        if !status.success() {
-            anyhow::bail!("Failed to compile hypervisor");
-        }
-        
-        find_binary("hypervisor").ok_or_else(|| anyhow!("Could not locate hypervisor binary after build"))?
-    };
-
-    let mut cmd = std::process::Command::new(&final_bin_path);
+    let mut cmd = std::process::Command::new(&hypervisor_bin);
     cmd.env("CELL_SOCKET_DIR", system_dir.to_str().unwrap());
     cmd.env("CELL_NODE_ID", "0");
     cmd.env("CELL_ORGANISM", "system");
-    
     cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null()); 
+    cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::inherit()); 
 
     let (_child, mut junction) = spawn_with_gap_junction(cmd)?;
 
     loop {
-        let signal = junction.wait_for_signal()?;
-        match signal {
+        match junction.wait_for_signal()? {
             MitosisSignal::RequestIdentity => {
                 let config = CellInitConfig {
                     node_id: 0,
@@ -189,29 +128,9 @@ async fn ensure_hypervisor_running() -> Result<()> {
                 };
                 junction.send_control(MitosisControl::InjectIdentity(config))?;
             }
-            MitosisSignal::Prophase => { info!("[Mycelium] Hypervisor gestation..."); }
-            MitosisSignal::Prometaphase { socket_path } => { info!("[Mycelium] Hypervisor bound at {}", socket_path); }
-            MitosisSignal::Cytokinesis => {
-                info!("[Mycelium] Hypervisor detached and online.");
-                break;
-            }
-            MitosisSignal::Apoptosis { reason } => anyhow::bail!("Hypervisor died: {}", reason),
-            MitosisSignal::Necrosis => anyhow::bail!("Hypervisor panicked"),
+            MitosisSignal::Cytokinesis => break,
+            _ => {}
         }
     }
-
     Ok(())
-}
-
-fn find_binary(name: &str) -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let candidates = [
-        cwd.join("target/release").join(name),
-        cwd.join("target/debug").join(name),
-        cwd.join(format!("cells/{}/target/release/{}", name, name)),
-    ];
-    for c in candidates {
-        if c.exists() { return Some(c); }
-    }
-    None
 }

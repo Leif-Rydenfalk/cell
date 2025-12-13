@@ -26,6 +26,7 @@ pub struct BuildRequest {
 #[protein]
 pub struct BuildResponse {
     pub binary_path: String,
+    pub source_hash: String, // New field for versioning
 }
 
 struct BuilderService {
@@ -45,44 +46,37 @@ impl BuilderService {
     }
 
     fn resolve_source(&self, cell_name: &str) -> Result<PathBuf> {
-        // 1. Try Registry
         let source_path = self.registry_path.join(cell_name);
         if source_path.exists() {
             return Ok(source_path);
         }
         
-        // 2. Fallback: Workspace Search
         if let Ok(cwd) = std::env::current_dir() {
             let local_cells = cwd.join("cells").join(cell_name);
-            if local_cells.exists() {
-                info!("[Builder] Found '{}' in local workspace cells/", cell_name);
-                return Ok(local_cells);
-            }
+            if local_cells.exists() { return Ok(local_cells); }
+            
             let schema_ex = cwd.join("examples").join("cell-schema-sync").join(cell_name);
-            if schema_ex.exists() {
-                info!("[Builder] Found '{}' in examples/cell-schema-sync/", cell_name);
-                return Ok(schema_ex);
-            }
+            if schema_ex.exists() { return Ok(schema_ex); }
+            
             let market_ex = cwd.join("examples").join("cell-market").join(cell_name);
-            if market_ex.exists() {
-                info!("[Builder] Found '{}' in examples/cell-market/", cell_name);
-                return Ok(market_ex);
-            }
+            if market_ex.exists() { return Ok(market_ex); }
         }
 
-        anyhow::bail!(
-            "Cell '{}' not found in registry ({:?}) or local workspace.",
-            cell_name,
-            self.registry_path
-        );
+        anyhow::bail!("Cell '{}' not found.", cell_name);
     }
 
-    fn build(&self, cell_name: &str, mode: BuildMode) -> Result<PathBuf> {
+    fn build(&self, cell_name: &str, mode: BuildMode) -> Result<(PathBuf, String)> {
         let source_path = self.resolve_source(cell_name)?;
 
         match mode {
             BuildMode::Standard => Ribosome::synthesize(&source_path, cell_name),
-            BuildMode::Test => Ribosome::synthesize_test(&source_path, cell_name),
+            BuildMode::Test => {
+                // For tests, we use a dummy hash or compute one, 
+                // but usually tests are one-off. 
+                // We'll reuse synthesize logic for consistency or just return empty hash.
+                let path = Ribosome::synthesize_test(&source_path, cell_name)?;
+                Ok((path, "test-ephemeral".to_string()))
+            },
         }
     }
 }
@@ -96,22 +90,18 @@ struct Builder {
 #[handler]
 impl Builder {
     async fn build(&self, req: BuildRequest) -> Result<BuildResponse> {
-        let path = self.svc.build(&req.cell_name, req.mode)?;
+        let (path, hash) = self.svc.build(&req.cell_name, req.mode)?;
         Ok(BuildResponse {
             binary_path: path.to_string_lossy().to_string(),
+            source_hash: hash,
         })
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .init();
+    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
     info!("[Builder] Compiler Active");
-
-    let service = Builder {
-        svc: std::sync::Arc::new(BuilderService::new()),
-    };
+    let service = Builder { svc: std::sync::Arc::new(BuilderService::new()) };
     service.serve("builder").await
 }

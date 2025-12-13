@@ -22,21 +22,33 @@ impl Ribosome {
         Ok((bin_dir, meta_dir))
     }
 
-    pub fn synthesize(source_path: &Path, cell_name: &str) -> Result<PathBuf> {
+    pub fn synthesize(source_path: &Path, cell_name: &str) -> Result<(PathBuf, String)> {
         let (bin_dir, meta_dir) = Self::prepare_env(cell_name)?;
         
-        // Simplified cache check for standard builds
-        let binary_path = bin_dir.join(cell_name);
-        // (Hashing logic omitted for brevity, keeping it simple for now)
+        let actual_source = fs::canonicalize(source_path).context("Failed to resolve source")?;
         
-        tracing::info!("[Ribosome] Synthesizing '{}'...", cell_name);
+        // Compute Hash First
+        let current_hash = Self::compute_dna_hash(&actual_source)?;
+        let hash_file_path = meta_dir.join("dna.hash");
+        let binary_path = bin_dir.join(cell_name);
 
+        // Check Cache
+        if binary_path.exists() && hash_file_path.exists() {
+            let cached_hash = fs::read_to_string(&hash_file_path).unwrap_or_default();
+            if cached_hash.trim() == current_hash {
+                // Up to date
+                return Ok((binary_path, current_hash));
+            }
+            tracing::info!("[Ribosome] Source change detected for '{}'. Re-synthesizing...", cell_name);
+        } else {
+            tracing::info!("[Ribosome] Synthesizing '{}'...", cell_name);
+        }
+
+        // Build
         let mut cmd = Command::new("cargo");
         cmd.arg("build").arg("--release");
         Self::sanitize_cargo_cmd(&mut cmd);
 
-        let actual_source = fs::canonicalize(source_path).context("Failed to resolve source")?;
-        
         let status = cmd
             .current_dir(&actual_source)
             .env("CARGO_TARGET_DIR", &meta_dir.join("target"))
@@ -57,35 +69,31 @@ impl Ribosome {
         }
 
         fs::copy(&built_binary, &binary_path)?;
-        Ok(binary_path)
+        fs::write(&hash_file_path, &current_hash)?;
+        
+        Ok((binary_path, current_hash))
     }
 
     pub fn synthesize_test(source_path: &Path, cell_name: &str) -> Result<PathBuf> {
         let (_, meta_dir) = Self::prepare_env(cell_name)?;
         
         tracing::info!("[Ribosome] Compiling tests for '{}'...", cell_name);
-
         let actual_source = fs::canonicalize(source_path).context("Failed to resolve source")?;
 
         let mut cmd = Command::new("cargo");
-        cmd.arg("test")
-           .arg("--no-run")
-           .arg("--message-format=json");
-        
+        cmd.arg("test").arg("--no-run").arg("--message-format=json");
         Self::sanitize_cargo_cmd(&mut cmd);
 
         let output = cmd
             .current_dir(&actual_source)
             .env("CARGO_TARGET_DIR", &meta_dir.join("target"))
-            .output()
-            .context("Failed to run cargo test build")?;
+            .output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("Test compilation failed:\n{}", stderr);
         }
 
-        // Parse JSON output to find the test executable
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut test_binary = None;
 
@@ -95,15 +103,9 @@ impl Ribosome {
                     if reason == "compiler-artifact" {
                         if let Some(executable) = json.get("executable").and_then(|s| s.as_str()) {
                             if let Some(target) = json.get("target") {
-                                // We prefer integration tests ('test' kind) or bin tests
                                 let is_test = target.get("test").and_then(|b| b.as_bool()).unwrap_or(false);
-                                // let kind = target.get("kind").and_then(|k| k.as_array()).map(|a| a[0].as_str().unwrap_or(""));
-                                
                                 if is_test {
                                     test_binary = Some(PathBuf::from(executable));
-                                    // Keep going to find the *last* one? Or break?
-                                    // Usually there is one main integration test binary if there is a `tests/` dir.
-                                    // If multiple, this picks one arbitrarily (the last one encountered).
                                 }
                             }
                         }
@@ -112,7 +114,42 @@ impl Ribosome {
             }
         }
 
-        test_binary.ok_or_else(|| anyhow!("No test executable produced by cargo"))
+        test_binary.ok_or_else(|| anyhow!("No test executable produced"))
+    }
+
+    fn compute_dna_hash(path: &Path) -> Result<String> {
+        let mut hasher = blake3::Hasher::new();
+        
+        // Hash critical build files
+        let mut files = Vec::new();
+        
+        // Recursive directory walk
+        let mut dirs = vec![path.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        let name = p.file_name().unwrap_or_default();
+                        if name != "target" && name != ".git" {
+                            dirs.push(p);
+                        }
+                    } else if p.extension().map_or(false, |ext| ext == "rs" || ext == "toml" || ext == "lock") {
+                        files.push(p);
+                    }
+                }
+            }
+        }
+        
+        files.sort(); // Deterministic order
+        
+        for f in files {
+            if let Ok(bytes) = fs::read(&f) {
+                hasher.update(&bytes);
+            }
+        }
+        
+        Ok(hasher.finalize().to_hex().to_string())
     }
 
     fn sanitize_cargo_cmd(cmd: &mut Command) {
@@ -124,7 +161,6 @@ impl Ribosome {
         if let Ok(path) = std::env::var("PATH") {
             cmd.env("PATH", path);
         }
-        // Force color off for cleaner logs
         cmd.arg("--color=never");
     }
 }
