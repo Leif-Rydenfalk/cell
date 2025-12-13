@@ -19,6 +19,7 @@ pub mod manifest;
 pub use protocol::*;
 pub use ops::*;
 pub use error::Error;
+// Fix ambiguous glob re-exports by explicitly picking what we need from macro_coordination
 pub use macro_coordination::{
     MacroInfo, ExpansionContext, MacroCoordinationRequest, MacroCoordinationResponse
     // MacroKind is intentionally omitted here as it is already exported by protocol via glob

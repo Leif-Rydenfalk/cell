@@ -7,11 +7,10 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use anyhow::{Result, Context, bail}; // Removed unused 'anyhow' import
+use anyhow::{Result, Context, bail}; 
 use serde::{Deserialize, Serialize};
-use syn::{parse_file, Item}; // Removed unused imports
+use syn::{parse_file, Item};
 use syn::visit_mut::VisitMut;
-// Removed unused quote imports
 
 // --- PROTOCOL ---
 #[derive(Serialize, Deserialize, Debug)]
@@ -68,23 +67,19 @@ fn bootstrap_mycelium(socket_path: &Path) -> Result<UnixStream> {
     // We print to stderr so it shows up in cargo build output
     eprintln!("warning: [cell-build] Mycelium not found at {:?}. Bootstrapping mesh...", socket_path);
 
-    // FIX: Use a separate target directory for infrastructure to avoid deadlocking 
-    // against the main 'cargo run' process holding the lock on ./target
-    let infra_target_dir = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("target")
-        .join("infra");
-
+    // FIX: Use a completely isolated temporary directory for the infrastructure build.
+    // This avoids deadlocking on the main workspace's Cargo.lock or ./target directory.
+    let infra_target_dir = std::env::temp_dir().join("cell-infra-build");
+    
     std::fs::create_dir_all(&infra_target_dir).ok();
 
     // Try to spawn mycelium via cargo. 
-    // Redirect stdout/stderr to suppress "Compiling..." noise from background process
     let status = Command::new("cargo")
         .args(&["run", "--release", "-p", "mycelium"])
         .env("CELL_DAEMON", "1")
-        .env("CARGO_TARGET_DIR", infra_target_dir) // <--- PREVENTS DEADLOCK
+        .env("CARGO_TARGET_DIR", infra_target_dir) // <--- CRITICAL FIX
         .stdout(Stdio::null()) 
-        .stderr(Stdio::null()) // Suppress output to clean up CLI experience
+        .stderr(Stdio::null()) 
         .spawn();
 
     if let Err(e) = status {
@@ -92,7 +87,7 @@ fn bootstrap_mycelium(socket_path: &Path) -> Result<UnixStream> {
     }
 
     // Wait for socket
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60); // Increased timeout
     while std::time::Instant::now() < deadline {
         if socket_path.exists() {
             if let Ok(stream) = UnixStream::connect(socket_path) {
@@ -138,17 +133,15 @@ pub fn register() {
     }
 }
 
-pub struct CellBuilder {
-    // fields removed to fix unused warning, simplified builder
-}
+pub struct CellBuilder;
 
 impl CellBuilder {
     pub fn configure() -> Self {
-        Self { }
+        Self
     }
 
     pub fn extract_macros(self) -> Result<Self> {
-        Ok(self) // Simplified for this context
+        Ok(self) 
     }
 }
 

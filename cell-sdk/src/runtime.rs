@@ -2,7 +2,8 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use anyhow::Result;
-use cell_transport::{Membrane, CoordinationHandler};
+use cell_transport::{Membrane, CoordinationHandler, Synapse};
+use cell_core::CellError;
 use tracing::{info, warn};
 use cell_model::macro_coordination::{MacroInfo, ExpansionContext};
 use cell_model::protocol::MitosisSignal;
@@ -10,19 +11,75 @@ use std::pin::Pin;
 use std::future::Future;
 use tokio::time::Duration;
 
+// --- Internal Nucleus Client for Registration ---
+// Defined locally to avoid circular build dependency on 'nucleus' cell
+mod nucleus_internal {
+    use super::*;
+    use cell_macros::protein;
+    use cell_model::rkyv::Deserialize;
+
+    #[protein]
+    pub struct CellRegistration {
+        pub name: String,
+        pub node_id: u64,
+        pub capabilities: Vec<String>,
+        pub endpoints: Vec<String>,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, cell_model::rkyv::Archive, cell_model::rkyv::Serialize, cell_model::rkyv::Deserialize, Debug, Clone)]
+    #[archive(check_bytes)]
+    #[archive(crate = "cell_model::rkyv")]
+    #[serde(crate = "serde")]
+    pub enum NucleusProtocol {
+        Register(CellRegistration),
+        // other variants ignored
+    }
+
+    pub struct Client {
+        conn: Synapse,
+    }
+
+    impl Client {
+        pub async fn connect() -> Result<Self> {
+            let conn = Synapse::grow("nucleus").await?;
+            Ok(Self { conn })
+        }
+
+        pub async fn register(&mut self, name: String, node_id: u64) -> Result<bool, CellError> {
+            let reg = CellRegistration {
+                name,
+                node_id,
+                capabilities: vec![],
+                endpoints: vec![],
+            };
+            
+            #[derive(serde::Serialize, serde::Deserialize, cell_model::rkyv::Archive, cell_model::rkyv::Serialize, cell_model::rkyv::Deserialize, Debug, Clone)]
+            #[archive(check_bytes)]
+            #[archive(crate = "cell_model::rkyv")]
+            #[serde(crate = "serde")]
+            enum NucleusResponse {
+                Register(bool),
+                // others ignored
+            }
+
+            let req = NucleusProtocol::Register(reg);
+            let resp = self.conn.fire::<NucleusProtocol, NucleusResponse>(&req).await?;
+            
+            match resp.deserialize().map_err(|_| CellError::SerializationFailure)? {
+                NucleusResponse::Register(b) => Ok(b),
+            }
+        }
+    }
+}
+
 pub struct Runtime;
 
 impl Runtime {
     fn emit_signal(signal: MitosisSignal) {
-        // Access the global Gap Junction established during Identity hydration
         if let Some(mutex) = crate::identity::GAP_JUNCTION.get() {
             if let Ok(mut junction) = mutex.lock() {
-                // If this fails (broken pipe), we probably can't do much but log or die.
                 let _ = junction.signal(signal);
             }
-        } else {
-            // If we are running standalone (no hypervisor), we might not have a junction.
-            // Just ignore signals in that case, or log to stderr.
         }
     }
 
@@ -59,37 +116,31 @@ impl Runtime {
         Resp: cell_model::rkyv::Serialize<cell_model::rkyv::ser::serializers::AllocSerializer<1024>> + Send + 'static,
         F: Fn(&str, &ExpansionContext) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync + 'static,
     {
-        // 1. Prophase: Initialization (Before Identity)
-        // We can't use emit_signal yet because Identity hasn't run to open the FD.
-        // However, we can try to open it early if we wanted, but Identity handles it safely.
-        // Let's defer Prophase signal to *after* Identity bootstrap inside `Identity::get()`?
-        // No, Identity needs to happen first.
-        
-        // Hook panic to emit Necrosis
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             Self::emit_signal(MitosisSignal::Necrosis);
             default_hook(info);
         }));
 
-        // 2. Hydrate Identity (This performs the Handshake: RequestIdentity -> Receive Config)
         let identity = crate::identity::Identity::get();
         let cell_name = identity.cell_name.clone();
         let node_id = identity.node_id;
 
-        // Now we have the Junction.
         Self::emit_signal(MitosisSignal::Prophase);
 
         info!("[Runtime] Booting Cell '{}' (Node {})", cell_name, node_id);
 
-        // Start background registration with Nucleus
         let reg_name = cell_name.clone();
+        
+        // Background Heartbeat Task
         tokio::spawn(async move {
+            // Wait for transport to initialize
             tokio::time::sleep(Duration::from_secs(1)).await;
             
             let mut backoff = Duration::from_secs(2);
             loop {
-                match crate::NucleusClient::connect().await {
+                // Use the internal manual client
+                match nucleus_internal::Client::connect().await {
                     Ok(mut nucleus) => {
                         match nucleus.register(reg_name.clone(), node_id).await {
                             Ok(_) => {
@@ -118,7 +169,6 @@ impl Runtime {
             None
         };
 
-        // 3. Prometaphase
         let socket_dir = crate::resolve_socket_dir();
         let socket_path = socket_dir.join(format!("{}.sock", cell_name));
         
@@ -128,7 +178,6 @@ impl Runtime {
 
         info!("[Runtime] Membrane binding to {}", cell_name);
         
-        // 4. Cytokinesis: We are about to enter the service loop
         Self::emit_signal(MitosisSignal::Cytokinesis);
 
         match Membrane::bind::<S, Req, Resp>(&cell_name, service, None, None, coordination_handler).await {
