@@ -1445,6 +1445,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cell-sdk",
+ "dirs",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "metrics"
 version = "0.1.0"
 dependencies = [
