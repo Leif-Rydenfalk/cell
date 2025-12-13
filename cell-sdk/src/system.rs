@@ -13,7 +13,6 @@ use std::process::{Command, Stdio};
 use std::path::PathBuf;
 use cell_transport::gap_junction::spawn_with_gap_junction;
 
-// Tracks if we have already ignited a local cluster in this process
 static CLUSTER_INIT: OnceCell<()> = OnceCell::const_new();
 
 /// Client interface for the Cell System Daemon (Hypervisor).
@@ -25,7 +24,10 @@ impl System {
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
         
         let system_dir = if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
-            std::path::PathBuf::from(p)
+            let path = std::path::PathBuf::from(p);
+            // Safety check: warn if using a target/test directory in non-test binary?
+            // But we can't easily detect context.
+            path
         } else {
             home.join(".cell/runtime/system")
         };
@@ -33,7 +35,8 @@ impl System {
         let daemon_socket = system_dir.join("mitosis.sock");
 
         if !daemon_socket.exists() {
-            return Err(anyhow!("System Daemon not found at {:?}. Is the Hypervisor running?", daemon_socket));
+            return Err(anyhow!("System Daemon not found at {:?}. Is the Hypervisor running? (Env CELL_SOCKET_DIR={:?})", 
+                daemon_socket, std::env::var("CELL_SOCKET_DIR")));
         }
 
         if config.is_none() {
@@ -87,7 +90,6 @@ impl System {
             target_dir.push("target");
             target_dir.push("cell-cluster");
             
-            // Only clean runtime state to preserve build artifacts if they exist
             let runtime_dir = target_dir.join("runtime");
             if runtime_dir.exists() {
                 let _ = std::fs::remove_dir_all(&runtime_dir);
@@ -98,14 +100,12 @@ impl System {
             let fake_home = target_dir.join("home");
             std::fs::create_dir_all(&fake_home).unwrap();
 
-            // Env Config
             std::env::set_var("CELL_SOCKET_DIR", target_dir.join("runtime/system").to_str().unwrap());
             std::env::set_var("CELL_REGISTRY_DIR", target_dir.join("registry").to_str().unwrap());
             std::env::set_var("CELL_DISABLE_SHM", "0");
             std::env::set_var("CELL_NODE_ID", "100");
             std::env::set_var("HOME", fake_home.to_str().unwrap());
 
-            // Populate Registry (Symlinks)
             if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
                 let current = std::path::Path::new(&manifest);
                 let registry = target_dir.join("registry");
@@ -127,28 +127,20 @@ impl System {
                 link_cells(current.parent().unwrap().join("cells")); 
             }
 
-            // --- Binary Optimization Strategy ---
             let mut cmd = if let Some(bin_path) = find_local_binary("hypervisor") {
-                // Best Case: Binary already exists from previous build
                 Command::new(bin_path)
             } else {
-                // Fallback: Build it now.
-                // KEY FIX: Removed `--release` and `CARGO_TARGET_DIR` override.
-                // This allows reusing the artifacts `cargo test` just compiled (debug profile, main target dir).
-                // It prevents recompiling libc/syn/serde from scratch.
                 let mut c = Command::new("cargo");
                 c.arg("run").arg("-p").arg("hypervisor");
                 c
             };
             
-            // Setup Gap Junction
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::null()); 
             cmd.stderr(Stdio::inherit()); 
 
             let (_child, mut junction) = spawn_with_gap_junction(cmd).expect("Failed to spawn Hypervisor with Gap Junction");
 
-            // The Progenitor Loop (Blocking wait on Junction)
             let handle = std::thread::spawn(move || {
                 loop {
                     let signal = junction.wait_for_signal().expect("Gap Junction severed");
@@ -157,7 +149,7 @@ impl System {
                         MitosisSignal::RequestIdentity => {
                             let socket_path = target_dir.join("runtime/system/mitosis.sock");
                             let config = CellInitConfig {
-                                node_id: 100, // System Node
+                                node_id: 100,
                                 cell_name: "hypervisor".to_string(),
                                 peers: vec![],
                                 socket_path: socket_path.to_string_lossy().to_string(),
@@ -167,11 +159,11 @@ impl System {
                             junction.send_control(MitosisControl::InjectIdentity(config))
                                 .expect("Failed to inject identity");
                         }
-                        MitosisSignal::Prophase => { /* Gestating... */ }
-                        MitosisSignal::Prometaphase { socket_path: _ } => { /* Binding... */ }
+                        MitosisSignal::Prophase => { }
+                        MitosisSignal::Prometaphase { socket_path: _ } => { }
                         MitosisSignal::Cytokinesis => {
                             println!("[System] Hypervisor Cytokinesis complete.");
-                            break; // Success
+                            break;
                         }
                         MitosisSignal::Apoptosis { reason } => panic!("[System] Hypervisor Apoptosis: {}", reason),
                         MitosisSignal::Necrosis => panic!("[System] Hypervisor Necrosis."),
@@ -188,13 +180,11 @@ impl System {
 }
 
 fn find_local_binary(name: &str) -> Option<PathBuf> {
-    // Attempt to find binary in standard cargo locations
     let current_exe = std::env::current_exe().ok()?;
     let build_dir = current_exe.parent()?.parent()?;
     
     let binary_name = if cfg!(windows) { format!("{}.exe", name) } else { name.to_string() };
     
-    // Prioritize debug since we are likely in `cargo test`
     let candidates = [
         build_dir.join("debug").join(&binary_name),
         build_dir.join("release").join(&binary_name),

@@ -269,8 +269,10 @@ async fn run_test(target: String, filter: Option<String>) -> Result<()> {
 
 async fn apply_manifest(path: String) -> Result<()> {
     let yaml = fs::read_to_string(&path).context("Failed to read manifest")?;
+    // Use the generated module Nucleus and its Client struct
     let mut nucleus = Nucleus::Client::connect().await.context("Nucleus unreachable")?;
     println!("{} Applying manifest from {}...", "→".blue(), path);
+    // Use the explicit enum path from the Nucleus module
     let success = nucleus.apply(Nucleus::ApplyManifest { yaml }).await?;
     if success {
         println!("{} Mesh converged.", "✔".green());
@@ -298,6 +300,7 @@ async fn run_top() -> Result<()> {
 }
 
 async fn tail_logs(target: String) -> Result<()> {
+    // Use the generated module Observer and its Client struct
     let mut observer = Observer::Client::connect().await.context("Observer unreachable")?;
     println!("{} Tailing logs for {}...", "→".blue(), target);
     loop {

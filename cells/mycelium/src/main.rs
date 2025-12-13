@@ -28,6 +28,15 @@ pub enum ResolverResponse {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // CRITICAL: Sanitize Environment
+    // Ensure we are operating in the system scope, not a test scope inherited from the shell.
+    if std::env::var("CELL_SOCKET_DIR").is_ok() {
+        warn!("Detected CELL_SOCKET_DIR env var. Unsetting to enforce system scope.");
+        std::env::remove_var("CELL_SOCKET_DIR");
+    }
+    std::env::remove_var("CELL_NODE_ID");
+    std::env::remove_var("CELL_ORGANISM");
+
     tracing_subscriber::fmt().init();
     info!("╔══════════════════════════════════════════════════════════╗");
     info!("║           MYCELIUM SUPERVISOR ONLINE                     ║");
@@ -96,7 +105,6 @@ async fn handle_client(stream: &mut UnixStream) -> Result<()> {
             match ensure_cell(&cell_name).await {
                 Ok(path) => ResolverResponse::Ok { socket_path: path },
                 Err(e) => {
-                    // Use Debug formatting {:#} or {:?} to print the full error chain
                     warn!("[Mycelium] Failed to spawn {}: {:#}", cell_name, e);
                     ResolverResponse::Error { message: format!("{:#}", e) }
                 },
@@ -120,6 +128,7 @@ async fn ensure_cell(name: &str) -> Result<String> {
     }
 
     info!("[Mycelium] '{}' missing. Spawning via Hypervisor...", name);
+    // System::spawn uses env vars. We sanitized them at startup, so it should default to system scope.
     let path = cell_sdk::System::spawn(name, None).await
         .context("Failed to spawn cell via Hypervisor")?;
     
@@ -132,15 +141,11 @@ async fn ensure_hypervisor_running() -> Result<()> {
     let hv_sock = system_dir.join("mitosis.sock");
     
     if hv_sock.exists() {
-        // Ping check? For now assume existence implies running
         return Ok(());
     }
 
     info!("[Mycelium] Hypervisor missing. Igniting system kernel...");
 
-    // 1. Locate Binary
-    // We try to find the binary relative to our current executable
-    // (assuming we are in target/release/ or similar)
     let current_exe = std::env::current_exe()?;
     let bin_dir = current_exe.parent().context("No parent dir")?;
     let hypervisor_bin = bin_dir.join("hypervisor");
@@ -148,7 +153,6 @@ async fn ensure_hypervisor_running() -> Result<()> {
     let final_bin_path = if hypervisor_bin.exists() {
         hypervisor_bin
     } else {
-        // Fallback: Build it if missing
         info!("[Mycelium] Hypervisor binary not found at {:?}. Compiling...", hypervisor_bin);
         let status = std::process::Command::new("cargo")
             .args(&["build", "--release", "-p", "hypervisor"])
@@ -158,25 +162,20 @@ async fn ensure_hypervisor_running() -> Result<()> {
             anyhow::bail!("Failed to compile hypervisor");
         }
         
-        // Re-locate after build
         find_binary("hypervisor").ok_or_else(|| anyhow!("Could not locate hypervisor binary after build"))?
     };
 
-    // 2. Prepare Command
     let mut cmd = std::process::Command::new(&final_bin_path);
     cmd.env("CELL_SOCKET_DIR", system_dir.to_str().unwrap());
     cmd.env("CELL_NODE_ID", "0");
     cmd.env("CELL_ORGANISM", "system");
     
-    // Gap Junction setup
     cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null()); // Daemonize
-    cmd.stderr(std::process::Stdio::inherit()); // Keep logs
+    cmd.stdout(std::process::Stdio::null()); 
+    cmd.stderr(std::process::Stdio::inherit()); 
 
-    // 3. Spawn with Bridge
     let (_child, mut junction) = spawn_with_gap_junction(cmd)?;
 
-    // 4. Perform Handshake (Progenitor Role)
     loop {
         let signal = junction.wait_for_signal()?;
         match signal {

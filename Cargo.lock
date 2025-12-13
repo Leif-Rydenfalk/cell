@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "builder"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -359,6 +359,7 @@ dependencies = [
  "dirs",
  "fd-lock",
  "rand",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
