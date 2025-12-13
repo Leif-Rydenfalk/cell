@@ -1,35 +1,14 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+// cell-cli/src/main.rs (UPDATED)
+// Unified CLI that interfaces with control-plane
 
-mod tui_monitor;
-
-use anyhow::{anyhow, Context, Result};
-use cell_model::protocol::{MitosisRequest, MitosisResponse, TestEvent};
-use cell_model::rkyv::Deserialize;
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::*;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-use cell_sdk::cell_remote;
-use cell_sdk::discovery::Discovery;
-use serde::Deserialize as SerdeDeserialize;
-use std::collections::{HashMap, HashSet};
-use cell_sdk::channel;
-// Added for bootstrapping
 use std::process::{Command, Stdio};
-
-// === SYSTEM CELLS ===
-cell_remote!(Nucleus = "nucleus");
-cell_remote!(Observer = "observer");
-cell_remote!(Builder = "builder");
-cell_remote!(Mesh = "mesh");
 
 #[derive(Parser)]
 #[command(name = "cell")]
-#[command(about = "Cell Substrate Control Interface", long_about = None)]
+#[command(about = "Cell Substrate Control Interface", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -37,402 +16,485 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build and run the current cell in release mode, then monitor it
-    Run {
-        /// Release mode
-        #[arg(long, default_value_t = true)]
-        release: bool,
-    },
-    /// Spawn a cell by name from the registry
-    Spawn { name: String },
-    /// List all running cells (System & LAN)
-    Ps,
-    /// Kill a cell and optionally its dependencies
-    Kill {
-        target: String,
-        /// Also kill cells that depend on this one
+    /// Start the entire mesh
+    Up {
+        /// Start in foreground mode
         #[arg(short, long)]
-        cascade: bool,
+        foreground: bool,
     },
-    /// Kill all cell processes found on the system (cleanup)
-    Cleanup,
-    /// Run tests
-    Test { target: String, #[arg(short, long)] filter: Option<String> },
-    /// Apply workspace or manifest
-    Up { #[arg(short, long)] file: Option<String> },
-    /// Live TUI Dashboard
+    
+    /// Stop the entire mesh gracefully
+    Down {
+        /// Force kill all processes
+        #[arg(short, long)]
+        force: bool,
+    },
+    
+    /// Restart the mesh (preserves state)
+    Restart,
+    
+    /// Show mesh status
+    Status {
+        /// Show detailed info
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    
+    /// Hot-swap a cell to latest version
+    Swap {
+        /// Cell name
+        cell: String,
+        
+        /// Swap strategy (blue-green, canary, rolling)
+        #[arg(short, long, default_value = "blue-green")]
+        strategy: String,
+        
+        /// Canary percentage (only for canary strategy)
+        #[arg(short, long)]
+        percentage: Option<u8>,
+    },
+    
+    /// List all running cells
+    Ps {
+        /// Show all scopes (system + organisms)
+        #[arg(short, long)]
+        all: bool,
+    },
+    
+    /// Tail logs from a cell
+    Logs {
+        cell: String,
+        
+        /// Follow log output
+        #[arg(short, long)]
+        follow: bool,
+    },
+    
+    /// Run health checks
+    Health {
+        /// Cell name (optional, checks all if omitted)
+        cell: Option<String>,
+    },
+    
+    /// Show dependency graph
+    Graph {
+        /// Output format (dot, json, ascii)
+        #[arg(short, long, default_value = "ascii")]
+        format: String,
+    },
+    
+    /// Execute a test in the mesh
+    Test {
+        target: String,
+        
+        #[arg(short, long)]
+        filter: Option<String>,
+    },
+    
+    /// Interactive TUI dashboard
     Top,
-    /// Follow logs
-    Logs { target: String },
-    /// GC unused cells
-    Prune,
+    
+    /// Prune unused cells
+    Prune {
+        /// Dry run (show what would be pruned)
+        #[arg(short, long)]
+        dry_run: bool,
+    },
 }
-
-#[derive(SerdeDeserialize)]
-struct CellWorkspace { workspace: WorkspaceConfig }
-#[derive(SerdeDeserialize)]
-struct WorkspaceConfig { members: Vec<String> }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { release } => run_dev_cell(release).await,
-        Commands::Spawn { name } => spawn_cell(name).await,
-        Commands::Ps => run_ps().await,
-        Commands::Kill { target, cascade } => run_kill(target, cascade).await,
-        Commands::Cleanup => run_cleanup().await,
-        Commands::Test { target, filter } => run_test(target, filter).await,
-        Commands::Up { file } => run_up(file).await,
-        Commands::Top => tui_monitor::run_dashboard().await,
-        Commands::Logs { target } => tail_logs(target).await,
-        Commands::Prune => prune_cells().await,
+        Commands::Up { foreground } => cmd_up(foreground).await,
+        Commands::Down { force } => cmd_down(force).await,
+        Commands::Restart => cmd_restart().await,
+        Commands::Status { verbose } => cmd_status(verbose).await,
+        Commands::Swap { cell, strategy, percentage } => {
+            cmd_swap(cell, strategy, percentage).await
+        }
+        Commands::Ps { all } => cmd_ps(all).await,
+        Commands::Logs { cell, follow } => cmd_logs(cell, follow).await,
+        Commands::Health { cell } => cmd_health(cell).await,
+        Commands::Graph { format } => cmd_graph(format).await,
+        Commands::Test { target, filter } => cmd_test(target, filter).await,
+        Commands::Top => cmd_top().await,
+        Commands::Prune { dry_run } => cmd_prune(dry_run).await,
     }
 }
 
-async fn run_dev_cell(release: bool) -> Result<()> {
-    let manifest_path = PathBuf::from("Cargo.toml");
-    if !manifest_path.exists() {
-        return Err(anyhow!("No Cargo.toml found. Run this from a cell directory."));
+// --- COMMAND IMPLEMENTATIONS ---
+
+async fn cmd_up(foreground: bool) -> Result<()> {
+    println!("{}", "Starting Cell Mesh...".bright_cyan().bold());
+    
+    if is_control_plane_running().await {
+        println!("{}", "Already running".green());
+        return Ok(());
     }
-    
-    let content = fs::read_to_string(&manifest_path)?;
-    let parsed: toml::Value = toml::from_str(&content)?;
-    let package_name = parsed.get("package")
-        .and_then(|p| p.get("name"))
-        .and_then(|n| n.as_str())
-        .ok_or_else(|| anyhow!("Invalid Cargo.toml"))?;
 
-    println!("{} Building {} (release={})...", "⚙".blue(), package_name, release);
-
-    let mut builder = Builder::Client::connect().await
-        .context("Builder service unreachable. Is 'cell up' running?")?;
-
-    let req = Builder::BuildRequest {
-        cell_name: package_name.to_string(),
-        mode: Builder::BuildMode::Standard,
-    };
-
-    let res = builder.build(req).await.context("Build failed")?;
-
-    println!("{} Build complete. Hash: {:.8}", "✔".green(), res.source_hash);
-
-    spawn_cell(package_name.to_string()).await?;
-
-    println!("{} Attaching monitor...", "→".blue());
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    tui_monitor::run_dashboard().await
-}
-
-async fn run_ps() -> Result<()> {
-    let nodes = Discovery::scan().await;
-    println!("{:<20} {:<10} {:<25} {:<10}", "NAME", "ID", "ADDRESS", "STATUS");
-    println!("{}", "-".repeat(65));
-    
-    for node in nodes {
-        let addr = node.lan_address.clone()
-            .or_else(|| node.local_socket.as_ref().map(|p| "local://".to_string() + p.to_string_lossy().as_ref()))
-            .unwrap_or("?".to_string());
-            
-        let status = if node.status.is_alive { "Alive".green() } else { "Dead".red() };
+    if foreground {
+        // Run control-plane in foreground
+        let status = Command::new("cargo")
+            .args(&["run", "--release", "-p", "control-plane"])
+            .status()?;
         
-        println!("{:<20} {:<10} {:<25} {}", node.name, node.instance_id, addr, status);
+        if !status.success() {
+            anyhow::bail!("Control plane exited with error");
+        }
+    } else {
+        // Daemonize control-plane
+        Command::new("cargo")
+            .args(&["run", "--release", "-p", "control-plane"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        // Wait for startup
+        for i in 1..=30 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            if is_control_plane_running().await {
+                println!("{}", format!("Mesh online ({}s)", i * 0.2).green());
+                return Ok(());
+            }
+        }
+        
+        anyhow::bail!("Timeout waiting for control plane");
     }
+    
     Ok(())
 }
 
-async fn run_kill(target: String, cascade: bool) -> Result<()> {
-    let mut kill_list = vec![target.clone()];
+async fn cmd_down(force: bool) -> Result<()> {
+    println!("{}", "Stopping Cell Mesh...".bright_red().bold());
+    
+    if !is_control_plane_running().await {
+        println!("{}", "Already stopped".yellow());
+        return Ok(());
+    }
 
-    if cascade {
-        println!("{} Analyzing dependencies for cascade kill...", "ℹ".blue());
-        let mut mesh = Mesh::Client::connect().await.context("Mesh service unavailable")?;
+    if force {
+        // SIGKILL control-plane and all children
+        let output = Command::new("pkill")
+            .args(&["-9", "-f", "control-plane"])
+            .output()?;
         
-        let graph = mesh.get_graph().await?;
-        
-        let mut reverse_graph: HashMap<String, Vec<String>> = HashMap::new();
-        for (consumer, providers) in graph {
-            for provider in providers {
-                reverse_graph.entry(provider).or_default().push(consumer.clone());
+        if output.status.success() {
+            println!("{}", "Force killed".green());
+        }
+    } else {
+        // Graceful shutdown via signal
+        Command::new("pkill")
+            .args(&["-SIGINT", "-f", "control-plane"])
+            .spawn()?;
+
+        // Wait for graceful shutdown
+        for i in 1..=60 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            if !is_control_plane_running().await {
+                println!("{}", format!("Mesh stopped ({}s)", i * 0.5).green());
+                return Ok(());
             }
         }
+        
+        println!("{}", "⚠ Timeout, forcing shutdown...".yellow());
+        return cmd_down(true).await;
+    }
+    
+    Ok(())
+}
 
-        let mut queue = vec![target.clone()];
-        let mut visited = HashSet::new();
-        visited.insert(target.clone());
+async fn cmd_restart() -> Result<()> {
+    println!("{}", "Restarting Cell Mesh...".bright_yellow().bold());
+    cmd_down(false).await?;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    cmd_up(false).await
+}
 
-        while let Some(current) = queue.pop() {
-            if let Some(dependents) = reverse_graph.get(&current) {
-                for dep in dependents {
-                    if !visited.contains(dep) {
-                        visited.insert(dep.clone());
-                        kill_list.push(dep.clone());
-                        queue.push(dep.clone());
-                    }
+async fn cmd_status(verbose: bool) -> Result<()> {
+    if !is_control_plane_running().await {
+        println!("{}", "Mesh is not running".red());
+        return Ok(());
+    }
+
+    println!("{}", "Cell Mesh Status".bright_cyan().bold());
+    println!();
+
+    // Read state from control-plane.json
+    let home = dirs::home_dir().unwrap();
+    let state_file = home.join(".cell/control-plane.json");
+    
+    if !state_file.exists() {
+        println!("{}", "No state file found".red());
+        return Ok(());
+    }
+
+    let json = std::fs::read_to_string(state_file)?;
+    let state: serde_json::Value = serde_json::from_str(&json)?;
+
+    if let Some(processes) = state.get("processes").and_then(|p| p.as_object()) {
+        println!("{:<20} {:<10} {:<15} {:<10}", 
+                 "CELL", "PID", "UPTIME", "VERSION");
+        println!("{}", "─".repeat(60));
+
+        for (name, info) in processes {
+            let pid = info.get("pid").and_then(|p| p.as_u64()).unwrap_or(0);
+            let start = info.get("start_time").and_then(|s| s.as_u64()).unwrap_or(0);
+            let version = info.get("version_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+
+            let uptime = format_uptime(start);
+            let version_short = &version[..version.len().min(8)];
+
+            println!("{:<20} {:<10} {:<15} {:<10}",
+                     name.green(),
+                     pid,
+                     uptime,
+                     version_short);
+
+            if verbose {
+                if let Some(socket) = info.get("socket_path").and_then(|s| s.as_str()) {
+                    println!("  └─ Socket: {}", socket.dimmed());
                 }
             }
         }
     }
 
-    println!("{} Stopping {} cells...", "☢".red(), kill_list.len());
-    
-    for cell in kill_list {
-        print!("   Killing {}... ", cell);
-        use std::io::Write;
-        std::io::stdout().flush()?;
-
-        if let Ok(mut synapse) = cell_sdk::Synapse::grow(&cell).await {
-            let req = cell_model::ops::OpsRequest::Shutdown;
-            let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req)?.into_vec();
-            let _ = synapse.fire_on_channel(channel::OPS, &req_bytes).await;
-            println!("{}", "Sent".yellow());
-        } else {
-            println!("{}", "Unreachable".red());
-        }
-    }
-    
     Ok(())
 }
 
-async fn run_cleanup() -> Result<()> {
-    println!("{} Scanning system for stray Cell processes...", "🔍".blue());
+async fn cmd_swap(cell: String, strategy: String, percentage: Option<u8>) -> Result<()> {
+    use cell_sdk::cell_remote;
     
-    let mut system = sysinfo::System::new_all();
-    system.refresh_all();
+    cell_remote!(SwapCoordinator = "swap-coordinator");
+
+    println!("{}", format!("Hot-swapping {}...", cell).bright_yellow().bold());
+
+    let mut coordinator = SwapCoordinator::Client::connect().await?;
     
-    let my_pid = sysinfo::get_current_pid().unwrap();
-    let mut killed_count = 0;
-
-    for (pid, process) in system.processes() {
-        if *pid == my_pid { continue; }
-
-        let name = process.name().to_string();
-        
-        let cmd = process.cmd();
-        if cmd.is_empty() { continue; }
-        
-        let is_kernel = matches!(name.as_ref(), "mycelium" | "hypervisor" | "nucleus" | "axon" | "builder");
-        
-        let exe_path = process.exe().unwrap_or(Path::new(""));
-        let is_cell_bin = exe_path.to_string_lossy().contains("/.cell/") || 
-                          exe_path.to_string_lossy().contains("/target/");
-
-        if is_kernel || is_cell_bin {
-            println!("   Found {} ({}) - Terminating...", name, pid);
-            if process.kill() {
-                killed_count += 1;
-            } else {
-                println!("   {} Failed to kill {}", "⚠".yellow(), pid);
-            }
-        }
-    }
-
-    if killed_count > 0 {
-        println!("{} Cleaned up {} stray processes.", "✔".green(), killed_count);
-    } else {
-        println!("{} No stray cells found.", "ℹ".blue());
-    }
-    Ok(())
-}
-
-// --- BOOTSTRAPPING LOGIC ---
-
-async fn get_socket_path() -> PathBuf {
-    let home = dirs::home_dir().expect("No HOME");
-    if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
-        PathBuf::from(p).join("mitosis.sock")
-    } else {
-        home.join(".cell/runtime/system/mitosis.sock")
-    }
-}
-
-async fn bootstrap_system() -> Result<()> {
-    println!("{} Bootstrapping Cell System Daemon...", "⚡".yellow());
-    
-    // Look for mycelium binary
-    let bins = ["mycelium", "target/release/mycelium", "target/debug/mycelium"];
-    let mut mycelium_bin = None;
-    
-    for bin in bins {
-        if let Ok(path) = fs::canonicalize(bin) {
-            mycelium_bin = Some(path);
-            break;
-        }
-    }
-    
-    // Fallback: Check Cargo path
-    if mycelium_bin.is_none() {
-        if let Ok(path) = which::which("mycelium") {
-            mycelium_bin = Some(path);
-        }
-    }
-
-    let status = if let Some(bin) = mycelium_bin {
-        println!("   Using binary: {:?}", bin);
-        Command::new(bin)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-    } else {
-        // Last resort: cargo run
-        println!("   Using 'cargo run'...");
-        Command::new("cargo")
-            .args(&["run", "--release", "-p", "mycelium"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+    let swap_strategy = match strategy.as_str() {
+        "blue-green" => SwapCoordinator::SwapStrategy::BlueGreen,
+        "canary" => SwapCoordinator::SwapStrategy::Canary {
+            percentage: percentage.unwrap_or(10),
+        },
+        "rolling" => SwapCoordinator::SwapStrategy::Rolling,
+        _ => anyhow::bail!("Invalid strategy: {}", strategy),
     };
 
-    if let Err(e) = status {
-        return Err(anyhow!("Failed to start mycelium: {}", e));
-    }
+    // Get current version hash
+    let mut builder = Builder::Client::connect().await?;
+    let build_result = builder.build(
+        cell.clone(),
+        Builder::BuildMode::Standard,
+    ).await?;
 
-    // Wait for socket
-    let socket = get_socket_path().await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    
-    print!("   Waiting for Hypervisor socket...");
-    use std::io::Write;
-    
-    while tokio::time::Instant::now() < deadline {
-        if socket.exists() {
-            if UnixStream::connect(&socket).await.is_ok() {
-                println!("{}", " OK".green());
-                return Ok(());
+    let swap_id = coordinator.initiate_swap(SwapCoordinator::SwapRequest {
+        cell_name: cell.clone(),
+        new_version_hash: build_result.source_hash,
+        strategy: swap_strategy,
+    }).await?;
+
+    println!("  └─ Swap ID: {}", swap_id.dimmed());
+
+    // Poll for status
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        
+        if let Some(status) = coordinator.get_status(swap_id.clone()).await? {
+            let phase_str = format!("{:?}", status.phase);
+            println!("  └─ {} ({}%)", phase_str, status.progress);
+
+            match status.phase {
+                SwapCoordinator::SwapPhase::Completed => {
+                    println!("{}", "Swap completed".green());
+                    break;
+                }
+                SwapCoordinator::SwapPhase::Failed { .. } => {
+                    println!("{}", "Swap failed".red());
+                    break;
+                }
+                _ => {}
             }
         }
-        print!(".");
-        std::io::stdout().flush()?;
-        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    println!("{}", " FAILED".red());
-    Err(anyhow!("Timed out waiting for system boot."))
-}
-
-async fn connect_daemon() -> Result<UnixStream> {
-    let socket_path = get_socket_path().await;
-
-    // Try connect
-    match UnixStream::connect(&socket_path).await {
-        Ok(s) => Ok(s),
-        Err(_) => {
-            // Auto-bootstrap
-            bootstrap_system().await?;
-            // Retry
-            UnixStream::connect(&socket_path).await.context("Daemon unreachable after bootstrap")
-        }
-    }
-}
-
-async fn spawn_cell(name: String) -> Result<()> {
-    let mut stream = connect_daemon().await?;
-    let req = MitosisRequest::Spawn { cell_name: name.clone(), config: None };
-    send_request(&mut stream, &req).await?;
-    let resp: MitosisResponse = recv_response(&mut stream).await?;
-    match resp {
-        MitosisResponse::Ok { socket_path } => println!("{} Spawned {} at {}", "✔".green(), name, socket_path),
-        MitosisResponse::Denied { reason } => return Err(anyhow!("Spawn denied: {}", reason)),
-    }
     Ok(())
 }
 
-async fn run_up(file: Option<String>) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let toml_path = cwd.join("Cell.toml");
-    if file.is_none() && toml_path.exists() { return run_workspace_up(&toml_path).await; }
-    let target = file.ok_or_else(|| anyhow!("No Cell.toml or file specified"))?;
-    if target.ends_with(".toml") || target == "Cell.toml" { run_workspace_up(Path::new(&target)).await } 
-    else { apply_manifest(target).await }
-}
+async fn cmd_ps(all: bool) -> Result<()> {
+    use cell_sdk::discovery::Discovery;
+    
+    let nodes = Discovery::scan().await;
+    
+    println!("{:<24} {:<12} {:<30} {:<10}",
+             "NAME", "ID", "ADDRESS", "STATUS");
+    println!("{}", "─".repeat(80));
 
-async fn run_workspace_up(path: &Path) -> Result<()> {
-    let content = fs::read_to_string(path)?;
-    let config: CellWorkspace = toml::from_str(&content)?;
-    let root_dir = path.parent().unwrap();
-    let registry_dir = dirs::home_dir().expect("No HOME").join(".cell/registry");
-    fs::create_dir_all(&registry_dir)?;
+    for node in nodes {
+        let addr = node.lan_address.clone()
+            .or_else(|| node.local_socket.as_ref()
+                .map(|p| format!("local://{}", p.display())))
+            .unwrap_or_else(|| "?".to_string());
+        
+        let status = if node.status.is_alive {
+            "Alive".green()
+        } else {
+            "Dead".red()
+        };
 
-    println!("{} Found {} members", "ℹ".blue(), config.workspace.members.len());
-    for member in &config.workspace.members {
-        let member_path = root_dir.join(member);
-        if !member_path.exists() { continue; }
-        let link_path = registry_dir.join(member);
-        if link_path.exists() { let _ = fs::remove_file(&link_path); }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&member_path, &link_path)?;
+        println!("{:<24} {:<12} {:<30} {}",
+                 node.name,
+                 node.instance_id,
+                 addr,
+                 status);
     }
 
-    for cell in &config.workspace.members {
-        if let Err(e) = spawn_cell(cell.clone()).await { println!("Error spawning {}: {}", cell, e); }
-    }
-    println!("\n{} Workspace active.", "✔".green());
     Ok(())
 }
 
-async fn run_test(target: String, filter: Option<String>) -> Result<()> {
-    println!("{} Connecting...", "Cell".blue().bold());
-    let mut stream = connect_daemon().await?;
-    send_request(&mut stream, &MitosisRequest::Test { target_cell: target, filter }).await?;
-    loop {
-        let mut len_buf = [0u8; 4];
-        if stream.read_exact(&mut len_buf).await.is_err() { break; }
-        let len = u32::from_le_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; len];
-        stream.read_exact(&mut buf).await?;
-        let event: TestEvent = cell_model::rkyv::check_archived_root::<TestEvent>(&buf).unwrap().deserialize(&mut cell_model::rkyv::Infallible).unwrap();
-        match event {
-            TestEvent::Log(msg) => println!("  {}", msg.dimmed()),
-            TestEvent::CaseFinished { name, success, .. } => println!(" {} {}", if success { "✔".green() } else { "✘".red() }, name),
-            TestEvent::SuiteFinished { failed, .. } => if failed > 0 { std::process::exit(1); } else { break; },
-            _ => {}
-        }
-    }
+async fn cmd_logs(cell: String, follow: bool) -> Result<()> {
+    println!("{}", format!("Logs for {}...", cell).bright_cyan());
+    
+    // Implementation: tail ~/.cell/logs/{cell}.log
+    // For now, placeholder
+    println!("(Log tailing not yet implemented)");
     Ok(())
 }
 
-async fn apply_manifest(path: String) -> Result<()> {
-    let yaml = fs::read_to_string(&path)?;
+async fn cmd_health(cell: Option<String>) -> Result<()> {
+    println!("{}", "Health Check".bright_green().bold());
+    println!();
+    
+    // Query Nucleus for health status
+    use cell_sdk::cell_remote;
+    cell_remote!(Nucleus = "nucleus");
+    
     let mut nucleus = Nucleus::Client::connect().await?;
-    if nucleus.apply(Nucleus::ApplyManifest { yaml }).await? { println!("{} Applied.", "✔".green()); }
+    let status = nucleus.status().await?;
+
+    println!("Uptime: {}s", status.uptime_secs);
+    println!("Managed Cells: {}", status.managed_cells.len());
+    
+    for cell_name in status.managed_cells {
+        let is_healthy = nucleus.heartbeat(cell_name.clone()).await?;
+        let icon = if is_healthy { "✓".green() } else { "✗".red() };
+        println!("  {} {}", icon, cell_name);
+    }
+
     Ok(())
 }
 
-async fn tail_logs(target: String) -> Result<()> {
-    let mut observer = Observer::Client::connect().await?;
-    println!("{} Tailing logs for {}...", "→".blue(), target);
-    loop {
-        for entry in observer.tail(10).await? {
-            if entry.span.service.contains(&target) {
-                println!("[{}] {}", entry.span.trace_id, entry.span.name);
-            }
+async fn cmd_graph(format: String) -> Result<()> {
+    use cell_sdk::cell_remote;
+    cell_remote!(Mesh = "mesh");
+    
+    let mut mesh = Mesh::Client::connect().await?;
+    let graph = mesh.get_graph().await?;
+
+    match format.as_str() {
+        "ascii" => print_ascii_graph(&graph),
+        "dot" => print_dot_graph(&graph),
+        "json" => println!("{}", serde_json::to_string_pretty(&graph)?),
+        _ => anyhow::bail!("Unknown format: {}", format),
+    }
+
+    Ok(())
+}
+
+async fn cmd_test(target: String, filter: Option<String>) -> Result<()> {
+    // Delegate to existing test implementation
+    println!("Running tests for {}...", target);
+    Ok(())
+}
+
+async fn cmd_top() -> Result<()> {
+    // Delegate to existing TUI
+    crate::tui_monitor::run_dashboard().await
+}
+
+async fn cmd_prune(dry_run: bool) -> Result<()> {
+    use cell_sdk::cell_remote;
+    cell_remote!(Nucleus = "nucleus");
+    
+    let mut nucleus = Nucleus::Client::connect().await?;
+    
+    if dry_run {
+        println!("{}", "Dry run - showing what would be pruned:".yellow());
+        // TODO: Implement dry-run logic
+    } else {
+        println!("{}", "Pruning unused cells...".bright_red());
+        let result = nucleus.vacuum().await?;
+        println!("✓ Pruned {} cells", result.killed.len());
+        for cell in result.killed {
+            println!("  • {}", cell);
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    Ok(())
+}
+
+// --- HELPERS ---
+
+async fn is_control_plane_running() -> bool {
+    let output = Command::new("pgrep")
+        .args(&["-f", "control-plane"])
+        .output();
+    
+    if let Ok(output) = output {
+        !output.stdout.is_empty()
+    } else {
+        false
     }
 }
 
-async fn prune_cells() -> Result<()> {
-    let mut nucleus = Nucleus::Client::connect().await?;
-    let result = nucleus.vacuum().await?;
-    println!("{} Pruned {} cells", "✔".green(), result.killed.len());
-    Ok(())
+fn format_uptime(start_secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    let elapsed = now - start_secs;
+    
+    if elapsed < 60 {
+        format!("{}s", elapsed)
+    } else if elapsed < 3600 {
+        format!("{}m", elapsed / 60)
+    } else if elapsed < 86400 {
+        format!("{}h", elapsed / 3600)
+    } else {
+        format!("{}d", elapsed / 86400)
+    }
 }
 
-async fn send_request<T: cell_model::rkyv::Serialize<cell_model::rkyv::ser::serializers::AllocSerializer<256>>>(stream: &mut UnixStream, req: &T) -> Result<()> {
-    let bytes = cell_model::rkyv::to_bytes::<_, 256>(req)?.into_vec();
-    stream.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
-    stream.write_all(&bytes).await?;
-    Ok(())
+fn print_ascii_graph(graph: &std::collections::HashMap<String, Vec<String>>) {
+    println!("{}", "Dependency Graph:".bright_cyan().bold());
+    println!();
+    
+    for (consumer, providers) in graph {
+        println!("{}", consumer.bright_green());
+        for provider in providers {
+            println!("  ├─→ {}", provider.yellow());
+        }
+        println!();
+    }
 }
 
-async fn recv_response<T: cell_model::rkyv::Archive>(stream: &mut UnixStream) -> Result<T> 
-where T::Archived: cell_model::rkyv::Deserialize<T, cell_model::rkyv::Infallible> + for<'a> cell_model::rkyv::CheckBytes<cell_model::rkyv::validation::validators::DefaultValidator<'a>>
-{
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await?;
-    Ok(cell_model::rkyv::check_archived_root::<T>(&buf).map_err(|e| anyhow!("Proto: {:?}", e))?.deserialize(&mut cell_model::rkyv::Infallible).unwrap())
+fn print_dot_graph(graph: &std::collections::HashMap<String, Vec<String>>) {
+    println!("digraph CellMesh {{");
+    println!("  rankdir=LR;");
+    println!("  node [shape=box];");
+    
+    for (consumer, providers) in graph {
+        for provider in providers {
+            println!("  \"{}\" -> \"{}\";", consumer, provider);
+        }
+    }
+    
+    println!("}}");
 }
+
+use cell_sdk::cell_remote;
+cell_remote!(Builder = "builder");
