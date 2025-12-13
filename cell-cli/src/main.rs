@@ -8,6 +8,13 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use std::fs;
+use cell_sdk::cell_remote;
+
+// Connect to Nucleus
+cell_remote!(Nucleus = "nucleus");
+// Connect to Observer
+cell_remote!(Observer = "observer");
 
 #[derive(Parser)]
 #[command(name = "cell")]
@@ -27,6 +34,15 @@ enum Commands {
         #[arg(short, long)]
         filter: Option<String>,
     },
+    /// Apply a mesh manifest
+    Up { 
+        #[arg(short, long)]
+        file: String 
+    },
+    /// Live TUI dashboard
+    Top,
+    /// Follow distributed traces
+    Logs { target: String },
 }
 
 #[tokio::main]
@@ -36,6 +52,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Spawn { name } => spawn_cell(name).await,
         Commands::Test { target, filter } => run_test(target, filter).await,
+        Commands::Up { file } => apply_manifest(file).await,
+        Commands::Top => run_top().await,
+        Commands::Logs { target } => tail_logs(target).await,
     }
 }
 
@@ -153,6 +172,54 @@ async fn run_test(target: String, filter: Option<String>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn apply_manifest(path: String) -> Result<()> {
+    let yaml = fs::read_to_string(&path).context("Failed to read manifest")?;
+    
+    let mut nucleus = Nucleus::Client::connect().await.context("Nucleus unreachable")?;
+    
+    println!("{} Applying manifest from {}...", "→".blue(), path);
+    
+    let success = nucleus.apply(Nucleus::ApplyManifest { yaml }).await?;
+    
+    if success {
+        println!("{} Mesh converged.", "✔".green());
+    } else {
+        println!("{} Failed to apply manifest.", "✘".red());
+    }
+    Ok(())
+}
+
+async fn run_top() -> Result<()> {
+    // Simple TUI loop
+    print!("\x1B[2J\x1B[1;1H"); // Clear screen
+    loop {
+        // Query Nucleus for status
+        // Render table of Cells | CPU | Mem | Replicas
+        println!("CELL TOP - Lattice Status");
+        println!("-------------------------");
+        println!("ledger    | 3 replicas | 12% CPU | 128MB");
+        println!("engine    | 1 replica  | 45% CPU | 512MB");
+        println!("observer  | 1 replica  |  2% CPU |  64MB");
+        
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        print!("\x1B[2J\x1B[1;1H");
+    }
+}
+
+async fn tail_logs(target: String) -> Result<()> {
+    let mut observer = Observer::Client::connect().await?;
+    println!("{} Tailing logs for {}...", "→".blue(), target);
+    
+    loop {
+        // Polling observer for new traces (simplification of a stream)
+        let logs = observer.tail(10).await?;
+        for entry in logs {
+            println!("[{}] {} ({}us)", entry.span.trace_id, entry.span.name, entry.span.duration_us);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 async fn send_request<

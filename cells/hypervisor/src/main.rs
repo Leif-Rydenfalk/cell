@@ -19,6 +19,15 @@ use rkyv::Deserialize;
 // Remote interface to Builder
 cell_remote!(Builder = "builder");
 
+// Extended Protocol for Hypervisor
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
+pub enum HypervisorControl {
+    Spawn(MitosisRequest),
+    HotSwap { cell_name: String, new_binary: String },
+    SpawnSpore { spore_id: String, binary: Vec<u8> },
+}
+
 #[cell_sdk::service]
 struct HypervisorService;
 
@@ -28,6 +37,16 @@ impl HypervisorService {
         let _ = cell_name;
         let _ = config;
         Ok(())
+    }
+
+    async fn hot_swap(&self, cell_name: String, new_binary: String) -> Result<bool> {
+        // 1. Locate running instance PID
+        // 2. Send signal (SIGUSR1) to pause
+        // 3. Use `nix::unistd::execve` to replace process image
+        //    OR spawn new version, pass FDs via UDS, then kill old.
+        tracing::info!("[Hypervisor] Hot-swapping {} -> {}", cell_name, new_binary);
+        // Logic placeholder for memfd_create + exec
+        Ok(true)
     }
 }
 

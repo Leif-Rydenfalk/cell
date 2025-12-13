@@ -8,6 +8,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use core::any::Any;
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::aead::{Aead, NewAead};
 
 // --- Unix Domain Socket Implementation ---
 
@@ -215,4 +217,49 @@ impl Connection for ShmConnection {
 
     fn as_any(&mut self) -> &mut (dyn Any + Send) { self }
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send> { self }
+}
+
+// --- Confidential Wrapper ---
+
+pub struct SecureTransport<T: Transport> {
+    inner: T,
+    key: Key,
+}
+
+impl<T: Transport> SecureTransport<T> {
+    pub fn new(inner: T, key_bytes: [u8; 32]) -> Self {
+        Self {
+            inner,
+            key: *Key::from_slice(&key_bytes),
+        }
+    }
+}
+
+impl<T: Transport> Transport for SecureTransport<T> {
+    fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, CellError>> + Send + '_>> {
+        // Encrypt Request
+        let cipher = ChaCha20Poly1305::new(&self.key);
+        // Use time-based nonce (simplified for example; in prod use atomic counter + exchange)
+        let mut nonce_bytes = [0u8; 12];
+        // Placeholder for nonce generation logic
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        
+        let encrypted_req = match cipher.encrypt(nonce, data) {
+            Ok(ct) => ct,
+            Err(_) => return Box::pin(async { Err(CellError::SerializationFailure) }),
+        };
+
+        // Inner Call
+        let fut = self.inner.call(&encrypted_req);
+        
+        // Decrypt Response
+        Box::pin(async move {
+            let encrypted_resp = fut.await?;
+            let cipher = ChaCha20Poly1305::new(&self.key); // Re-init needed due to self capture constraints
+            let nonce = Nonce::from_slice(&nonce_bytes);
+            
+            cipher.decrypt(nonce, encrypted_resp.as_ref())
+                .map_err(|_| CellError::Corruption)
+        })
+    }
 }

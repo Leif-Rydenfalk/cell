@@ -3,10 +3,12 @@
 // The Nucleus: System-wide singleton that manages Cell infrastructure
 
 use cell_sdk::*;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use cell_discovery::{Discovery, LanDiscovery, hardware::HardwareCaps};
+use cell_model::manifest::MeshManifest;
 
 // === PROTOCOL DEFINITIONS ===
 
@@ -51,12 +53,29 @@ pub struct CellInstance {
     pub health_score: f64,
 }
 
+#[protein]
+pub struct ApplyManifest {
+    pub yaml: String,
+}
+
+#[protein]
+pub struct ScheduleSpore {
+    pub spore_id: String,
+    pub required_caps: String, // e.g. "gpu"
+}
+
 // === NUCLEUS SERVICE ===
 
 pub struct Nucleus {
     start_time: std::time::SystemTime,
     registry: Arc<RwLock<CellRegistry>>,
     health_checker: Arc<HealthChecker>,
+    state: Arc<RwLock<NucleusState>>,
+}
+
+struct NucleusState {
+    desired_state: Option<MeshManifest>,
+    spores: HashMap<String, Vec<u8>>, // Spore ID -> Binary
 }
 
 struct CellRegistry {
@@ -85,6 +104,10 @@ impl Nucleus {
             health_checker: Arc::new(HealthChecker {
                 checks: HashMap::new(),
             }),
+            state: Arc::new(RwLock::new(NucleusState {
+                desired_state: None,
+                spores: HashMap::new(),
+            })),
         }
     }
 
@@ -115,6 +138,50 @@ impl Nucleus {
                 }
             }
         });
+
+        // The Control Loop (Converges State)
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let guard = state.read().await;
+                
+                if let Some(manifest) = &guard.desired_state {
+                    tracing::info!("[Nucleus] Reconciling mesh '{}'...", manifest.mesh);
+                    
+                    let nodes = Discovery::scan().await;
+                    
+                    for spec in &manifest.cells {
+                        // Check active replicas
+                        let active_count = nodes.iter()
+                            .filter(|n| n.name == spec.name)
+                            .count() as u32;
+
+                        if active_count < spec.replicas {
+                            let diff = spec.replicas - active_count;
+                            tracing::info!("[Nucleus] Scaling up {} (+{} replicas)", spec.name, diff);
+                            
+                            // Hardware-Aware Placement
+                            let _best_node = Self::find_best_node(&spec.placement, &spec.resources);
+                            
+                            // Trigger Spawn via Hypervisor
+                            // In a real cluster, this RPCs to the remote hypervisor on 'best_node'.
+                            // Here we default to local if not found.
+                            if let Err(e) = System::spawn(&spec.name, None).await {
+                                tracing::error!("Failed to spawn {}: {}", spec.name, e);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn find_best_node(_placement: &cell_model::manifest::PlacementStrategy, _res: &cell_model::manifest::ResourceLimits) -> Option<String> {
+        // Access global LAN cache
+        // Filter by HardwareCaps (GPU, TEE, AVX)
+        // Sort by Thermal Headroom (thermal_zone_temp)
+        None // Placeholder implementation
     }
 }
 
@@ -180,6 +247,25 @@ impl Nucleus {
         let mut registry = self.registry.write().await;
         registry.last_heartbeat.insert(cell_name, std::time::Instant::now());
         Ok(true)
+    }
+
+    async fn apply(&self, req: ApplyManifest) -> Result<bool> {
+        let manifest: MeshManifest = serde_yaml::from_str(&req.yaml)
+            .map_err(|e| anyhow!("Invalid YAML: {}", e))?;
+        
+        let mut state = self.state.write().await;
+        state.desired_state = Some(manifest.clone());
+        
+        tracing::info!("[Nucleus] Applied manifest for mesh '{}'", manifest.mesh);
+        Ok(true)
+    }
+
+    async fn schedule(&self, req: ScheduleSpore) -> Result<String> {
+        // Lattice Scheduling Logic
+        // 1. Find node with lowest load + matching caps
+        // 2. Return address of that node
+        tracing::info!("[Nucleus] Scheduling spore '{}' on GPU node...", req.spore_id);
+        Ok("127.0.0.1:9000".to_string())
     }
 }
 

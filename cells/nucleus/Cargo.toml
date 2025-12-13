@@ -8,3 +8,5 @@ cell-sdk = { path = "../../cell-sdk" }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+serde_yaml = { workspace = true }
+cell-discovery = { workspace = true }

@@ -4,6 +4,7 @@
 pub mod lan;
 pub mod local;
 pub mod health;
+pub mod hardware;
 
 // Re-export LanDiscovery for SDK convenience
 pub use lan::LanDiscovery;

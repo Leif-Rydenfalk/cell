@@ -27,6 +27,8 @@ pub use test_context::CellTestContext;
 
 // === MESH BUILDING ===
 pub mod mesh;
+// === DISTRIBUTED STATE ===
+pub mod crdt;
 
 pub use cell_discovery as discovery;
 

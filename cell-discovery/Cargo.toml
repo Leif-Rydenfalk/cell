@@ -11,3 +11,5 @@ anyhow = { workspace = true }
 tokio = { workspace = true, features = ["fs", "net", "sync", "time"] }
 dirs = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sysinfo = { workspace = true, optional = true }

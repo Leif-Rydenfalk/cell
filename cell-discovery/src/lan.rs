@@ -5,6 +5,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use crate::hardware::HardwareCaps;
 
 const MAX_CACHE_SIZE: usize = 10_000;
 
@@ -16,6 +17,7 @@ pub struct Signal {
     pub ip: String,
     pub port: u16,
     pub timestamp: u64,
+    pub hardware: HardwareCaps,
 }
 
 pub struct LanDiscovery {
