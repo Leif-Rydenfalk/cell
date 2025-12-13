@@ -2,7 +2,7 @@
 // Declarative Mesh Definition (YAML)
 
 use serde::{Deserialize, Serialize};
-use crate::config::CellInitConfig;
+// Fixed: Removed unused CellInitConfig import
 use alloc::string::String;
 use alloc::vec::Vec;
 use std::collections::HashMap;

@@ -154,7 +154,8 @@ impl RingBuffer {
         }))
     }
 
-    pub fn try_alloc(&self, exact_size: usize) -> Option<WriteSlot> {
+    // Fixed: Added explicit lifetime to return type
+    pub fn try_alloc(&self, exact_size: usize) -> Option<WriteSlot<'_>> {
         const MAX_ALLOC_SIZE: usize = 16 * 1024 * 1024;
         if exact_size > MAX_ALLOC_SIZE {
             return None;
@@ -301,7 +302,8 @@ impl RingBuffer {
         }))
     }
 
-    pub async fn wait_for_slot(&self, size: usize) -> WriteSlot {
+    // Fixed: Added explicit lifetime
+    pub async fn wait_for_slot(&self, size: usize) -> WriteSlot<'_> {
         let mut spin = 0u32;
         loop {
             if let Some(slot) = self.try_alloc(size) {

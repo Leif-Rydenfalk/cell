@@ -293,7 +293,8 @@ impl Synapse {
          }
     }
 
-    pub async fn fire_on_channel(&mut self, channel_id: u8, data: &[u8]) -> Result<Response<Vec<u8>>, CellError> {
+    // Fixed: Added explicit lifetime to return type
+    pub async fn fire_on_channel(&mut self, channel_id: u8, data: &[u8]) -> Result<Response<'_, Vec<u8>>, CellError> {
         if self.circuit_breaker.is_open() { return Err(CellError::CircuitBreakerOpen); }
         #[cfg(feature = "shm")]
         if let Some(client) = &self.shm_client {

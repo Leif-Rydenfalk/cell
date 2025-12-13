@@ -2,7 +2,7 @@
 // Distributed State Primitives
 
 use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
+// Fixed: Removed unused imports
 use cell_macros::protein;
 
 /// A G-Counter (Grow-only Counter)

@@ -6,16 +6,23 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::RwLock;
 use tracing::info;
+use std::sync::OnceLock;
 
-static DEPENDENCY_MAP: RwLock<HashMap<String, HashSet<String>>> = RwLock::new(HashMap::new());
+// Fixed: Use OnceLock to safely initialize the static RwLock at runtime.
+static DEPENDENCY_MAP: OnceLock<RwLock<HashMap<String, HashSet<String>>>> = OnceLock::new();
+
+fn get_dependency_map() -> &'static RwLock<HashMap<String, HashSet<String>>> {
+    DEPENDENCY_MAP.get_or_init(|| RwLock::new(HashMap::new()))
+}
 
 pub struct MeshBuilder;
 
 impl MeshBuilder {
     /// Declare dependencies for a cell (runtime registry)
     pub async fn declare_dependencies(cell: &str, deps: Vec<String>) {
-        let mut map = DEPENDENCY_MAP.write().await;
-        map.insert(cell.to_string(), deps.into_iter().collect());
+        let map = get_dependency_map();
+        let mut guard = map.write().await;
+        guard.insert(cell.to_string(), deps.into_iter().collect());
     }
 
     /// Wait for all dependencies to be reachable before proceeding.

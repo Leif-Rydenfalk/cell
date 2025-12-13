@@ -7,12 +7,11 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use anyhow::{Result, Context, bail, anyhow};
+use anyhow::{Result, Context, bail}; // Removed unused 'anyhow' import
 use serde::{Deserialize, Serialize};
-use syn::{parse_file, Item, Type, FnArg, Pat, ReturnType, File, Attribute};
+use syn::{parse_file, Item}; // Removed unused imports
 use syn::visit_mut::VisitMut;
-use quote::{quote, format_ident, ToTokens};
-use convert_case::{Case, Casing};
+// Removed unused quote imports
 
 // --- PROTOCOL ---
 #[derive(Serialize, Deserialize, Debug)]
@@ -79,12 +78,13 @@ fn bootstrap_mycelium(socket_path: &Path) -> Result<UnixStream> {
     std::fs::create_dir_all(&infra_target_dir).ok();
 
     // Try to spawn mycelium via cargo. 
+    // Redirect stdout/stderr to suppress "Compiling..." noise from background process
     let status = Command::new("cargo")
         .args(&["run", "--release", "-p", "mycelium"])
         .env("CELL_DAEMON", "1")
         .env("CARGO_TARGET_DIR", infra_target_dir) // <--- PREVENTS DEADLOCK
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::null()) 
+        .stderr(Stdio::null()) // Suppress output to clean up CLI experience
         .spawn();
 
     if let Err(e) = status {
@@ -139,15 +139,12 @@ pub fn register() {
 }
 
 pub struct CellBuilder {
-    cell_name: String,
-    source_path: PathBuf,
+    // fields removed to fix unused warning, simplified builder
 }
 
 impl CellBuilder {
     pub fn configure() -> Self {
-        let cell_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "unknown".to_string());
-        let source_path = PathBuf::from(".");
-        Self { cell_name, source_path }
+        Self { }
     }
 
     pub fn extract_macros(self) -> Result<Self> {
@@ -155,7 +152,7 @@ impl CellBuilder {
     }
 }
 
-pub fn load_and_flatten_source(entry_path: &Path) -> Result<File> {
+pub fn load_and_flatten_source(entry_path: &Path) -> Result<syn::File> {
     let content = fs::read_to_string(entry_path)
         .with_context(|| format!("Failed to read DNA entry file: {:?}", entry_path))?;
     let mut file = parse_file(&content)?;

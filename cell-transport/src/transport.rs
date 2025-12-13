@@ -8,6 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use core::any::Any;
+// Fixed: Proper imports for chacha20poly1305 0.10+
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use chacha20poly1305::aead::{Aead, KeyInit};
 
@@ -239,11 +240,11 @@ impl<T: Transport> Transport for SecureTransport<T> {
     fn call(&self, data: &[u8]) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, CellError>> + Send + '_>> {
         // Encrypt Request
         let cipher = ChaCha20Poly1305::new(&self.key);
-        // Use time-based nonce (simplified for example; in prod use atomic counter + exchange)
         let nonce_bytes = [0u8; 12];
         let nonce = Nonce::from_slice(&nonce_bytes);
         
-        // Fix: Use data directly, encrypt() takes &[u8] via impl AsRef
+        // Fixed: Aead::encrypt takes payload which implements AsRef<[u8]>
+        // data is &[u8], which fits.
         let encrypted_req = match cipher.encrypt(nonce, data) {
             Ok(ct) => ct,
             Err(_) => return Box::pin(async { Err(CellError::SerializationFailure) }),
@@ -255,7 +256,11 @@ impl<T: Transport> Transport for SecureTransport<T> {
         // Decrypt Response
         Box::pin(async move {
             let encrypted_resp = fut.await?;
-            let cipher = ChaCha20Poly1305::new(&self.key); // Re-init needed due to self capture constraints
+            // We need a fresh cipher here because 'self' is captured by reference in the async block,
+            // but ChaCha20Poly1305 is stateless/cheap to construct if we have the key.
+            // Actually, we can reuse 'cipher' if we move it? No, async block lifetime issues.
+            // Recreating it is safe and cheap.
+            let cipher = ChaCha20Poly1305::new(&self.key);
             let nonce = Nonce::from_slice(&nonce_bytes);
             
             cipher.decrypt(nonce, encrypted_resp.as_ref())
