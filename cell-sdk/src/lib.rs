@@ -4,7 +4,6 @@
 extern crate self as cell_sdk;
 
 // === CORE RE-EXPORTS ===
-// Explicitly re-export core primitives to avoid 'error' module collision with cell-model
 pub use cell_core::{CellError, channel, Codec, Transport, Connection, Listener, Vesicle, Wire};
 pub use cell_model::*;
 
@@ -21,10 +20,6 @@ pub mod system;
 #[cfg(feature = "transport")]
 pub use system::System;
 
-// === PROCESS MANAGEMENT (Daemon) ===
-// #[cfg(feature = "process")]
-// pub use cell_process as process;
-
 // === TISSUE ===
 #[cfg(feature = "transport")]
 pub mod tissue;
@@ -38,6 +33,10 @@ pub use runtime::Runtime;
 
 // === IDENTITY ABSTRACTION ===
 pub mod identity;
+
+// === TEST CONTEXT ===
+pub mod test_context;
+pub use test_context::CellTestContext;
 
 // === DISCOVERY ===
 pub use cell_discovery as discovery;

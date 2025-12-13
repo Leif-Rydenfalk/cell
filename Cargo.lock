@@ -452,6 +452,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
+ "serde",
  "serde_json",
  "syn 2.0.108",
 ]
@@ -1483,6 +1484,8 @@ dependencies = [
  "dirs",
  "rand",
  "rkyv",
+ "serde",
+ "serde_json",
  "socket2 0.5.10",
  "tokio",
  "tracing",

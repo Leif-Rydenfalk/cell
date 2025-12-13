@@ -62,6 +62,12 @@ impl Synapse {
         Self::grow_with_config(connection_string, SynapseConfig::default()).await
     }
 
+    // NEW: Connect directly to a specific socket path
+    // Used by macro-generated clients with baked-in paths
+    pub async fn connect_direct(socket_path: &str) -> Result<Self> {
+        Self::connect_to_path(socket_path, "direct", &SynapseConfig::default()).await
+    }
+
     pub async fn grow_await(connection_string: &str) -> Result<Self> {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
@@ -134,19 +140,14 @@ impl Synapse {
     }
 
     async fn connect_local(cell_name: &str, config: &SynapseConfig) -> Result<Self> {
-        // Hierarchy Lookup: Check local organism first, then system
         let search_paths = cell_discovery::get_search_paths();
-        
         for dir in search_paths {
             let socket_path = dir.join(format!("{}.sock", cell_name));
             let path_str = socket_path.to_string_lossy().to_string();
-            
-            // Try connection
             if let Ok(syn) = Self::connect_to_path(&path_str, cell_name, config).await {
                 return Ok(syn);
             }
         }
-        
         bail!("Failed to connect to local cell '{}' (checked all scopes)", cell_name);
     }
 
@@ -194,7 +195,6 @@ impl Synapse {
         }
     }
     
-    // ... [Rest of file: try_upgrade_to_shm, recv_fds, heal, call_transport, fire_on_channel, fire remain same] ...
     #[cfg(all(feature = "shm", any(target_os = "linux", target_os = "macos")))]
     async fn try_upgrade_to_shm(stream: &mut UnixStream) -> Result<ShmClient> {
         let cred = stream.peer_cred()?;
