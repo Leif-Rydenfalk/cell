@@ -28,6 +28,7 @@ pub enum ResolverResponse {
 
 pub fn resolve(cell_name: &str) -> Result<String> {
     // 1. CIRCULAR DEPENDENCY BREAKER
+    // Kernel cells (and the CLI tool) know where system services live deterministically.
     let current_pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
     if is_kernel_cell(&current_pkg) {
         let home = dirs::home_dir().expect("No HOME directory");
@@ -73,7 +74,9 @@ pub fn resolve(cell_name: &str) -> Result<String> {
 }
 
 fn is_kernel_cell(pkg_name: &str) -> bool {
-    matches!(pkg_name, "mycelium" | "hypervisor" | "builder" | "nucleus" | "axon")
+    matches!(pkg_name, 
+        "mycelium" | "hypervisor" | "builder" | "nucleus" | "axon" | "cell-cli" | "mesh" | "observer"
+    )
 }
 
 fn bootstrap_mycelium(socket_path: &Path) -> Result<UnixStream> {

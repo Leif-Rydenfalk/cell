@@ -2,7 +2,7 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use crate::Synapse;
-use anyhow::{Result, Context};
+use anyhow::{Result}; // Removed unused Context
 use std::collections::{HashMap, HashSet};
 use tokio::sync::RwLock;
 use tracing::{info, warn};

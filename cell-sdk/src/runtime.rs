@@ -16,7 +16,8 @@ use tokio::time::Duration;
 mod nucleus_internal {
     use super::*;
     use cell_macros::protein;
-    use cell_model::rkyv::Deserialize;
+    // Removed unused import
+    use cell_model::rkyv::Deserialize; 
 
     #[protein]
     pub struct CellRegistration {
