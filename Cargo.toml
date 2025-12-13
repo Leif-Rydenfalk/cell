@@ -36,6 +36,7 @@ members = [
     "cells/ca",
     "cells/observer",
     "cells/mycelium",
+    "cells/mesh",
     "examples/cell-market/ledger",
     "examples/cell-market/engine",
     "examples/cell-market/gateway",
@@ -64,7 +65,6 @@ cell-transport = { path = "./cell-transport", version = "0.4.0", features = [
     "shm",
 ] }
 cell-discovery = { path = "./cell-discovery", version = "0.4.0" }
-# cell-axon removed
 cell-sdk = { path = "./cell-sdk", version = "0.4.0" }
 cell-macros = { path = "./cell-macros", version = "0.3.0" }
 cell-build = { path = "./cell-build", version = "0.1.0" }

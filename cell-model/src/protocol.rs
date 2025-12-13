@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
+use crate::config::CellInitConfig;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
-use crate::config::CellInitConfig;
+use std::collections::HashMap;
 
 pub const GENOME_REQUEST: &[u8] = b"__CELL_GENOME_REQUEST__";
 pub const SHM_UPGRADE_REQUEST: &[u8] = b"__SHM_UPGRADE_REQUEST__";
@@ -94,7 +95,7 @@ pub enum Primitive {
 #[archive(check_bytes)]
 pub enum MitosisRequest {
     /// Spawn a standard long-lived Cell
-    Spawn { 
+    Spawn {
         cell_name: String,
         config: Option<CellInitConfig>,
     },
@@ -102,7 +103,7 @@ pub enum MitosisRequest {
     Test {
         target_cell: String,
         filter: Option<String>,
-    }
+    },
 }
 
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
@@ -113,14 +114,53 @@ pub enum MitosisResponse {
     // Test responses are streamed as TestEvent, not returned as a single MitosisResponse
 }
 
+// --- MESH PROTOCOL ---
+
+#[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
+#[archive(check_bytes)]
+pub enum MeshRequest {
+    // Sent when a cell needs its dependencies
+    ResolveDependencies {
+        cell_name: String,
+        dependencies: Vec<String>,
+    },
+    // Register a cell's health status
+    ReportHealth {
+        cell_name: String,
+        healthy: bool,
+    },
+}
+
+#[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
+#[archive(check_bytes)]
+pub enum MeshResponse {
+    // Response with connection info
+    DependencyMapping {
+        cell_name: String,
+        socket_paths: HashMap<String, String>, // dependency -> socket
+    },
+    Ack,
+    Error {
+        message: String,
+    },
+}
+
 /// Events streamed back from Hypervisor -> CLI during a test run
 #[derive(Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
 #[archive(check_bytes)]
 pub enum TestEvent {
     Log(String),
     CaseStarted(String),
-    CaseFinished { name: String, success: bool, duration_ms: u64 },
-    SuiteFinished { total: u32, passed: u32, failed: u32 },
+    CaseFinished {
+        name: String,
+        success: bool,
+        duration_ms: u64,
+    },
+    SuiteFinished {
+        total: u32,
+        passed: u32,
+        failed: u32,
+    },
     Error(String),
 }
 
