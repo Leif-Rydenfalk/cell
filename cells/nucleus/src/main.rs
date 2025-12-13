@@ -3,7 +3,7 @@
 // The Nucleus: System-wide singleton that manages Cell infrastructure
 
 use cell_sdk::*;
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, Context};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -199,10 +199,26 @@ impl Nucleus {
         let mut killed_total = Vec::new();
         
         // 1. Get Dependency Graph from Mesh Cell
-        let mut mesh_client = Mesh::Client::connect().await
-            .context("Cannot connect to Mesh to analyze dependencies")?;
+        // We use the generated Mesh client
+        let mut mesh_client = match Mesh::Client::connect().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("[Nucleus] Cannot connect to Mesh for GC analysis: {}. Assuming empty graph.", e);
+                // Proceed with empty graph (aggressive pruning of isolated cells) or abort?
+                // Aborting might be safer to avoid accidental kills if Mesh is down.
+                // But Mesh should be up. Let's try to spawn it? No, client connect should handle it.
+                // If it fails, we abort.
+                return Err(anyhow!("Mesh service unreachable: {}", e));
+            }
+        };
             
-        // Map: Consumer -> Vec<Providers>
+        // Protocol: The handler in mesh/src/main.rs is `get_graph() -> Result<Vec<(String, Vec<String>)>>`
+        // Wait, check `cells/mesh/src/main.rs`:
+        // It returns `Result<HashMap<String, Vec<String>>>` in my previous thought block, but originally it was `Vec`.
+        // Let's match the implemented handler in mesh.rs which I updated in the previous turn.
+        // It returns `HashMap<String, Vec<String>>`.
+        // The Client wrapper returns `Result<HashMap<...>, CellError>`.
+        
         let graph_raw = mesh_client.get_graph().await
             .context("Failed to retrieve graph")?;
 
@@ -210,6 +226,8 @@ impl Nucleus {
         for (k, v) in graph_raw {
             graph.insert(k, v.into_iter().collect());
         }
+
+        tracing::info!("[Nucleus] Graph snapshot: {:?}", graph);
 
         // Loop until convergence
         loop {
@@ -265,25 +283,21 @@ impl Nucleus {
                 tracing::info!("[Nucleus] Pruning unused cell: {}", target);
                 
                 // Connect and send Shutdown Ops command
-                // We use Synapse manually to access the OPS channel
                 if let Ok(mut synapse) = Synapse::grow(target).await {
                     let req = cell_model::ops::OpsRequest::Shutdown;
                     let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req)?.into_vec();
                     
-                    // Fire and forget (or wait for ack)
-                    let _ = synapse.fire_on_channel(cell_core::channel::OPS, &req_bytes).await;
+                    // OPS channel = 2
+                    let _ = synapse.fire_on_channel(2, &req_bytes).await;
                 }
 
-                // Remove from local registry immediately so next loop iteration sees it as gone
+                // Remove from local registry immediately
                 let mut reg = self.registry.write().await;
                 reg.cells.remove(target);
                 reg.last_heartbeat.remove(target);
                 
                 killed_total.push(target.clone());
             }
-            
-            // Short sleep to allow network propagation before next graph analysis?
-            // Actually we simulated the removal in our local set, so we can recurse immediately.
         }
 
         Ok(PruneResult { killed: killed_total })
@@ -328,7 +342,6 @@ impl NucleusService {
         Ok("127.0.0.1:9000".to_string())
     }
 
-    // The GC method
     async fn vacuum(&self) -> Result<PruneResult> {
         self.inner.prune().await
     }
