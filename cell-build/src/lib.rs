@@ -69,12 +69,20 @@ fn bootstrap_mycelium(socket_path: &Path) -> Result<UnixStream> {
     // We print to stderr so it shows up in cargo build output
     eprintln!("warning: [cell-build] Mycelium not found at {:?}. Bootstrapping mesh...", socket_path);
 
+    // FIX: Use a separate target directory for infrastructure to avoid deadlocking 
+    // against the main 'cargo run' process holding the lock on ./target
+    let infra_target_dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("target")
+        .join("infra");
+
+    std::fs::create_dir_all(&infra_target_dir).ok();
+
     // Try to spawn mycelium via cargo. 
-    // Assumes we are in the workspace or `mycelium` is in PATH or registered alias.
-    // For this monorepo structure, `cargo run -p mycelium` works.
     let status = Command::new("cargo")
         .args(&["run", "--release", "-p", "mycelium"])
         .env("CELL_DAEMON", "1")
+        .env("CARGO_TARGET_DIR", infra_target_dir) // <--- PREVENTS DEADLOCK
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn();

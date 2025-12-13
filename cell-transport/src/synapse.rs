@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use crate::resolve_socket_dir;
 use crate::response::Response;
 use crate::transport::UnixTransport;
 #[cfg(feature = "shm")]

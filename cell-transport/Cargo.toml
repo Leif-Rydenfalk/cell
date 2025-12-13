@@ -5,11 +5,19 @@ edition = { workspace = true }
 
 [features]
 default = ["std", "shm"]
-std = ["dep:tokio", "dep:socket2", "dep:dirs", "dep:tracing", "dep:fd-lock", "dep:users", "cell-core/std"]
+std = [
+    "dep:tokio",
+    "dep:socket2",
+    "dep:dirs",
+    "dep:tracing",
+    "dep:fd-lock",
+    "dep:users",
+    "cell-core/std",
+]
 shm = ["std", "dep:nix", "dep:memmap2", "dep:users"]
 
 [dependencies]
-cell-core = { workspace = true, optional = true } 
+cell-core = { workspace = true, optional = true }
 cell-codec = { workspace = true }
 cell-model = { workspace = true }
 cell-discovery = { workspace = true }
@@ -21,6 +29,7 @@ anyhow = { workspace = true }
 thiserror = "1.0"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+chacha20poly1305 = { workspace = true }
 
 # OS Primitives
 tokio = { workspace = true, optional = true }

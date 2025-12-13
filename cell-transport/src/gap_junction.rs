@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use std::os::unix::io::{RawFd, FromRawFd, AsRawFd};
+use std::os::unix::io::{FromRawFd, AsRawFd};
 use std::os::unix::net::UnixStream;
 use std::io::{Read, Write};
 use anyhow::{Result, anyhow, Context};

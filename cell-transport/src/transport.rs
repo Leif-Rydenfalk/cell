@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use core::any::Any;
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use chacha20poly1305::aead::{Aead, NewAead};
+use chacha20poly1305::aead::{Aead, KeyInit};
 
 // --- Unix Domain Socket Implementation ---
 
@@ -240,10 +240,10 @@ impl<T: Transport> Transport for SecureTransport<T> {
         // Encrypt Request
         let cipher = ChaCha20Poly1305::new(&self.key);
         // Use time-based nonce (simplified for example; in prod use atomic counter + exchange)
-        let mut nonce_bytes = [0u8; 12];
-        // Placeholder for nonce generation logic
+        let nonce_bytes = [0u8; 12];
         let nonce = Nonce::from_slice(&nonce_bytes);
         
+        // Fix: Use data directly, encrypt() takes &[u8] via impl AsRef
         let encrypted_req = match cipher.encrypt(nonce, data) {
             Ok(ct) => ct,
             Err(_) => return Box::pin(async { Err(CellError::SerializationFailure) }),
