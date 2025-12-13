@@ -1,0 +1,1 @@
+is it well structured? I want to move more things into cells so that we only need 1 or few of things cells need without bloating the core cell sdk. the target is having the cell sdk be incredibly light

@@ -1,0 +1,1 @@
+The sdk is just the api or bare minimum bridge for the source code the user write to interact with the cell ecosystem.
