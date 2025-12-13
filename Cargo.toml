@@ -45,6 +45,9 @@ members = [
     "examples/cell-market-bench/cells/trader",
     "examples/cell-tissue/worker",
     "examples/cell-tissue/controller",
+    "examples/cell-schema-sync/database",
+    "examples/cell-schema-sync/user-management",
+    "examples/cell-schema-sync/admin",
 ]
 exclude = []
 

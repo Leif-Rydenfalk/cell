@@ -9,10 +9,12 @@ use colored::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use cell_sdk::cell_remote;
+use serde::Deserialize as SerdeDeserialize;
 
 // === SYSTEM CELLS ===
-// We declare them here just like any user cell.
 cell_remote!(Nucleus = "nucleus");
 cell_remote!(Observer = "observer");
 
@@ -34,15 +36,25 @@ enum Commands {
         #[arg(short, long)]
         filter: Option<String>,
     },
-    /// Apply a mesh manifest
+    /// Start a cell workspace or apply a mesh manifest
     Up { 
         #[arg(short, long)]
-        file: String 
+        file: Option<String> 
     },
     /// Live TUI dashboard
     Top,
     /// Follow distributed traces
     Logs { target: String },
+}
+
+#[derive(SerdeDeserialize)]
+struct CellWorkspace {
+    workspace: WorkspaceConfig,
+}
+
+#[derive(SerdeDeserialize)]
+struct WorkspaceConfig {
+    members: Vec<String>,
 }
 
 #[tokio::main]
@@ -52,7 +64,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Spawn { name } => spawn_cell(name).await,
         Commands::Test { target, filter } => run_test(target, filter).await,
-        Commands::Up { file } => apply_manifest(file).await,
+        Commands::Up { file } => run_up(file).await,
         Commands::Top => run_top().await,
         Commands::Logs { target } => tail_logs(target).await,
     }
@@ -61,7 +73,7 @@ async fn main() -> Result<()> {
 async fn connect_daemon() -> Result<UnixStream> {
     let home = dirs::home_dir().expect("No HOME");
     let socket_path = if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
-        std::path::PathBuf::from(p).join("mitosis.sock")
+        PathBuf::from(p).join("mitosis.sock")
     } else {
         home.join(".cell/runtime/system/mitosis.sock")
     };
@@ -86,8 +98,114 @@ async fn spawn_cell(name: String) -> Result<()> {
         MitosisResponse::Ok { socket_path } => {
             println!("{} Spawned {} at {}", "✔".green(), name, socket_path)
         }
-        MitosisResponse::Denied { reason } => println!("{} Spawn failed: {}", "✘".red(), reason),
+        MitosisResponse::Denied { reason } => return Err(anyhow!("Spawn denied: {}", reason)),
     }
+    Ok(())
+}
+
+async fn run_up(file: Option<String>) -> Result<()> {
+    // 1. Check for Cell.toml in current directory
+    let cwd = std::env::current_dir()?;
+    let toml_path = cwd.join("Cell.toml");
+    
+    if file.is_none() && toml_path.exists() {
+        return run_workspace_up(&toml_path).await;
+    }
+
+    // 2. Fallback to explicit file or error
+    let target = file.ok_or_else(|| anyhow!("No Cell.toml found and no file specified"))?;
+    
+    if target.ends_with(".toml") || target == "Cell.toml" {
+        run_workspace_up(Path::new(&target)).await
+    } else {
+        // Assume YAML manifest
+        apply_manifest(target).await
+    }
+}
+
+async fn run_workspace_up(path: &Path) -> Result<()> {
+    println!("{} Reading workspace from {}...", "→".blue(), path.display());
+    
+    let content = fs::read_to_string(path)?;
+    let config: CellWorkspace = toml::from_str(&content)
+        .context("Failed to parse Cell.toml")?;
+
+    let root_dir = path.parent().unwrap();
+    let registry_dir = dirs::home_dir().expect("No HOME").join(".cell/registry");
+    fs::create_dir_all(&registry_dir)?;
+
+    println!("{} Found {} members: {:?}", "ℹ".blue(), config.workspace.members.len(), config.workspace.members);
+
+    // Register all members first
+    for member in &config.workspace.members {
+        let member_path = root_dir.join(member);
+        if !member_path.exists() {
+            println!("{} Warning: Member path {} does not exist", "⚠".yellow(), member_path.display());
+            continue;
+        }
+
+        let link_path = registry_dir.join(member);
+        if link_path.exists() {
+            let _ = fs::remove_file(&link_path); // Remove old symlink
+        }
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&member_path, &link_path)
+            .context(format!("Failed to link {} to registry", member))?;
+            
+        println!("   Linked {} -> Registry", member);
+    }
+
+    // Convergent Spawning Loop
+    // Because compile-time dependencies (macros) might require other cells to be running,
+    // we attempt to spawn all. If some fail, we retry them.
+    
+    let mut pending = config.workspace.members.clone();
+    let mut attempt = 0;
+    const MAX_ATTEMPTS: usize = 5;
+
+    while !pending.is_empty() && attempt < MAX_ATTEMPTS {
+        attempt += 1;
+        if attempt > 1 {
+            println!("{} Retrying failed cells (Attempt {}/{})...", "↻".yellow(), attempt, MAX_ATTEMPTS);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+
+        let mut next_pending = Vec::new();
+
+        for cell in pending {
+            print!("   Spawning {}... ", cell);
+            use std::io::Write;
+            std::io::stdout().flush()?;
+
+            match spawn_cell(cell.clone()).await {
+                Ok(_) => {
+                    println!("{}", "OK".green());
+                }
+                Err(e) => {
+                    println!("{}", "Pending".yellow());
+                    // Simple heuristic: if it failed, it might be due to dependency.
+                    // We don't print the full error yet to avoid noise during convergence.
+                    next_pending.push(cell);
+                }
+            }
+        }
+        pending = next_pending;
+    }
+
+    if !pending.is_empty() {
+        println!("\n{} Failed to spawn the following cells after {} attempts:", "✘".red(), MAX_ATTEMPTS);
+        for cell in pending {
+            println!("   - {}", cell);
+            // Try one last time to show the error
+            if let Err(e) = spawn_cell(cell).await {
+                println!("     Error: {}", e);
+            }
+        }
+        return Err(anyhow!("Workspace startup incomplete"));
+    }
+
+    println!("\n{} Workspace active.", "✔".green());
     Ok(())
 }
 
@@ -112,10 +230,9 @@ async fn run_test(target: String, filter: Option<String>) -> Result<()> {
     let mut total_failed = 0;
 
     loop {
-        // Read stream of TestEvents from Hypervisor
         let mut len_buf = [0u8; 4];
         if stream.read_exact(&mut len_buf).await.is_err() {
-            break; // EOF
+            break;
         }
         let len = u32::from_le_bytes(len_buf) as usize;
         let mut buf = vec![0u8; len];
@@ -128,14 +245,8 @@ async fn run_test(target: String, filter: Option<String>) -> Result<()> {
 
         match event {
             TestEvent::Log(msg) => println!("  {}", msg.dimmed()),
-            TestEvent::CaseStarted(name) => {
-                // print!("{} {} ... ", "RUN".yellow(), name);
-            }
-            TestEvent::CaseFinished {
-                name,
-                success,
-                duration_ms,
-            } => {
+            TestEvent::CaseStarted(_name) => {},
+            TestEvent::CaseFinished { name, success, duration_ms } => {
                 if success {
                     println!(" {} {} ({}ms)", "✔".green(), name, duration_ms);
                     total_passed += 1;
@@ -144,11 +255,7 @@ async fn run_test(target: String, filter: Option<String>) -> Result<()> {
                     total_failed += 1;
                 }
             }
-            TestEvent::SuiteFinished {
-                total,
-                passed,
-                failed,
-            } => {
+            TestEvent::SuiteFinished { total, passed, failed } => {
                 println!("");
                 if failed > 0 {
                     println!("{} Test Suite Failed", "✘".red().bold());
@@ -159,9 +266,7 @@ async fn run_test(target: String, filter: Option<String>) -> Result<()> {
                 println!("  Passed:  {}", passed.to_string().green());
                 println!("  Failed:  {}", failed.to_string().red().bold());
 
-                if failed > 0 {
-                    std::process::exit(1);
-                }
+                if failed > 0 { std::process::exit(1); }
                 break;
             }
             TestEvent::Error(e) => {
@@ -175,15 +280,9 @@ async fn run_test(target: String, filter: Option<String>) -> Result<()> {
 
 async fn apply_manifest(path: String) -> Result<()> {
     let yaml = fs::read_to_string(&path).context("Failed to read manifest")?;
-    
-    // Connect to Nucleus using the generated client
     let mut nucleus = Nucleus::Client::connect().await.context("Nucleus unreachable")?;
-    
     println!("{} Applying manifest from {}...", "→".blue(), path);
-    
-    // Use the RPC method generated by cell_remote!
     let success = nucleus.apply(Nucleus::ApplyManifest { yaml }).await?;
-    
     if success {
         println!("{} Mesh converged.", "✔".green());
     } else {
@@ -193,54 +292,42 @@ async fn apply_manifest(path: String) -> Result<()> {
 }
 
 async fn run_top() -> Result<()> {
-    // Connect to Nucleus
     let mut nucleus = Nucleus::Client::connect().await.context("Nucleus unreachable")?;
-
-    print!("\x1B[2J\x1B[1;1H"); // Clear screen
+    print!("\x1B[2J\x1B[1;1H");
     loop {
         let status = nucleus.status().await?;
-        
-        print!("\x1B[2J\x1B[1;1H"); // Clear screen
+        print!("\x1B[2J\x1B[1;1H");
         println!("CELL TOP - Lattice Status (Uptime: {}s)", status.uptime_secs);
         println!("-------------------------");
         println!("{:<20} | {:<10}", "Cell", "Status");
         println!("-------------------------");
-        
         for cell in status.managed_cells {
             println!("{:<20} | Online", cell);
         }
-        
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
 async fn tail_logs(target: String) -> Result<()> {
     let mut observer = Observer::Client::connect().await.context("Observer unreachable")?;
     println!("{} Tailing logs for {}...", "→".blue(), target);
-    
     loop {
-        // Poll for logs
         let logs = observer.tail(10).await?;
         for entry in logs {
-            // Filter locally if needed
             if entry.span.service.contains(&target) {
                 println!("[{}] {} ({}us)", entry.span.trace_id, entry.span.name, entry.span.duration_us);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
-async fn send_request<
-    T: cell_model::rkyv::Serialize<cell_model::rkyv::ser::serializers::AllocSerializer<256>>,
->(
+async fn send_request<T: cell_model::rkyv::Serialize<cell_model::rkyv::ser::serializers::AllocSerializer<256>>>(
     stream: &mut UnixStream,
     req: &T,
 ) -> Result<()> {
     let bytes = cell_model::rkyv::to_bytes::<_, 256>(req)?.into_vec();
-    stream
-        .write_all(&(bytes.len() as u32).to_le_bytes())
-        .await?;
+    stream.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
     stream.write_all(&bytes).await?;
     Ok(())
 }
@@ -248,9 +335,7 @@ async fn send_request<
 async fn recv_response<T: cell_model::rkyv::Archive>(stream: &mut UnixStream) -> Result<T>
 where
     T::Archived: cell_model::rkyv::Deserialize<T, cell_model::rkyv::Infallible>
-        + for<'a> cell_model::rkyv::CheckBytes<
-            cell_model::rkyv::validation::validators::DefaultValidator<'a>,
-        >,
+        + for<'a> cell_model::rkyv::CheckBytes<cell_model::rkyv::validation::validators::DefaultValidator<'a>>,
 {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
@@ -260,7 +345,5 @@ where
 
     let archived = cell_model::rkyv::check_archived_root::<T>(&buf)
         .map_err(|e| anyhow::anyhow!("Protocol error: {:?}", e))?;
-    Ok(archived
-        .deserialize(&mut cell_model::rkyv::Infallible)
-        .unwrap())
+    Ok(archived.deserialize(&mut cell_model::rkyv::Infallible).unwrap())
 }

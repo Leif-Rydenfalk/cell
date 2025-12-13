@@ -5,6 +5,7 @@ use anyhow::Result;
 use cell_model::macro_coordination::*;
 use std::time::Duration;
 use cell_transport::Synapse;
+use cell_model::rkyv::{self, Deserialize};
 
 pub struct MacroCoordinator {
     cell_name: String,
@@ -41,8 +42,18 @@ impl MacroCoordinator {
                         &req_bytes
                     ).await?;
 
-                    // Deserialize response
-                    let resp = response.deserialize()?;
+                    // Extract bytes manually because fire_on_channel returns Response<Vec<u8>>
+                    let bytes = match &response {
+                        cell_transport::Response::Owned(vec) => vec.as_slice(),
+                        cell_transport::Response::Borrowed(slice) => slice,
+                        _ => anyhow::bail!("Unexpected response type for macro coordination"),
+                    };
+
+                    // Check and Deserialize
+                    let archived = rkyv::check_archived_root::<MacroCoordinationResponse>(bytes)
+                        .map_err(|e| anyhow::anyhow!("Invalid coordination response from '{}': {:?}", self.cell_name, e))?;
+                    
+                    let resp: MacroCoordinationResponse = archived.deserialize(&mut rkyv::de::deserializers::SharedDeserializeMap::new())?;
                     Ok(resp)
                 }
                 Ok(Err(e)) => {
