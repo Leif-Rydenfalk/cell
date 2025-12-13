@@ -114,6 +114,7 @@ impl MacroCoordinator {
         }
     }
 
+    #[allow(dead_code)] // Fallback cache logic might not be used if cell is always running
     fn get_cached_macros(&self) -> Result<Vec<MacroInfo>> {
         // Check ~/.cell/macros/{cell_name}/manifest.json
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home dir"))?;

@@ -6,6 +6,8 @@ use crate::Synapse;
 
 /// The environment passed to a test running as a Cell.
 pub struct CellTestContext {
+    // Suppress unused warning as this is reserved for future test logging/isolation features
+    #[allow(dead_code)]
     test_name: String,
 }
 

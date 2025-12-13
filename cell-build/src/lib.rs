@@ -28,13 +28,9 @@ pub enum ResolverResponse {
 
 pub fn resolve(cell_name: &str) -> Result<String> {
     // 1. CIRCULAR DEPENDENCY BREAKER
-    // If we are currently compiling the Kernel cells (Mycelium, Hypervisor, etc.),
-    // we cannot query the daemon because it might not exist yet, or we are currently building it.
-    // We return the deterministic system path immediately.
     let current_pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
     if is_kernel_cell(&current_pkg) {
         let home = dirs::home_dir().expect("No HOME directory");
-        // System cells always live in the system scope
         let path = home.join(".cell/runtime/system").join(format!("{}.sock", cell_name));
         return Ok(path.to_string_lossy().to_string());
     }
@@ -81,19 +77,20 @@ fn is_kernel_cell(pkg_name: &str) -> bool {
 }
 
 fn bootstrap_mycelium(socket_path: &Path) -> Result<UnixStream> {
-    // We print to stderr so it shows up in cargo build output
     eprintln!("warning: [cell-build] Mycelium not found at {:?}. Bootstrapping mesh...", socket_path);
 
-    // FIX: Use a completely isolated temporary directory for the infrastructure build.
     let infra_target_dir = std::env::temp_dir().join("cell-infra-build");
-    
     std::fs::create_dir_all(&infra_target_dir).ok();
 
-    // Try to spawn mycelium via cargo. 
+    // Spawn mycelium, STRIPPING environment variables that might cause it to run in test mode
     let status = Command::new("cargo")
         .args(&["run", "--release", "-p", "mycelium"])
         .env("CELL_DAEMON", "1")
         .env("CARGO_TARGET_DIR", infra_target_dir) 
+        // CRITICAL: Prevent inheriting test environment paths
+        .env_remove("CELL_SOCKET_DIR") 
+        .env_remove("CELL_NODE_ID")
+        .env_remove("CELL_ORGANISM")
         .stdout(Stdio::null()) 
         .stderr(Stdio::null()) 
         .spawn();
