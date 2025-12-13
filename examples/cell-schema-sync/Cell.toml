@@ -1,2 +1,0 @@
-[workspace]
-members = ["admin", "database", "user-management"]
