@@ -191,6 +191,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pemfile",
+ "socket2 0.5.10",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -466,6 +467,8 @@ dependencies = [
  "colored",
  "dirs",
  "rkyv",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -1467,6 +1470,23 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mycelium"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cell-discovery",
+ "cell-model",
+ "cell-sdk",
+ "dirs",
+ "rand",
+ "rkyv",
+ "socket2 0.5.10",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

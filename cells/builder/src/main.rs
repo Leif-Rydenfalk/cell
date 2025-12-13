@@ -4,12 +4,12 @@
 
 mod ribosome;
 
-use cell_sdk::*;
 use anyhow::Result;
-use std::path::{Path, PathBuf};
-use std::fs;
-use tracing::{info, error};
+use cell_sdk::*;
 use ribosome::Ribosome;
+use std::fs;
+use std::path::{Path, PathBuf};
+use tracing::{error, info};
 
 #[protein]
 pub struct BuildRequest {
@@ -32,20 +32,22 @@ impl BuilderService {
         let registry_path = std::env::var("CELL_REGISTRY_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| home.join(".cell/registry"));
-        
+
         fs::create_dir_all(&registry_path).ok();
-        
-        Self {
-            registry_path,
-        }
+
+        Self { registry_path }
     }
 
     fn build(&self, cell_name: &str) -> Result<PathBuf> {
         let source_path = self.registry_path.join(cell_name);
         if !source_path.exists() {
-            anyhow::bail!("Cell '{}' not found in registry at {:?}", cell_name, source_path);
+            anyhow::bail!(
+                "Cell '{}' not found in registry at {:?}",
+                cell_name,
+                source_path
+            );
         }
-        
+
         // Delegate to Ribosome module logic
         Ribosome::synthesize(&source_path, cell_name)
     }
@@ -69,11 +71,15 @@ impl Builder {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
     info!("[Builder] Compiler Active");
-    
+
     // Identity hydration is handled by Runtime via Gap Junction
-    
-    let service = Builder { svc: std::sync::Arc::new(BuilderService::new()) };
+
+    let service = Builder {
+        svc: std::sync::Arc::new(BuilderService::new()),
+    };
     service.serve("builder").await
 }

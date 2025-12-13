@@ -3,27 +3,29 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use anyhow::Result;
+use cell_discovery::lan::{LanDiscovery, Signal};
 use cell_model::rkyv::{self, Deserialize};
+use if_addrs;
+use local_ip_address;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
-use cell_discovery::lan::{Signal, LanDiscovery};
-use local_ip_address;
-use if_addrs;
 
 const PORT: u16 = 9099;
 
 pub struct PheromoneSystem {
     socket: Arc<UdpSocket>,
-    local_signals: Arc<RwLock<Vec<Signal>>>, 
+    local_signals: Arc<RwLock<Vec<Signal>>>,
     node_id: u64,
 }
 
 impl PheromoneSystem {
     pub async fn ignite(node_id: u64) -> Result<Arc<Self>> {
-        let socket = UdpSocket::bind(format!("0.0.0.0:{}", PORT)).await?;
+        // Setup ReusePort Socket to allow Mycelium supervisor to share the port
+        let socket = Self::bind_reuse_port(PORT)?;
         socket.set_broadcast(true)?;
 
         let sys = Arc::new(Self {
@@ -44,9 +46,9 @@ impl PheromoneSystem {
                 let sig: Signal = {
                     let archived = match rkyv::check_archived_root::<Signal>(&buf[..len]) {
                         Ok(a) => a,
-                        Err(_) => continue, 
+                        Err(_) => continue,
                     };
-                    
+
                     match archived.deserialize(&mut rkyv::Infallible) {
                         Ok(s) => s,
                         Err(_) => continue,
@@ -55,7 +57,10 @@ impl PheromoneSystem {
 
                 if let Ok(my_ip) = sys_clone.socket.local_addr() {
                     if addr.ip() == my_ip.ip() {
-                        continue;
+                        // Don't ignore self in loopback tests, but in LAN we might want to?
+                        // For auto-discovery on same node (Mycelium), we need to hear local queries.
+                        // So we remove the self-filter for queries, but maybe keep for advertisements?
+                        // Let's keep it loose for now.
                     }
                 }
 
@@ -84,6 +89,25 @@ impl PheromoneSystem {
         });
 
         Ok(sys)
+    }
+
+    fn bind_reuse_port(port: u16) -> Result<UdpSocket> {
+        let domain = Domain::IPV4;
+        let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+
+        #[cfg(unix)]
+        {
+            socket.set_reuse_address(true)?;
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "android"))]
+            socket.set_reuse_port(true)?;
+        }
+
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port);
+        socket.bind(&addr.into())?;
+        socket.set_nonblocking(true)?;
+
+        let std_sock: std::net::UdpSocket = socket.into();
+        UdpSocket::from_std(std_sock).map_err(|e| e.into())
     }
 
     pub async fn query(&self, target_cell_name: &str) -> Result<()> {
@@ -126,10 +150,14 @@ impl PheromoneSystem {
     async fn broadcast_to_all_interfaces(&self, bytes: &[u8]) -> Result<()> {
         let interfaces = if_addrs::get_if_addrs()?;
         for iface in interfaces {
-            if iface.is_loopback() { continue; }
+            if iface.is_loopback() {
+                continue;
+            }
             match iface.addr {
                 if_addrs::IfAddr::V4(v4_addr) => {
-                    let broadcast = v4_addr.broadcast.unwrap_or_else(|| Ipv4Addr::new(255, 255, 255, 255));
+                    let broadcast = v4_addr
+                        .broadcast
+                        .unwrap_or_else(|| Ipv4Addr::new(255, 255, 255, 255));
                     let target = SocketAddr::new(IpAddr::V4(broadcast), PORT);
                     let _ = self.socket.send_to(bytes, target).await;
                 }

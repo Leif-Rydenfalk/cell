@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: MIT
 // Intelligent Traffic Distribution
 
-use cell_sdk::*;
 use anyhow::Result;
+use cell_sdk::*;
+use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use rand::Rng;
 
 #[protein]
 pub struct Backend {
@@ -72,8 +72,14 @@ impl LoadBalancerService {
 
     async fn get_upstream(&self, req: RouteRequest) -> Result<RouteResponse> {
         let mut state = self.state.write().await;
-        
-        let group = match state.services.get_mut(&req.service) {
+
+        // Fix E0499: Destructure to split the borrow of state
+        let LbState {
+            services,
+            rr_counters,
+        } = &mut *state;
+
+        let group = match services.get_mut(&req.service) {
             Some(g) => g,
             None => return Ok(RouteResponse { address: None }),
         };
@@ -84,11 +90,11 @@ impl LoadBalancerService {
 
         let selected = match group.strategy {
             Strategy::RoundRobin => {
-                let counter = state.rr_counters.entry(req.service.clone()).or_insert(0);
+                let counter = rr_counters.entry(req.service.clone()).or_insert(0);
                 let idx = *counter % group.backends.len();
                 *counter += 1;
                 Some(group.backends[idx].address.clone())
-            },
+            }
             Strategy::WeightedRandom => {
                 let total_weight: u32 = group.backends.iter().map(|b| b.weight).sum();
                 if total_weight == 0 {
@@ -105,12 +111,12 @@ impl LoadBalancerService {
                     }
                     chosen
                 }
-            },
-            Strategy::LeastConnections => {
-                group.backends.iter()
-                    .min_by_key(|b| b.active_connections)
-                    .map(|b| b.address.clone())
             }
+            Strategy::LeastConnections => group
+                .backends
+                .iter()
+                .min_by_key(|b| b.active_connections)
+                .map(|b| b.address.clone()),
         };
 
         Ok(RouteResponse { address: selected })
