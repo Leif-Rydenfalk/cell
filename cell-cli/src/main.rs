@@ -1,7 +1,7 @@
 // cell-cli/src/main.rs (UPDATED)
 // Unified CLI that interfaces with control-plane
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use colored::*;
 use std::path::PathBuf;
@@ -55,7 +55,7 @@ enum Commands {
         percentage: Option<u8>,
     },
 
-    /// List all running cells
+    /// List all running cells (runtime)
     Ps {
         /// Show all scopes (system + organisms)
         #[arg(short, long)]
@@ -102,7 +102,7 @@ enum Commands {
         dry_run: bool,
     },
 
-    // --- NEW COMMANDS ---
+    // --- REGISTRY COMMANDS ---
     /// Clone a cell from a git repository into the registry
     Clone {
         url: String,
@@ -110,8 +110,18 @@ enum Commands {
         name: Option<String>,
     },
 
-    /// Link the current directory as a cell in the registry
-    Link { name: Option<String> },
+    /// Register a local directory as a cell
+    Register {
+        /// Path to the cell source directory
+        path: PathBuf,
+
+        /// Optional name override (defaults to directory name)
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+
+    /// List registered cells
+    List,
 
     /// Run the cell in the current directory (Polyglot runner)
     Run {
@@ -142,7 +152,8 @@ async fn main() -> Result<()> {
         Commands::Top => cmd_top().await,
         Commands::Prune { dry_run } => cmd_prune(dry_run).await,
         Commands::Clone { url, name } => cmd_clone(url, name).await,
-        Commands::Link { name } => cmd_link(name).await,
+        Commands::Register { path, name } => cmd_register(path, name).await,
+        Commands::List => cmd_list().await,
         Commands::Run { release } => cmd_run(release).await,
     }
 }
@@ -507,40 +518,81 @@ async fn cmd_clone(url: String, name: Option<String>) -> Result<()> {
         }
     }
 
-    // Link
-    let link_path = registry.join(&repo_name);
-    if link_path.exists() {
-        std::fs::remove_file(&link_path).ok(); // remove old symlink
-    }
-
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target_dir, &link_path)?;
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&target_dir, &link_path)?;
-
-    println!("{} Registered '{}'", "Success:".green(), repo_name);
-    Ok(())
+    // Link via common register logic
+    cmd_register(target_dir, Some(repo_name)).await
 }
 
-async fn cmd_link(name: Option<String>) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let cell_name = name.unwrap_or_else(|| cwd.file_name().unwrap().to_string_lossy().to_string());
+async fn cmd_register(path: PathBuf, name: Option<String>) -> Result<()> {
+    let abs_path = std::fs::canonicalize(&path).context(format!("Path not found: {:?}", path))?;
+
+    if !abs_path.is_dir() {
+        anyhow::bail!("Path must be a directory");
+    }
+
+    // Validation: Check for known project markers
+    let markers = ["Cell.toml", "Cargo.toml", "package.json", "main.py"];
+    let has_marker = markers.iter().any(|m| abs_path.join(m).exists());
+
+    if !has_marker {
+        anyhow::bail!(
+            "No valid cell marker found in {:?}. Expected one of: {:?}",
+            abs_path,
+            markers
+        );
+    }
+
+    let cell_name =
+        name.unwrap_or_else(|| abs_path.file_name().unwrap().to_string_lossy().to_string());
 
     let home = dirs::home_dir().expect("No HOME");
     let registry = home.join(".cell/registry");
     std::fs::create_dir_all(&registry)?;
 
     let link_path = registry.join(&cell_name);
-    if link_path.exists() {
+    if link_path.exists() || link_path.is_symlink() {
         std::fs::remove_file(&link_path).ok();
     }
 
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&cwd, &link_path)?;
+    std::os::unix::fs::symlink(&abs_path, &link_path)?;
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&cwd, &link_path)?;
+    std::os::windows::fs::symlink_dir(&abs_path, &link_path)?;
 
-    println!("{} Linked '{}' -> {:?}", "Success:".green(), cell_name, cwd);
+    println!(
+        "{} Registered '{}' -> {:?}",
+        "✓".green(),
+        cell_name,
+        abs_path
+    );
+    Ok(())
+}
+
+async fn cmd_list() -> Result<()> {
+    let home = dirs::home_dir().expect("No HOME");
+    let registry = home.join(".cell/registry");
+
+    if !registry.exists() {
+        println!("No cells registered.");
+        return Ok(());
+    }
+
+    println!("{:<20} {}", "CELL", "LOCATION");
+    println!("{}", "─".repeat(60));
+
+    let mut entries = std::fs::read_dir(&registry)?
+        .filter_map(|e| e.ok())
+        .collect::<Vec<_>>();
+
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let target = std::fs::read_link(entry.path())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "???".to_string());
+
+        println!("{:<20} {}", name.green(), target.dimmed());
+    }
     Ok(())
 }
 
@@ -554,9 +606,8 @@ async fn cmd_run(release: bool) -> Result<()> {
         if release {
             cmd.arg("--release");
         }
-        // Forward args? The SDK calls this without args usually.
+        // Passthrough arguments? Not in this version.
 
-        // Pass through stdio so we see output
         cmd.stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());

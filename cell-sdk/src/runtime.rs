@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use anyhow::Result;
+use crate::mesh::MeshBuilder;
+use anyhow::{Context, Result};
 use cell_core::CellError;
 use cell_model::macro_coordination::{ExpansionContext, MacroInfo};
 use cell_model::protocol::MitosisSignal;
@@ -20,6 +21,36 @@ impl Runtime {
                 let _ = junction.signal(signal);
             }
         }
+    }
+
+    /// Entry point for macro-generated cells that have explicit infrastructure dependencies.
+    pub async fn ignite_with_deps<S, Req, Resp>(service: S, name: &str, deps: &[&str]) -> Result<()>
+    where
+        S: for<'a> Fn(
+                &'a Req::Archived,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<Resp>> + Send + 'a>,
+            >
+            + Send
+            + Sync
+            + 'static
+            + Clone,
+        Req: cell_model::rkyv::Archive + Send,
+        Req::Archived: for<'a> cell_model::rkyv::CheckBytes<
+                cell_model::rkyv::validation::validators::DefaultValidator<'a>,
+            > + 'static,
+        Resp: cell_model::rkyv::Serialize<cell_model::rkyv::ser::serializers::AllocSerializer<1024>>
+            + Send
+            + 'static,
+    {
+        // 1. Declare and wait for dependencies before binding
+        // This ensures infrastructure cells (auth, metrics, etc) are up.
+        // In a real implementation, this might also trigger their spawning via the CLI/Hypervisor if missing.
+        let deps_vec: Vec<String> = deps.iter().map(|s| s.to_string()).collect();
+        MeshBuilder::declare_dependencies(name, deps_vec).await;
+        MeshBuilder::wait_for_dependencies(deps).await?;
+
+        Self::ignite(service, name).await
     }
 
     pub async fn ignite<S, Req, Resp>(service: S, name: &str) -> Result<()>
@@ -88,6 +119,40 @@ impl Runtime {
         Self::emit_signal(MitosisSignal::Prophase);
 
         info!("[Runtime] Booting Cell '{}' (Node {})", cell_name, node_id);
+
+        // --- MANIFEST LOADING ---
+        // Look for Cell.toml to handle local dependencies and config
+        // In dev (cargo run), it's in CWD. In prod, it might be alongside binary.
+        let manifest_path = std::env::current_dir()
+            .unwrap_or_default()
+            .join("Cell.toml");
+        if manifest_path.exists() {
+            info!("[Runtime] Loading manifest from {:?}", manifest_path);
+            match std::fs::read_to_string(&manifest_path) {
+                Ok(content) => {
+                    match toml::from_str::<cell_model::manifest::CellManifest>(&content) {
+                        Ok(manifest) => {
+                            // Handle [local] dependencies from manifest
+                            if !manifest.local.is_empty() {
+                                let deps: Vec<String> = manifest.local.keys().cloned().collect();
+                                let deps_refs: Vec<&str> =
+                                    deps.iter().map(|s| s.as_str()).collect();
+                                info!("[Runtime] Waiting for local dependencies defined in Cell.toml: {:?}", deps);
+                                if let Err(e) = MeshBuilder::wait_for_dependencies(&deps_refs).await
+                                {
+                                    warn!(
+                                        "[Runtime] Failed waiting for manifest dependencies: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => warn!("[Runtime] Failed to parse Cell.toml: {}", e),
+                    }
+                }
+                Err(e) => warn!("[Runtime] Failed to read Cell.toml: {}", e),
+            }
+        }
 
         let coordination_handler = if !macros.is_empty() {
             Some(CoordinationHandler::new(&cell_name, macros, expander))

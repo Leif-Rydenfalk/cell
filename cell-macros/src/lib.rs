@@ -9,6 +9,9 @@ use convert_case::{Case, Casing};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+mod expand;
+mod test;
+
 // === CELL_REMOTE ===
 struct CellRemoteArgs {
     module_name: Ident,
@@ -31,18 +34,21 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let cell_name = &args.cell_name;
 
     // Fetch source over RPC from the running cell
-    let source_code = fetch_remote_source(cell_name);
+    // Note: We use the lazy reader fallback logic here conceptually, 
+    // but to keep implementation clean and focused on file writing, 
+    // we use the simpler fetching logic implemented previously but robustify it slightly.
+    let source_code = fetch_remote_source_or_fallback(cell_name);
     
-    // 1. Extract Methods from the fetched source
+    // 1. Extract Methods
     let methods = extract_handler_methods(&source_code);
     if methods.is_empty() {
         return syn::Error::new(
             module_name.span(), 
-            format!("No #[handler] methods found in source fetched from '{}'. Ensure the cell is running and uses #[service].", cell_name)
+            format!("No #[handler] methods found for '{}'. Ensure source is accessible via RPC or Registry.", cell_name)
         ).to_compile_error().into();
     }
 
-    // 2. Extract Proteins (Shared Types)
+    // 2. Extract Proteins
     let proteins = extract_proteins(&source_code);
 
     let protocol_name = format_ident!("{}Protocol", cell_name.to_case(Case::Pascal));
@@ -85,7 +91,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         pub mod #module_name {
             use ::cell_sdk::*;
 
-            // Inject extracted types (Proteins)
             #(#proteins)*
 
             #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize)]
@@ -119,50 +124,69 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-fn fetch_remote_source(cell_name: &str) -> String {
+fn fetch_remote_source_or_fallback(cell_name: &str) -> String {
     use cell_model::ops::{OpsRequest, OpsResponse};
     use cell_model::rkyv::Deserialize;
 
-    // Spin up a minimal runtime to perform the RPC call
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to build Tokio runtime for macro execution");
-
-    rt.block_on(async {
-        // Connect to the cell
-        let mut synapse = match cell_transport::Synapse::grow(cell_name).await {
-            Ok(s) => s,
-            Err(e) => panic!("Failed to connect to cell '{}' for source retrieval: {}. Is it running?", cell_name, e),
-        };
-
-        // Send GetSource request (Channel 2 = OPS)
-        let req = OpsRequest::GetSource;
-        let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req).expect("Failed to serialize OpsRequest").into_vec();
-
-        let response = synapse.fire_on_channel(cell_core::channel::OPS, &req_bytes).await
-            .expect("RPC call to GetSource failed");
+    // 1. Try RPC
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rpc_result = rt.block_on(async {
+        // Attempt connection with short timeout to avoid blocking build
+        let res = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            let mut syn = cell_transport::Synapse::grow(cell_name).await?;
+            let req = OpsRequest::GetSource;
+            let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req)?.into_vec();
+            let resp = syn.fire_on_channel(cell_core::channel::OPS, &req_bytes).await?;
+            let bytes = match resp {
+                cell_transport::Response::Owned(v) => v,
+                cell_transport::Response::Borrowed(v) => v.to_vec(),
+                _ => return Err(cell_core::CellError::SerializationFailure),
+            };
+            let archived = cell_model::rkyv::check_archived_root::<OpsResponse>(&bytes)
+                .map_err(|_| cell_core::CellError::SerializationFailure)?;
+            Ok(archived.deserialize(&mut cell_model::rkyv::Infallible).unwrap())
+        }).await;
         
-        let resp_bytes = match response {
-            cell_transport::Response::Owned(v) => v,
-            cell_transport::Response::Borrowed(v) => v.to_vec(),
-            _ => panic!("Unexpected response type"),
-        };
-
-        let archived = cell_model::rkyv::check_archived_root::<OpsResponse>(&resp_bytes)
-            .expect("Invalid OpsResponse bytes");
-        
-        let resp: OpsResponse = archived.deserialize(&mut cell_model::rkyv::Infallible).unwrap();
-
-        match resp {
-            OpsResponse::Source { bytes } => String::from_utf8(bytes).expect("Source is not valid UTF-8"),
-            _ => panic!("Cell '{}' returned unexpected OpsResponse", cell_name),
+        match res {
+            Ok(Ok(OpsResponse::Source { bytes })) => Some(bytes),
+            _ => None
         }
-    })
+    });
+
+    if let Some(bytes) = rpc_result {
+        return String::from_utf8(bytes).unwrap_or_default();
+    }
+
+    // 2. Fallback to Registry (The "Lazy Reader" logic)
+    let home = dirs::home_dir().expect("No HOME");
+    let registry = home.join(".cell/registry").join(cell_name);
+    
+    // Try main.rs
+    let main_rs = registry.join("src/main.rs");
+    if main_rs.exists() {
+        return std::fs::read_to_string(main_rs).unwrap_or_default();
+    }
+    
+    // Try lib.rs
+    let lib_rs = registry.join("src/lib.rs");
+    if lib_rs.exists() {
+        return std::fs::read_to_string(lib_rs).unwrap_or_default();
+    }
+
+    // 3. Fallback to workspace/local heuristics (e.g. ../{cell_name})
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let current = std::path::Path::new(&manifest_dir);
+        let sibling = current.parent().unwrap_or(current).join(cell_name).join("src/main.rs");
+        if sibling.exists() {
+             return std::fs::read_to_string(sibling).unwrap_or_default();
+        }
+    }
+
+    panic!("Could not find source for cell '{}'. Is it running, registered, or local?", cell_name);
 }
 
 fn extract_proteins(src: &str) -> Vec<proc_macro2::TokenStream> {
-    let syntax = syn::parse_file(src).expect("Parse failed");
+    let syntax = syn::parse_file(src).unwrap_or_else(|_| syn::File { items: vec![], shebang: None, attrs: vec![] });
     let mut proteins = Vec::new();
 
     for item in syntax.items {
@@ -204,7 +228,7 @@ fn extract_proteins(src: &str) -> Vec<proc_macro2::TokenStream> {
 }
 
 fn extract_handler_methods(src: &str) -> Vec<(Ident, Vec<(Ident, Type)>, Type)> {
-    let syntax = syn::parse_file(src).expect("Parse failed");
+    let syntax = syn::parse_file(src).unwrap_or_else(|_| syn::File { items: vec![], shebang: None, attrs: vec![] });
     let mut methods = Vec::new();
 
     for item in syntax.items {
@@ -270,6 +294,11 @@ pub fn protein(_: TokenStream, item: TokenStream) -> TokenStream {
         #input
     };
     TokenStream::from(expanded)
+}
+
+#[proc_macro_attribute]
+pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
+    expand::expand_impl(attr, item)
 }
 
 #[proc_macro_attribute]
@@ -378,7 +407,6 @@ pub fn handler(_: TokenStream, item: TokenStream) -> TokenStream {
                 ).await
             }
 
-            // Fixed return type to map errors correctly to what Membrane expects
             async fn dispatch(&self, req: &#archived_protocol_name) -> ::anyhow::Result<#response_name> {
                 let res: ::std::result::Result<#response_name, ::cell_sdk::CellError> = match req {
                     #(#dispatch_arms),*
