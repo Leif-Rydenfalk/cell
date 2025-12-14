@@ -12,7 +12,13 @@ proc-macro = true
 
 [dependencies]
 quote = "1.0"
-syn = { version = "2.0", features = ["full", "extra-traits", "parsing", "visit", "fold"] }
+syn = { version = "2.0", features = [
+    "full",
+    "extra-traits",
+    "parsing",
+    "visit",
+    "fold",
+] }
 proc-macro2 = "1.0"
 convert_case = "0.6"
 dirs = "5.0"
@@ -23,5 +29,7 @@ anyhow = "1.0"
 cell-build = { path = "../cell-build", version = "0.1.0" }
 cell-core = { path = "../cell-core", version = "0.4.0" }
 cell-model = { path = "../cell-model", version = "0.4.0" }
-cell-transport = { path = "../cell-transport", version = "0.4.0", features = ["std"] }
+cell-transport = { path = "../cell-transport", version = "0.4.0", features = [
+    "std",
+] }
 tokio = { version = "1.36", features = ["full"] }

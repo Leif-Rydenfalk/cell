@@ -2,14 +2,12 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use crate::mesh::MeshBuilder;
-use anyhow::{Context, Result};
-use cell_core::CellError;
+use anyhow::Result;
 use cell_model::macro_coordination::{ExpansionContext, MacroInfo};
 use cell_model::protocol::MitosisSignal;
-use cell_transport::{CoordinationHandler, Membrane, Synapse};
+use cell_transport::{CoordinationHandler, Membrane};
 use std::future::Future;
 use std::pin::Pin;
-use tokio::time::Duration;
 use tracing::{info, warn};
 
 pub struct Runtime;
@@ -44,8 +42,6 @@ impl Runtime {
             + 'static,
     {
         // 1. Declare and wait for dependencies before binding
-        // This ensures infrastructure cells (auth, metrics, etc) are up.
-        // In a real implementation, this might also trigger their spawning via the CLI/Hypervisor if missing.
         let deps_vec: Vec<String> = deps.iter().map(|s| s.to_string()).collect();
         MeshBuilder::declare_dependencies(name, deps_vec).await;
         MeshBuilder::wait_for_dependencies(deps).await?;
@@ -121,8 +117,6 @@ impl Runtime {
         info!("[Runtime] Booting Cell '{}' (Node {})", cell_name, node_id);
 
         // --- MANIFEST LOADING ---
-        // Look for Cell.toml to handle local dependencies and config
-        // In dev (cargo run), it's in CWD. In prod, it might be alongside binary.
         let manifest_path = std::env::current_dir()
             .unwrap_or_default()
             .join("Cell.toml");
@@ -132,12 +126,11 @@ impl Runtime {
                 Ok(content) => {
                     match toml::from_str::<cell_model::manifest::CellManifest>(&content) {
                         Ok(manifest) => {
-                            // Handle [local] dependencies from manifest
                             if !manifest.local.is_empty() {
                                 let deps: Vec<String> = manifest.local.keys().cloned().collect();
                                 let deps_refs: Vec<&str> =
                                     deps.iter().map(|s| s.as_str()).collect();
-                                info!("[Runtime] Waiting for local dependencies defined in Cell.toml: {:?}", deps);
+                                info!("[Runtime] Waiting for local dependencies: {:?}", deps);
                                 if let Err(e) = MeshBuilder::wait_for_dependencies(&deps_refs).await
                                 {
                                     warn!(

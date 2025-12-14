@@ -13,10 +13,10 @@ pub struct CellManifest {
     pub local: HashMap<String, String>,
     #[serde(default)]
     pub handlers: Vec<HandlerMeta>,
-    // Optional workspace configuration (usually in root Cell.toml)
+    #[serde(default)]
+    pub macros: HashMap<String, String>, // (layer, feature) -> function_name
     pub workspace: Option<WorkspaceMeta>,
 
-    // Runtime sections (from previous YAML design, adapted to TOML structure if needed)
     #[serde(default)]
     pub resources: ResourceLimits,
     #[serde(default)]
@@ -37,7 +37,6 @@ pub struct WorkspaceMeta {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HandlerMeta {
     pub name: String,
-    // Add input/output schemas here if driven by manifest
 }
 
 // --- Runtime Structs ---

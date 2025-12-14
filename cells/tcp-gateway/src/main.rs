@@ -1,15 +1,12 @@
 // cells/tcp-gateway/src/main.rs
 // SPDX-License-Identifier: MIT
 // A generic Gateway Cell that allows Cells to connect to raw TCP endpoints.
-// This proves the "Opt-in Complexity" model: features like raw TCP bridging
-// are just Cells, not SDK bloat.
 
 use cell_sdk::*;
 use cell_model::bridge::{BridgeRequest, BridgeResponse};
 use tokio::net::{TcpStream, UnixListener};
 use tokio::io::copy;
-use anyhow::{Result, anyhow};
-use std::sync::Arc;
+use anyhow::{Result};
 
 #[service]
 struct TcpGateway;
@@ -92,8 +89,6 @@ async fn main() -> Result<()> {
     tracing::info!("TcpGateway Online. Usage: Synapse::grow(\"tcp:IP:PORT\")");
     
     let service = TcpGateway;
-    // Serve on the standard app channel.
-    // The Synapse client knows to send BridgeRequests to channel 0 (APP) when
-    // connecting to a gateway.
+    // Serve on the standard app channel (APP=0) because that's where BridgeRequests go
     service.serve("tcp-gateway").await
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
@@ -25,6 +25,162 @@ pub enum ResolverResponse {
     Error { message: String },
 }
 
+// --- MACRO RUNNER (Optimized with Binary Caching) ---
+
+pub struct MacroRunner;
+
+impl MacroRunner {
+    pub fn run(layer: &str, feature: &str, struct_source: &str) -> Result<String> {
+        let cell_name = layer;
+        let home = dirs::home_dir().context("No HOME")?;
+        let registry_dir = home.join(".cell/registry");
+        let cell_path = registry_dir.join(cell_name);
+
+        if !cell_path.exists() {
+            bail!("Macro provider cell '{}' not found in registry.", cell_name);
+        }
+
+        // 1. Read Cell.toml to find function name
+        let manifest_path = cell_path.join("Cell.toml");
+        let manifest_content = fs::read_to_string(&manifest_path)?;
+
+        #[derive(Deserialize)]
+        struct MacroManifest {
+            #[serde(default)]
+            macros: std::collections::HashMap<String, String>,
+        }
+        let m: MacroManifest = toml::from_str(&manifest_content)?;
+        let fn_name = m.macros.get(feature).ok_or_else(|| {
+            anyhow!(
+                "Cell '{}' does not export macro feature '{}'",
+                cell_name,
+                feature
+            )
+        })?;
+
+        // 2. Hash the provider source to see if we can use a cached binary
+        let provider_hash = Self::compute_hash(&cell_path)?;
+        let cache_dir = home
+            .join(".cell/cache/macros")
+            .join(cell_name)
+            .join(feature);
+        let bin_path = cache_dir.join("runner");
+        let hash_path = cache_dir.join("source.hash");
+
+        fs::create_dir_all(&cache_dir)?;
+
+        let is_cached = bin_path.exists()
+            && fs::read_to_string(&hash_path)
+                .map(|h| h == provider_hash)
+                .unwrap_or(false);
+
+        if !is_cached {
+            Self::compile_runner(
+                cell_name,
+                &cell_path,
+                fn_name,
+                &bin_path,
+                &provider_hash,
+                &hash_path,
+            )?;
+        }
+
+        // 3. Execute the cached/compiled binary
+        let mut child = Command::new(&bin_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(struct_source.as_bytes())?;
+        drop(stdin);
+
+        let output = child.wait_with_output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Macro expansion failed:\n{}", stderr);
+        }
+
+        Ok(String::from_utf8(output.stdout)?)
+    }
+
+    fn compile_runner(
+        cell: &str,
+        cell_path: &Path,
+        fn_name: &str,
+        bin_dest: &Path,
+        hash: &str,
+        hash_dest: &Path,
+    ) -> Result<()> {
+        let temp_dir = std::env::temp_dir().join(format!("compile_cell_macro_{}", cell));
+        fs::create_dir_all(&temp_dir)?;
+
+        let cargo_toml = format!(
+            r#"[package]
+name = "macro_runner"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+{} = {{ path = {:?} }}
+syn = {{ version = "2.0", features = ["full"] }}
+quote = "1.0"
+"#,
+            cell, cell_path
+        );
+
+        let main_rs = format!(
+            r#"
+use {}::{};
+use std::io::Read;
+fn main() {{
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input).unwrap();
+    let ast: syn::ItemStruct = syn::parse_str(&input).expect("Parse failed");
+    let tokens = {}(&ast);
+    println!("{{}}", tokens);
+}}
+"#,
+            cell, fn_name, fn_name
+        );
+
+        fs::write(temp_dir.join("Cargo.toml"), cargo_toml)?;
+        fs::create_dir_all(temp_dir.join("src"))?;
+        fs::write(temp_dir.join("src/main.rs"), main_rs)?;
+
+        let status = Command::new("cargo")
+            .args(["build", "--release"])
+            .current_dir(&temp_dir)
+            .status()?;
+
+        if !status.success() {
+            bail!("Failed to compile macro runner for {}", cell);
+        }
+
+        let built_bin = temp_dir.join("target/release/macro_runner");
+        fs::copy(&built_bin, bin_dest)?;
+        fs::write(hash_dest, hash)?;
+
+        let _ = fs::remove_dir_all(&temp_dir);
+        Ok(())
+    }
+
+    fn compute_hash(path: &Path) -> Result<String> {
+        let mut hasher = blake3::Hasher::new();
+        for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+            if entry
+                .path()
+                .extension()
+                .map_or(false, |ext| ext == "rs" || ext == "toml")
+            {
+                hasher.update(&fs::read(entry.path())?);
+            }
+        }
+        Ok(hasher.finalize().to_hex().to_string())
+    }
+}
+
 // --- MONOREPO REGISTRATION ---
 
 #[derive(Deserialize)]
@@ -43,13 +199,10 @@ struct PartialWorkspace {
 }
 
 pub fn register() {
-    // Only run if we are in a build script context
     if std::env::var("CARGO_MANIFEST_DIR").is_err() {
         return;
     }
-
     if let Err(e) = register_monorepo() {
-        // Don't fail the build, just warn
         println!("cargo:warning=Cell monorepo registration failed: {}", e);
     }
 }
@@ -57,18 +210,15 @@ pub fn register() {
 fn register_monorepo() -> Result<()> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")?;
     let start_path = PathBuf::from(manifest_dir);
-
-    // 1. Find Repo Root
     let repo_root = match find_git_root(&start_path) {
         Some(p) => p,
-        None => return Ok(()), // Not in a git repo, skip auto-registration
+        None => return Ok(()),
     };
 
     let home = dirs::home_dir().context("No HOME dir")?;
     let registry_dir = home.join(".cell/registry");
     fs::create_dir_all(&registry_dir)?;
 
-    // 2. Check for Workspace Namespace (in root Cell.toml)
     let mut namespace = None;
     let root_manifest = repo_root.join("Cell.toml");
     if root_manifest.exists() {
@@ -81,7 +231,6 @@ fn register_monorepo() -> Result<()> {
         }
     }
 
-    // 3. Walk Repo for Cell.toml files
     for entry in WalkDir::new(&repo_root).into_iter().filter_map(|e| e.ok()) {
         if entry.file_name() == "Cell.toml" {
             process_cell_toml(
@@ -92,7 +241,6 @@ fn register_monorepo() -> Result<()> {
             )?;
         }
     }
-
     Ok(())
 }
 
@@ -106,7 +254,6 @@ fn process_cell_toml(
     let manifest: PartialManifest = toml::from_str(&content)?;
     let dir = path.parent().unwrap();
 
-    // A. Self-Registration
     if let Some(cell) = manifest.cell {
         let name = if let Some(ns) = namespace {
             format!("{}-{}", ns, cell.name)
@@ -116,38 +263,26 @@ fn process_cell_toml(
         create_symlink(registry_dir, &name, dir)?;
     }
 
-    // B. Local Dependency Registration
     if let Some(locals) = manifest.local {
         for (alias, rel_path) in locals {
             let target_path = dir.join(rel_path);
             if let Ok(abs_path) = fs::canonicalize(&target_path) {
                 create_symlink(registry_dir, &alias, &abs_path)?;
-            } else {
-                println!(
-                    "cargo:warning=Could not resolve local dependency '{}' at {:?}",
-                    alias, target_path
-                );
             }
         }
     }
-
     Ok(())
 }
 
 fn create_symlink(registry: &Path, name: &str, target: &Path) -> Result<()> {
     let link = registry.join(name);
-
-    // Idempotency: remove existing if it exists
     if link.exists() || link.is_symlink() {
         fs::remove_file(&link).ok();
     }
-
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, &link)?;
-
     #[cfg(windows)]
     std::os::windows::fs::symlink_dir(target, &link)?;
-
     Ok(())
 }
 
@@ -167,8 +302,6 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
 // --- RESOLVER LOGIC ---
 
 pub fn resolve(cell_name: &str) -> Result<String> {
-    // 1. CIRCULAR DEPENDENCY BREAKER
-    // Kernel cells (and the CLI tool) know where system services live deterministically.
     let current_pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
     if is_kernel_cell(&current_pkg) {
         let home = dirs::home_dir().expect("No HOME directory");
@@ -178,37 +311,30 @@ pub fn resolve(cell_name: &str) -> Result<String> {
         return Ok(path.to_string_lossy().to_string());
     }
 
-    // 2. Normal Discovery
     let home = dirs::home_dir().expect("No HOME directory");
     let runtime_dir = home.join(".cell/runtime/system");
     let mycelium_sock = runtime_dir.join("mycelium.sock");
 
-    // Connect or Bootstrap
     let mut stream = match UnixStream::connect(&mycelium_sock) {
         Ok(s) => s,
         Err(_) => bootstrap_mycelium(&mycelium_sock)?,
     };
 
-    // Send Request
     let req = ResolverRequest::EnsureRunning {
         cell_name: cell_name.to_string(),
     };
     let req_json = serde_json::to_vec(&req)?;
-
     let len = req_json.len() as u32;
     stream.write_all(&len.to_le_bytes())?;
     stream.write_all(&req_json)?;
 
-    // Read Response
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
-
     let mut resp_buf = vec![0u8; len];
     stream.read_exact(&mut resp_buf)?;
 
     let resp: ResolverResponse = serde_json::from_slice(&resp_buf)?;
-
     match resp {
         ResolverResponse::Ok { socket_path } => Ok(socket_path),
         ResolverResponse::Error { message } => bail!("Resolution failed: {}", message),
@@ -218,32 +344,17 @@ pub fn resolve(cell_name: &str) -> Result<String> {
 fn is_kernel_cell(pkg_name: &str) -> bool {
     matches!(
         pkg_name,
-        "mycelium"
-            | "hypervisor"
-            | "builder"
-            | "nucleus"
-            | "axon"
-            | "cell-cli"
-            | "mesh"
-            | "observer"
+        "mycelium" | "hypervisor" | "builder" | "axon" | "cell-cli" | "mesh" | "observer"
     )
 }
 
 fn bootstrap_mycelium(socket_path: &Path) -> Result<UnixStream> {
-    eprintln!(
-        "warning: [cell-build] Mycelium not found at {:?}. Bootstrapping mesh...",
-        socket_path
-    );
-
     let infra_target_dir = std::env::temp_dir().join("cell-infra-build");
     std::fs::create_dir_all(&infra_target_dir).ok();
 
-    // Spawn mycelium, STRIPPING environment variables that might cause it to run in test mode
-    let status = Command::new("cargo")
+    let _ = Command::new("cargo")
         .args(&["run", "--release", "-p", "mycelium"])
-        .env("CELL_DAEMON", "1")
         .env("CARGO_TARGET_DIR", infra_target_dir)
-        // CRITICAL: Prevent inheriting test environment paths
         .env_remove("CELL_SOCKET_DIR")
         .env_remove("CELL_NODE_ID")
         .env_remove("CELL_ORGANISM")
@@ -251,11 +362,6 @@ fn bootstrap_mycelium(socket_path: &Path) -> Result<UnixStream> {
         .stderr(Stdio::null())
         .spawn();
 
-    if let Err(e) = status {
-        bail!("Failed to spawn Mycelium: {}", e);
-    }
-
-    // Wait for socket
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while std::time::Instant::now() < deadline {
         if socket_path.exists() {
@@ -265,27 +371,22 @@ fn bootstrap_mycelium(socket_path: &Path) -> Result<UnixStream> {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-
     bail!("Timed out waiting for Mycelium to boot.");
 }
 
 pub struct CellBuilder;
-
 impl CellBuilder {
     pub fn configure() -> Self {
         Self
     }
-
     pub fn extract_macros(self) -> Result<Self> {
         Ok(self)
     }
 }
 
 pub fn load_and_flatten_source(entry_path: &Path) -> Result<syn::File> {
-    let content = fs::read_to_string(entry_path)
-        .with_context(|| format!("Failed to read DNA entry file: {:?}", entry_path))?;
+    let content = fs::read_to_string(entry_path)?;
     let mut file = parse_file(&content)?;
-
     let base_dir = entry_path.parent().unwrap_or_else(|| Path::new("."));
     let mut flattener = ModuleFlattener {
         base_dir: base_dir.to_path_buf(),
@@ -293,7 +394,7 @@ pub fn load_and_flatten_source(entry_path: &Path) -> Result<syn::File> {
     };
     flattener.visit_file_mut(&mut file);
     if let Some(err) = flattener.errors.first() {
-        bail!("Module resolution failed: {}", err);
+        bail!("{}", err);
     }
     Ok(file)
 }
@@ -302,7 +403,6 @@ struct ModuleFlattener {
     base_dir: PathBuf,
     errors: Vec<String>,
 }
-
 impl VisitMut for ModuleFlattener {
     fn visit_item_mod_mut(&mut self, node: &mut syn::ItemMod) {
         if node.content.is_none() {
@@ -318,40 +418,24 @@ impl VisitMut for ModuleFlattener {
                     None
                 }
             };
-
             if let Some(path) = target_path {
-                match fs::read_to_string(&path) {
-                    Ok(content) => match parse_file(&content) {
-                        Ok(mut file) => {
-                            let sub_base_dir =
-                                if path.file_name().and_then(|n| n.to_str()) == Some("mod.rs") {
-                                    path.parent().unwrap().to_path_buf()
-                                } else {
-                                    path.parent().unwrap().join(&mod_name)
-                                };
-                            let mut sub_visitor = ModuleFlattener {
-                                base_dir: sub_base_dir,
-                                errors: Vec::new(),
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(mut file) = parse_file(&content) {
+                        let sub_base_dir =
+                            if path.file_name().and_then(|n| n.to_str()) == Some("mod.rs") {
+                                path.parent().unwrap().to_path_buf()
+                            } else {
+                                path.parent().unwrap().join(&mod_name)
                             };
-                            sub_visitor.visit_file_mut(&mut file);
-                            if !sub_visitor.errors.is_empty() {
-                                self.errors.extend(sub_visitor.errors);
-                            }
-                            node.content = Some((syn::token::Brace::default(), file.items));
-                        }
-                        Err(e) => self
-                            .errors
-                            .push(format!("Failed to parse {:?}: {}", path, e)),
-                    },
-                    Err(e) => self
-                        .errors
-                        .push(format!("Failed to read {:?}: {}", path, e)),
+                        let mut sub_v = ModuleFlattener {
+                            base_dir: sub_base_dir,
+                            errors: Vec::new(),
+                        };
+                        sub_v.visit_file_mut(&mut file);
+                        self.errors.extend(sub_v.errors);
+                        node.content = Some((syn::token::Brace::default(), file.items));
+                    }
                 }
-            } else {
-                self.errors.push(format!(
-                    "Module '{}' not found in {:?}",
-                    mod_name, self.base_dir
-                ));
             }
         } else {
             let old_base = self.base_dir.clone();
