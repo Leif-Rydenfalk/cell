@@ -3,7 +3,7 @@
 
 mod tui_monitor;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use cell_sdk::cell_remote;
 use clap::{Parser, Subcommand};
 use colored::*;
