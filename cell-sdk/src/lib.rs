@@ -4,9 +4,10 @@
 extern crate self as cell_sdk;
 
 pub use cell_core::{channel, CellError, Transport, Vesicle};
+pub use cell_discovery as discovery;
 pub use cell_macros::{cell_remote, expand, handler, protein, service};
 pub use cell_model::*;
-pub use cell_transport::{resolve_socket_dir, Membrane, Synapse}; // Added re-export
+pub use cell_transport::{resolve_socket_dir, Membrane, Synapse}; // Export discovery module
 
 pub use anyhow;
 pub use clap;
@@ -33,7 +34,7 @@ pub mod prelude {
         anyhow::{Error, Result},
         cell_remote,
         config::CellConfig,
-        expand, handler, protein,
+        discovery, expand, handler, protein,
         runtime::Runtime,
         service, Synapse,
     };

@@ -125,17 +125,15 @@ fn fetch_remote_source_or_fallback(cell_name: &str) -> String {
     use cell_model::ops::{OpsRequest, OpsResponse};
     use cell_model::rkyv::Deserialize;
 
-    // 1. Try RPC
+    // 1. Try RPC (Fast path if running)
+    // We use a small timeout to avoid blocking builds if the cell is down
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let rpc_result = rt.block_on(async {
-        // Attempt connection with short timeout to avoid blocking build
-        let res = tokio::time::timeout(std::time::Duration::from_millis(500), async {
-            // Map anyhow error to CellError so '?' works
+        let res = tokio::time::timeout(std::time::Duration::from_millis(100), async {
             let mut syn = cell_transport::Synapse::grow(cell_name).await
                 .map_err(|_| cell_core::CellError::ConnectionRefused)?;
             
             let req = OpsRequest::GetSource;
-            // Map serialization error to CellError so '?' works
             let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req)
                 .map_err(|_| cell_core::CellError::SerializationFailure)?
                 .into_vec();
@@ -161,28 +159,37 @@ fn fetch_remote_source_or_fallback(cell_name: &str) -> String {
         return String::from_utf8(bytes).unwrap_or_default();
     }
 
-    // 2. Fallback to Registry (The "Lazy Reader" logic)
+    // 2. Fallback to Registry (Legacy/Manual registration)
     let home = dirs::home_dir().expect("No HOME");
     let registry = home.join(".cell/registry").join(cell_name);
     
-    // Try main.rs
-    let main_rs = registry.join("src/main.rs");
-    if main_rs.exists() {
-        return std::fs::read_to_string(main_rs).unwrap_or_default();
-    }
-    
-    // Try lib.rs
-    let lib_rs = registry.join("src/lib.rs");
-    if lib_rs.exists() {
-        return std::fs::read_to_string(lib_rs).unwrap_or_default();
+    let candidates = [
+        registry.join("src/main.rs"),
+        registry.join("src/lib.rs"),
+    ];
+    for c in &candidates {
+        if c.exists() { return std::fs::read_to_string(c).unwrap_or_default(); }
     }
 
-    // 3. Fallback to workspace/local heuristics (e.g. ../{cell_name})
+    // 3. Fallback to Workspace Heuristics (The Monorepo Fix)
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let current = std::path::Path::new(&manifest_dir);
-        let sibling = current.parent().unwrap_or(current).join(cell_name).join("src/main.rs");
-        if sibling.exists() {
-             return std::fs::read_to_string(sibling).unwrap_or_default();
+        let parent = current.parent().unwrap_or(current);
+        
+        // Search in:
+        // 1. ../{name} (Sibling)
+        // 2. ../cells/{name} (Standard Monorepo Layout)
+        // 3. ../../cells/{name} (Nested Example Layout)
+        let local_candidates = [
+            parent.join(cell_name).join("src/main.rs"),
+            parent.join("cells").join(cell_name).join("src/main.rs"),
+            parent.parent().unwrap_or(parent).join("cells").join(cell_name).join("src/main.rs"),
+        ];
+
+        for c in &local_candidates {
+            if c.exists() {
+                return std::fs::read_to_string(c).unwrap_or_default();
+            }
         }
     }
 
@@ -378,7 +385,6 @@ pub fn handler(_: TokenStream, item: TokenStream) -> TokenStream {
     let fingerprint = hasher.finish();
 
     let expanded = quote! {
-        // Generate Protocol Enums locally for the server
         #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize)]
         #[derive(::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize)]
         #[archive(check_bytes)]
@@ -393,7 +399,6 @@ pub fn handler(_: TokenStream, item: TokenStream) -> TokenStream {
         #[archive(crate = "::cell_sdk::rkyv")]
         pub enum #response_name { #(#resp_variants),* }
 
-        // The Implementation
         #input
 
         impl #service_name {
@@ -407,7 +412,7 @@ pub fn handler(_: TokenStream, item: TokenStream) -> TokenStream {
                         let svc = service.clone();
                         Box::pin(async move { svc.dispatch(archived_req).await })
                     },
-                    None, None, None // Genome, Consensus, Coordination
+                    None, None, None 
                 ).await
             }
 

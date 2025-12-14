@@ -10,6 +10,7 @@ members = [
     "cell-macros",
     "cell-build",
     "cell-cli",
+    "cells/*",                                   # Include all cells
     "examples/cell-market-bench/cells/exchange",
     "examples/cell-market-bench/cells/trader",
 ]
