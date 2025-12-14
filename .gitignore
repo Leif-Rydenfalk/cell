@@ -2,4 +2,5 @@ target/
 run/
 .cell/
 trash/
+personal-docs/
 .DS_Store
