@@ -30,19 +30,20 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let module_name = args.module_name;
     let cell_name = &args.cell_name;
 
-    let source_path = find_cell_source(cell_name);
+    // Fetch source over RPC from the running cell
+    let source_code = fetch_remote_source(cell_name);
     
-    // 1. Extract Methods
-    let methods = extract_handler_methods(&source_path);
+    // 1. Extract Methods from the fetched source
+    let methods = extract_handler_methods(&source_code);
     if methods.is_empty() {
         return syn::Error::new(
             module_name.span(), 
-            format!("No #[handler] methods found in cell source: {:?}. Ensure the cell uses #[service] and #[handler] correctly.", source_path)
+            format!("No #[handler] methods found in source fetched from '{}'. Ensure the cell is running and uses #[service].", cell_name)
         ).to_compile_error().into();
     }
 
     // 2. Extract Proteins (Shared Types)
-    let proteins = extract_proteins(&source_path);
+    let proteins = extract_proteins(&source_code);
 
     let protocol_name = format_ident!("{}Protocol", cell_name.to_case(Case::Pascal));
     let response_name = format_ident!("{}Response", cell_name.to_case(Case::Pascal));
@@ -118,49 +119,50 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-fn find_cell_source(cell_name: &str) -> std::path::PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let current = std::path::Path::new(&manifest_dir);
-    let pkg_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
-    
-    // Ordered candidates to find the correct source file
-    let mut candidates = vec![
-        // 1. Peer/Sibling directory (e.g. client -> ../hello)
-        current.parent().unwrap_or(current).join(cell_name).join("src/main.rs"),
-        
-        // 2. Standard workspace structure locations
-        current.join("cells").join(cell_name).join("src/main.rs"),
-        current.join("../cells").join(cell_name).join("src/main.rs"),
-        current.join("../../cells").join(cell_name).join("src/main.rs"),
-        current.join("../../../cells").join(cell_name).join("src/main.rs"),
-        
-        // 3. Examples
-        current.join("examples").join(cell_name).join("src/main.rs"),
-        current.join("../examples").join(cell_name).join("src/main.rs"),
-        current.join("../../examples").join(cell_name).join("src/main.rs"),
-        
-        // 4. Benchmarks/Deeply nested
-        current.join("examples/cell-market-bench/cells").join(cell_name).join("src/main.rs"),
-    ];
+fn fetch_remote_source(cell_name: &str) -> String {
+    use cell_model::ops::{OpsRequest, OpsResponse};
+    use cell_model::rkyv::Deserialize;
 
-    // 5. Current Crate (Self-reference) - ONLY if names match
-    if pkg_name == cell_name {
-        candidates.insert(0, current.join("src/main.rs"));
-    } else {
-        // As a last resort, check self
-        candidates.push(current.join("src/main.rs"));
-    }
+    // Spin up a minimal runtime to perform the RPC call
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to build Tokio runtime for macro execution");
 
-    for p in candidates { 
-        if p.exists() { return p; } 
-    }
-    
-    panic!("Cell source not found for: {}. Checked paths relative to {}", cell_name, manifest_dir);
+    rt.block_on(async {
+        // Connect to the cell
+        let mut synapse = match cell_transport::Synapse::grow(cell_name).await {
+            Ok(s) => s,
+            Err(e) => panic!("Failed to connect to cell '{}' for source retrieval: {}. Is it running?", cell_name, e),
+        };
+
+        // Send GetSource request (Channel 2 = OPS)
+        let req = OpsRequest::GetSource;
+        let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req).expect("Failed to serialize OpsRequest").into_vec();
+
+        let response = synapse.fire_on_channel(cell_core::channel::OPS, &req_bytes).await
+            .expect("RPC call to GetSource failed");
+        
+        let resp_bytes = match response {
+            cell_transport::Response::Owned(v) => v,
+            cell_transport::Response::Borrowed(v) => v.to_vec(),
+            _ => panic!("Unexpected response type"),
+        };
+
+        let archived = cell_model::rkyv::check_archived_root::<OpsResponse>(&resp_bytes)
+            .expect("Invalid OpsResponse bytes");
+        
+        let resp: OpsResponse = archived.deserialize(&mut cell_model::rkyv::Infallible).unwrap();
+
+        match resp {
+            OpsResponse::Source { bytes } => String::from_utf8(bytes).expect("Source is not valid UTF-8"),
+            _ => panic!("Cell '{}' returned unexpected OpsResponse", cell_name),
+        }
+    })
 }
 
-fn extract_proteins(path: &std::path::Path) -> Vec<proc_macro2::TokenStream> {
-    let src = std::fs::read_to_string(path).expect("Read failed");
-    let syntax = syn::parse_file(&src).expect("Parse failed");
+fn extract_proteins(src: &str) -> Vec<proc_macro2::TokenStream> {
+    let syntax = syn::parse_file(src).expect("Parse failed");
     let mut proteins = Vec::new();
 
     for item in syntax.items {
@@ -201,9 +203,8 @@ fn extract_proteins(path: &std::path::Path) -> Vec<proc_macro2::TokenStream> {
     proteins
 }
 
-fn extract_handler_methods(path: &std::path::Path) -> Vec<(Ident, Vec<(Ident, Type)>, Type)> {
-    let src = std::fs::read_to_string(path).expect("Read failed");
-    let syntax = syn::parse_file(&src).expect("Parse failed");
+fn extract_handler_methods(src: &str) -> Vec<(Ident, Vec<(Ident, Type)>, Type)> {
+    let syntax = syn::parse_file(src).expect("Parse failed");
     let mut methods = Vec::new();
 
     for item in syntax.items {

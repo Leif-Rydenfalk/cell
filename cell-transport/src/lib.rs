@@ -15,11 +15,11 @@ pub mod transport;
 pub mod shm;
 
 pub use membrane::Membrane;
+pub use response::Response;
 pub use synapse::Synapse;
 pub use transport::UnixTransport;
 
+// Delegate to discovery to ensure single source of truth for "system" default
 pub fn resolve_socket_dir() -> std::path::PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-    let organism = std::env::var("CELL_ORGANISM").unwrap_or_else(|_| "default".to_string());
-    home.join(".cell/runtime").join(organism)
+    cell_discovery::resolve_socket_dir()
 }

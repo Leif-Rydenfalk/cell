@@ -3,8 +3,8 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use rkyv::{Archive, Serialize as RkyvSerialize, Deserialize as RkyvDeserialize};
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, Debug, Clone)]
 #[archive(check_bytes)]
@@ -17,6 +17,8 @@ pub enum OpsRequest {
     Metrics,
     /// Graceful Shutdown
     Shutdown,
+    /// Fetch the source code of this cell for remote client generation
+    GetSource,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, Debug, Clone)]
@@ -31,6 +33,9 @@ pub enum OpsResponse {
     },
     Metrics(MetricsSnapshot),
     ShutdownAck,
+    Source {
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, Debug, Clone)]

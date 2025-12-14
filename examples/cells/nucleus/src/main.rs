@@ -58,7 +58,7 @@ pub struct CellInstance {
 
 #[protein]
 pub struct ApplyManifest {
-    pub yaml: String,
+    pub toml: String,
 }
 
 #[protein]
@@ -212,13 +212,6 @@ impl Nucleus {
             }
         };
             
-        // Protocol: The handler in mesh/src/main.rs is `get_graph() -> Result<Vec<(String, Vec<String>)>>`
-        // Wait, check `cells/mesh/src/main.rs`:
-        // It returns `Result<HashMap<String, Vec<String>>>` in my previous thought block, but originally it was `Vec`.
-        // Let's match the implemented handler in mesh.rs which I updated in the previous turn.
-        // It returns `HashMap<String, Vec<String>>`.
-        // The Client wrapper returns `Result<HashMap<...>, CellError>`.
-        
         let graph_raw = mesh_client.get_graph().await
             .context("Failed to retrieve graph")?;
 
@@ -329,8 +322,8 @@ impl NucleusService {
     }
 
     async fn apply(&self, req: ApplyManifest) -> Result<bool> {
-        let manifest: MeshManifest = serde_yaml::from_str(&req.yaml)
-            .map_err(|e| anyhow!("Invalid YAML: {}", e))?;
+        let manifest: MeshManifest = toml::from_str(&req.toml)
+            .map_err(|e| anyhow!("Invalid TOML: {}", e))?;
         let mut state = self.inner.state.write().await;
         state.desired_state = Some(manifest.clone());
         tracing::info!("[Nucleus] Applied manifest for mesh '{}'", manifest.mesh);

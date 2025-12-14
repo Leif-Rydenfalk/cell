@@ -88,7 +88,7 @@ impl Hypervisor {
             processes: Arc::new(Mutex::new(ProcessTable { running: HashMap::new() })),
         };
 
-        hv.bootstrap_kernel_cell("nucleus").await?;
+        // Bootstrap basic services (Nucleus removed)
         hv.bootstrap_kernel_cell("axon").await?;
         hv.bootstrap_kernel_cell("builder").await?;
         

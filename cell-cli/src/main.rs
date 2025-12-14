@@ -22,78 +22,78 @@ enum Commands {
         #[arg(short, long)]
         foreground: bool,
     },
-    
+
     /// Stop the entire mesh gracefully
     Down {
         /// Force kill all processes
         #[arg(short, long)]
         force: bool,
     },
-    
+
     /// Restart the mesh (preserves state)
     Restart,
-    
+
     /// Show mesh status
     Status {
         /// Show detailed info
         #[arg(short, long)]
         verbose: bool,
     },
-    
+
     /// Hot-swap a cell to latest version
     Swap {
         /// Cell name
         cell: String,
-        
+
         /// Swap strategy (blue-green, canary, rolling)
         #[arg(short, long, default_value = "blue-green")]
         strategy: String,
-        
+
         /// Canary percentage (only for canary strategy)
         #[arg(short, long)]
         percentage: Option<u8>,
     },
-    
+
     /// List all running cells
     Ps {
         /// Show all scopes (system + organisms)
         #[arg(short, long)]
         all: bool,
     },
-    
+
     /// Tail logs from a cell
     Logs {
         cell: String,
-        
+
         /// Follow log output
         #[arg(short, long)]
         follow: bool,
     },
-    
+
     /// Run health checks
     Health {
         /// Cell name (optional, checks all if omitted)
         cell: Option<String>,
     },
-    
+
     /// Show dependency graph
     Graph {
         /// Output format (dot, json, ascii)
         #[arg(short, long, default_value = "ascii")]
         format: String,
     },
-    
+
     /// Execute a test in the mesh
     Test {
         target: String,
-        
+
         #[arg(short, long)]
         filter: Option<String>,
     },
-    
+
     /// Interactive TUI dashboard
     Top,
-    
+
     /// Prune unused cells
     Prune {
         /// Dry run (show what would be pruned)
@@ -111,9 +111,11 @@ async fn main() -> Result<()> {
         Commands::Down { force } => cmd_down(force).await,
         Commands::Restart => cmd_restart().await,
         Commands::Status { verbose } => cmd_status(verbose).await,
-        Commands::Swap { cell, strategy, percentage } => {
-            cmd_swap(cell, strategy, percentage).await
-        }
+        Commands::Swap {
+            cell,
+            strategy,
+            percentage,
+        } => cmd_swap(cell, strategy, percentage).await,
         Commands::Ps { all } => cmd_ps(all).await,
         Commands::Logs { cell, follow } => cmd_logs(cell, follow).await,
         Commands::Health { cell } => cmd_health(cell).await,
@@ -128,7 +130,7 @@ async fn main() -> Result<()> {
 
 async fn cmd_up(foreground: bool) -> Result<()> {
     println!("{}", "Starting Cell Mesh...".bright_cyan().bold());
-    
+
     if is_control_plane_running().await {
         println!("{}", "Already running".green());
         return Ok(());
@@ -139,7 +141,7 @@ async fn cmd_up(foreground: bool) -> Result<()> {
         let status = Command::new("cargo")
             .args(&["run", "--release", "-p", "control-plane"])
             .status()?;
-        
+
         if !status.success() {
             anyhow::bail!("Control plane exited with error");
         }
@@ -160,16 +162,16 @@ async fn cmd_up(foreground: bool) -> Result<()> {
                 return Ok(());
             }
         }
-        
+
         anyhow::bail!("Timeout waiting for control plane");
     }
-    
+
     Ok(())
 }
 
 async fn cmd_down(force: bool) -> Result<()> {
     println!("{}", "Stopping Cell Mesh...".bright_red().bold());
-    
+
     if !is_control_plane_running().await {
         println!("{}", "Already stopped".yellow());
         return Ok(());
@@ -180,7 +182,7 @@ async fn cmd_down(force: bool) -> Result<()> {
         let output = Command::new("pkill")
             .args(&["-9", "-f", "control-plane"])
             .output()?;
-        
+
         if output.status.success() {
             println!("{}", "Force killed".green());
         }
@@ -198,11 +200,11 @@ async fn cmd_down(force: bool) -> Result<()> {
                 return Ok(());
             }
         }
-        
+
         println!("{}", "⚠ Timeout, forcing shutdown...".yellow());
         return cmd_down(true).await;
     }
-    
+
     Ok(())
 }
 
@@ -225,7 +227,7 @@ async fn cmd_status(verbose: bool) -> Result<()> {
     // Read state from control-plane.json
     let home = dirs::home_dir().unwrap();
     let state_file = home.join(".cell/control-plane.json");
-    
+
     if !state_file.exists() {
         println!("{}", "No state file found".red());
         return Ok(());
@@ -235,25 +237,30 @@ async fn cmd_status(verbose: bool) -> Result<()> {
     let state: serde_json::Value = serde_json::from_str(&json)?;
 
     if let Some(processes) = state.get("processes").and_then(|p| p.as_object()) {
-        println!("{:<20} {:<10} {:<15} {:<10}", 
-                 "CELL", "PID", "UPTIME", "VERSION");
+        println!(
+            "{:<20} {:<10} {:<15} {:<10}",
+            "CELL", "PID", "UPTIME", "VERSION"
+        );
         println!("{}", "─".repeat(60));
 
         for (name, info) in processes {
             let pid = info.get("pid").and_then(|p| p.as_u64()).unwrap_or(0);
             let start = info.get("start_time").and_then(|s| s.as_u64()).unwrap_or(0);
-            let version = info.get("version_hash")
+            let version = info
+                .get("version_hash")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
 
             let uptime = format_uptime(start);
             let version_short = &version[..version.len().min(8)];
 
-            println!("{:<20} {:<10} {:<15} {:<10}",
-                     name.green(),
-                     pid,
-                     uptime,
-                     version_short);
+            println!(
+                "{:<20} {:<10} {:<15} {:<10}",
+                name.green(),
+                pid,
+                uptime,
+                version_short
+            );
 
             if verbose {
                 if let Some(socket) = info.get("socket_path").and_then(|s| s.as_str()) {
@@ -268,13 +275,16 @@ async fn cmd_status(verbose: bool) -> Result<()> {
 
 async fn cmd_swap(cell: String, strategy: String, percentage: Option<u8>) -> Result<()> {
     use cell_sdk::cell_remote;
-    
+
     cell_remote!(SwapCoordinator = "swap-coordinator");
 
-    println!("{}", format!("Hot-swapping {}...", cell).bright_yellow().bold());
+    println!(
+        "{}",
+        format!("Hot-swapping {}...", cell).bright_yellow().bold()
+    );
 
     let mut coordinator = SwapCoordinator::Client::connect().await?;
-    
+
     let swap_strategy = match strategy.as_str() {
         "blue-green" => SwapCoordinator::SwapStrategy::BlueGreen,
         "canary" => SwapCoordinator::SwapStrategy::Canary {
@@ -286,23 +296,24 @@ async fn cmd_swap(cell: String, strategy: String, percentage: Option<u8>) -> Res
 
     // Get current version hash
     let mut builder = Builder::Client::connect().await?;
-    let build_result = builder.build(
-        cell.clone(),
-        Builder::BuildMode::Standard,
-    ).await?;
+    let build_result = builder
+        .build(cell.clone(), Builder::BuildMode::Standard)
+        .await?;
 
-    let swap_id = coordinator.initiate_swap(SwapCoordinator::SwapRequest {
-        cell_name: cell.clone(),
-        new_version_hash: build_result.source_hash,
-        strategy: swap_strategy,
-    }).await?;
+    let swap_id = coordinator
+        .initiate_swap(SwapCoordinator::SwapRequest {
+            cell_name: cell.clone(),
+            new_version_hash: build_result.source_hash,
+            strategy: swap_strategy,
+        })
+        .await?;
 
     println!("  └─ Swap ID: {}", swap_id.dimmed());
 
     // Poll for status
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        
+
         if let Some(status) = coordinator.get_status(swap_id.clone()).await? {
             let phase_str = format!("{:?}", status.phase);
             println!("  └─ {} ({}%)", phase_str, status.progress);
@@ -326,30 +337,36 @@ async fn cmd_swap(cell: String, strategy: String, percentage: Option<u8>) -> Res
 
 async fn cmd_ps(all: bool) -> Result<()> {
     use cell_sdk::discovery::Discovery;
-    
+
     let nodes = Discovery::scan().await;
-    
-    println!("{:<24} {:<12} {:<30} {:<10}",
-             "NAME", "ID", "ADDRESS", "STATUS");
+
+    println!(
+        "{:<24} {:<12} {:<30} {:<10}",
+        "NAME", "ID", "ADDRESS", "STATUS"
+    );
     println!("{}", "─".repeat(80));
 
     for node in nodes {
-        let addr = node.lan_address.clone()
-            .or_else(|| node.local_socket.as_ref()
-                .map(|p| format!("local://{}", p.display())))
+        let addr = node
+            .lan_address
+            .clone()
+            .or_else(|| {
+                node.local_socket
+                    .as_ref()
+                    .map(|p| format!("local://{}", p.display()))
+            })
             .unwrap_or_else(|| "?".to_string());
-        
+
         let status = if node.status.is_alive {
             "Alive".green()
         } else {
             "Dead".red()
         };
 
-        println!("{:<24} {:<12} {:<30} {}",
-                 node.name,
-                 node.instance_id,
-                 addr,
-                 status);
+        println!(
+            "{:<24} {:<12} {:<30} {}",
+            node.name, node.instance_id, addr, status
+        );
     }
 
     Ok(())
@@ -357,7 +374,7 @@ async fn cmd_ps(all: bool) -> Result<()> {
 
 async fn cmd_logs(cell: String, follow: bool) -> Result<()> {
     println!("{}", format!("Logs for {}...", cell).bright_cyan());
-    
+
     // Implementation: tail ~/.cell/logs/{cell}.log
     // For now, placeholder
     println!("(Log tailing not yet implemented)");
@@ -366,22 +383,27 @@ async fn cmd_logs(cell: String, follow: bool) -> Result<()> {
 
 async fn cmd_health(cell: Option<String>) -> Result<()> {
     println!("{}", "Health Check".bright_green().bold());
-    println!();
-    
-    // Query Nucleus for health status
-    use cell_sdk::cell_remote;
-    cell_remote!(Nucleus = "nucleus");
-    
-    let mut nucleus = Nucleus::Client::connect().await?;
-    let status = nucleus.status().await?;
+    println!(
+        "{}",
+        "Nucleus retired. Checking individual cells via Discovery...".yellow()
+    );
 
-    println!("Uptime: {}s", status.uptime_secs);
-    println!("Managed Cells: {}", status.managed_cells.len());
-    
-    for cell_name in status.managed_cells {
-        let is_healthy = nucleus.heartbeat(cell_name.clone()).await?;
-        let icon = if is_healthy { "✓".green() } else { "✗".red() };
-        println!("  {} {}", icon, cell_name);
+    use cell_sdk::discovery::Discovery;
+    let nodes = Discovery::scan().await;
+
+    for node in nodes {
+        if let Some(c) = &cell {
+            if c != &node.name {
+                continue;
+            }
+        }
+
+        let status = if node.status.is_alive {
+            "✓".green()
+        } else {
+            "✗".red()
+        };
+        println!("  {} {}", status, node.name);
     }
 
     Ok(())
@@ -390,7 +412,7 @@ async fn cmd_health(cell: Option<String>) -> Result<()> {
 async fn cmd_graph(format: String) -> Result<()> {
     use cell_sdk::cell_remote;
     cell_remote!(Mesh = "mesh");
-    
+
     let mut mesh = Mesh::Client::connect().await?;
     let graph = mesh.get_graph().await?;
 
@@ -416,23 +438,11 @@ async fn cmd_top() -> Result<()> {
 }
 
 async fn cmd_prune(dry_run: bool) -> Result<()> {
-    use cell_sdk::cell_remote;
-    cell_remote!(Nucleus = "nucleus");
-    
-    let mut nucleus = Nucleus::Client::connect().await?;
-    
-    if dry_run {
-        println!("{}", "Dry run - showing what would be pruned:".yellow());
-        // TODO: Implement dry-run logic
-    } else {
-        println!("{}", "Pruning unused cells...".bright_red());
-        let result = nucleus.vacuum().await?;
-        println!("✓ Pruned {} cells", result.killed.len());
-        for cell in result.killed {
-            println!("  • {}", cell);
-        }
-    }
-
+    println!(
+        "{}",
+        "Prune feature is currently unavailable (Nucleus retired).".red()
+    );
+    println!("Use 'cell graph' to inspect dependencies manually.");
     Ok(())
 }
 
@@ -442,7 +452,7 @@ async fn is_control_plane_running() -> bool {
     let output = Command::new("pgrep")
         .args(&["-f", "control-plane"])
         .output();
-    
+
     if let Ok(output) = output {
         !output.stdout.is_empty()
     } else {
@@ -455,9 +465,9 @@ fn format_uptime(start_secs: u64) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     let elapsed = now - start_secs;
-    
+
     if elapsed < 60 {
         format!("{}s", elapsed)
     } else if elapsed < 3600 {
@@ -472,7 +482,7 @@ fn format_uptime(start_secs: u64) -> String {
 fn print_ascii_graph(graph: &std::collections::HashMap<String, Vec<String>>) {
     println!("{}", "Dependency Graph:".bright_cyan().bold());
     println!();
-    
+
     for (consumer, providers) in graph {
         println!("{}", consumer.bright_green());
         for provider in providers {
@@ -486,13 +496,13 @@ fn print_dot_graph(graph: &std::collections::HashMap<String, Vec<String>>) {
     println!("digraph CellMesh {{");
     println!("  rankdir=LR;");
     println!("  node [shape=box];");
-    
+
     for (consumer, providers) in graph {
         for provider in providers {
             println!("  \"{}\" -> \"{}\";", consumer, provider);
         }
     }
-    
+
     println!("}}");
 }
 

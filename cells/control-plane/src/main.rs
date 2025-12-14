@@ -56,7 +56,7 @@ impl ControlPlane {
             boot_order: vec![
                 "builder",      // Must be first (compiles everything)
                 "hypervisor",   // Process manager
-                "nucleus",      // Service registry
+                // nucleus removed
                 "mesh",         // Dependency graph
                 "axon",         // Network gateway
                 "observer",     // Monitoring
