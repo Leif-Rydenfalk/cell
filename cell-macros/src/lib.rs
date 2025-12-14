@@ -33,10 +33,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let module_name = args.module_name;
     let cell_name = &args.cell_name;
 
-    // Fetch source over RPC from the running cell
-    // Note: We use the lazy reader fallback logic here conceptually, 
-    // but to keep implementation clean and focused on file writing, 
-    // we use the simpler fetching logic implemented previously but robustify it slightly.
+    // Fetch source over RPC from the running cell or fallback to disk
     let source_code = fetch_remote_source_or_fallback(cell_name);
     
     // 1. Extract Methods
@@ -133,9 +130,16 @@ fn fetch_remote_source_or_fallback(cell_name: &str) -> String {
     let rpc_result = rt.block_on(async {
         // Attempt connection with short timeout to avoid blocking build
         let res = tokio::time::timeout(std::time::Duration::from_millis(500), async {
-            let mut syn = cell_transport::Synapse::grow(cell_name).await?;
+            // Map anyhow error to CellError so '?' works
+            let mut syn = cell_transport::Synapse::grow(cell_name).await
+                .map_err(|_| cell_core::CellError::ConnectionRefused)?;
+            
             let req = OpsRequest::GetSource;
-            let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req)?.into_vec();
+            // Map serialization error to CellError so '?' works
+            let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req)
+                .map_err(|_| cell_core::CellError::SerializationFailure)?
+                .into_vec();
+            
             let resp = syn.fire_on_channel(cell_core::channel::OPS, &req_bytes).await?;
             let bytes = match resp {
                 cell_transport::Response::Owned(v) => v,

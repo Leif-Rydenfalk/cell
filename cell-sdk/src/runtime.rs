@@ -41,12 +41,11 @@ impl Runtime {
             + Send
             + 'static,
     {
-        // 1. Declare and wait for dependencies before binding
         let deps_vec: Vec<String> = deps.iter().map(|s| s.to_string()).collect();
         MeshBuilder::declare_dependencies(name, deps_vec).await;
         MeshBuilder::wait_for_dependencies(deps).await?;
 
-        Self::ignite(service, name).await
+        Self::ignite::<S, Req, Resp>(service, name).await
     }
 
     pub async fn ignite<S, Req, Resp>(service: S, name: &str) -> Result<()>
@@ -116,7 +115,6 @@ impl Runtime {
 
         info!("[Runtime] Booting Cell '{}' (Node {})", cell_name, node_id);
 
-        // --- MANIFEST LOADING ---
         let manifest_path = std::env::current_dir()
             .unwrap_or_default()
             .join("Cell.toml");

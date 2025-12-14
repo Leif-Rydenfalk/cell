@@ -9,7 +9,6 @@ members = [
     "cell-sdk",
     "cell-macros",
     "cell-build",
-    "cell-bind",
     "cell-cli",
     "examples/cell-market-bench/cells/exchange",
     "examples/cell-market-bench/cells/trader",

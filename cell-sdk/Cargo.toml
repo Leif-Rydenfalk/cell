@@ -19,7 +19,6 @@ cell-macros = { workspace = true }
 cell-transport = { workspace = true, optional = true, features = ["std"] }
 cell-discovery = { workspace = true }
 
-# Removed cell-process dependency
 tokio = { workspace = true }
 serde = { workspace = true }
 rkyv = { workspace = true }
@@ -29,3 +28,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4.5", features = ["derive"] }
 dirs = { workspace = true }
 rand = { workspace = true }
+toml = "0.8"

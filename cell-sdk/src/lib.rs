@@ -4,9 +4,9 @@
 extern crate self as cell_sdk;
 
 pub use cell_core::{channel, CellError, Transport, Vesicle};
-pub use cell_macros::{cell_remote, expand, handler, protein, service}; // Added 'expand'
+pub use cell_macros::{cell_remote, expand, handler, protein, service};
 pub use cell_model::*;
-pub use cell_transport::{Membrane, Synapse};
+pub use cell_transport::{resolve_socket_dir, Membrane, Synapse}; // Added re-export
 
 pub use anyhow;
 pub use clap;
@@ -27,20 +27,14 @@ pub mod system;
 pub mod test_context;
 pub mod tissue;
 
-/// Prelude for easy access to common types in macros and user code
 pub mod prelude {
+    pub use super::serde::{Deserialize, Serialize};
     pub use super::{
         anyhow::{Error, Result},
         cell_remote,
-        // Re-export specific items to match the macro examples
         config::CellConfig,
-        expand,
-        handler,
-        protein,
+        expand, handler, protein,
         runtime::Runtime,
-        service,
-        Synapse,
+        service, Synapse,
     };
-    // Include common external crates often used
-    pub use super::serde::{Deserialize, Serialize};
 }

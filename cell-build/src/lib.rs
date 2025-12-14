@@ -9,8 +9,8 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+use syn::parse_file; // Removed unused Item
 use syn::visit_mut::VisitMut;
-use syn::{parse_file, Item};
 use walkdir::WalkDir;
 
 // --- PROTOCOL ---
@@ -174,7 +174,9 @@ fn main() {{
                 .extension()
                 .map_or(false, |ext| ext == "rs" || ext == "toml")
             {
-                hasher.update(&fs::read(entry.path())?);
+                if let Ok(bytes) = fs::read(entry.path()) {
+                    hasher.update(&bytes);
+                }
             }
         }
         Ok(hasher.finalize().to_hex().to_string())

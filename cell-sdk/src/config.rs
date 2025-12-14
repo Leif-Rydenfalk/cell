@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
-use anyhow::{Result, Context};
-use std::path::PathBuf;
+use crate::resolve_socket_dir;
+use anyhow::{Context, Result};
 use std::env;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct CellConfig {
@@ -15,22 +16,19 @@ pub struct CellConfig {
 
 impl CellConfig {
     pub fn from_env(cell_name: &str) -> Result<Self> {
-        // 1. Node Identity
         let node_id = env::var("CELL_NODE_ID")
             .unwrap_or_else(|_| "1".to_string())
             .parse::<u64>()
             .context("CELL_NODE_ID must be a u64 integer")?;
 
-        // 2. Directories
-        let socket_dir = crate::resolve_socket_dir();
-        
+        let socket_dir = resolve_socket_dir();
+
         let storage_path = if let Ok(p) = env::var("CELL_RAFT_PATH") {
             PathBuf::from(p)
         } else {
             socket_dir.join(format!("{}.wal", cell_name))
         };
 
-        // 3. Topology
         let peers = env::var("CELL_PEERS")
             .unwrap_or_default()
             .split(',')
@@ -46,11 +44,10 @@ impl CellConfig {
         })
     }
 
-    /// For manual configuration (e.g. testing)
     pub fn new(id: u64, peers: Vec<String>) -> Self {
         Self {
             node_id: id,
-            socket_dir: crate::resolve_socket_dir(),
+            socket_dir: resolve_socket_dir(),
             peers,
             raft_storage_path: None,
         }

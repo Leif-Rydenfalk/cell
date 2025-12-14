@@ -12,9 +12,10 @@ std = [
     "dep:tracing",
     "dep:fd-lock",
     "dep:users",
+    "dep:nix",
     "cell-core/std",
 ]
-shm = ["std", "dep:nix", "dep:memmap2", "dep:users"]
+shm = ["std", "dep:memmap2", "dep:users"]
 
 [dependencies]
 cell-core = { workspace = true, optional = true }
@@ -40,3 +41,4 @@ socket2 = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
 users = { version = "0.11", optional = true }
+libc = { version = "0.2", optional = true }
