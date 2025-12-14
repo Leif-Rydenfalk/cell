@@ -113,6 +113,14 @@ pub fn resolve_socket_dir() -> PathBuf {
     base.join(org)
 }
 
+pub fn resolve_registry_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("CELL_REGISTRY_DIR") {
+        return PathBuf::from(p);
+    }
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    home.join(".cell/registry")
+}
+
 /// Returns a list of directories to search for Cell sockets.
 pub fn get_search_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();

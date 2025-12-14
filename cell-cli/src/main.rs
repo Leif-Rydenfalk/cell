@@ -1,9 +1,10 @@
 // cell-cli/src/main.rs (UPDATED)
 // Unified CLI that interfaces with control-plane
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::*;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[derive(Parser)]
@@ -100,6 +101,23 @@ enum Commands {
         #[arg(short, long)]
         dry_run: bool,
     },
+
+    // --- NEW COMMANDS ---
+    /// Clone a cell from a git repository into the registry
+    Clone {
+        url: String,
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+
+    /// Link the current directory as a cell in the registry
+    Link { name: Option<String> },
+
+    /// Run the cell in the current directory (Polyglot runner)
+    Run {
+        #[arg(long)]
+        release: bool,
+    },
 }
 
 #[tokio::main]
@@ -123,6 +141,9 @@ async fn main() -> Result<()> {
         Commands::Test { target, filter } => cmd_test(target, filter).await,
         Commands::Top => cmd_top().await,
         Commands::Prune { dry_run } => cmd_prune(dry_run).await,
+        Commands::Clone { url, name } => cmd_clone(url, name).await,
+        Commands::Link { name } => cmd_link(name).await,
+        Commands::Run { release } => cmd_run(release).await,
     }
 }
 
@@ -444,6 +465,143 @@ async fn cmd_prune(dry_run: bool) -> Result<()> {
     );
     println!("Use 'cell graph' to inspect dependencies manually.");
     Ok(())
+}
+
+// --- NEW COMMAND IMPLEMENTATIONS ---
+
+async fn cmd_clone(url: String, name: Option<String>) -> Result<()> {
+    let repo_name = name.unwrap_or_else(|| {
+        url.split('/')
+            .last()
+            .unwrap()
+            .trim_end_matches(".git")
+            .to_string()
+    });
+
+    let home = dirs::home_dir().expect("No HOME");
+    let registry = home.join(".cell/registry");
+    let sources = home.join(".cell/sources");
+    std::fs::create_dir_all(&registry)?;
+    std::fs::create_dir_all(&sources)?;
+
+    let target_dir = sources.join(&repo_name);
+
+    println!("{} {} from {}...", "Cloning".green().bold(), repo_name, url);
+
+    if target_dir.exists() {
+        println!(
+            "{} Source directory already exists at {:?}",
+            "Warning:".yellow(),
+            target_dir
+        );
+    } else {
+        let status = Command::new("git")
+            .arg("clone")
+            .arg(&url)
+            .arg(&target_dir)
+            .status()
+            .context("Failed to run git clone")?;
+
+        if !status.success() {
+            anyhow::bail!("Git clone failed");
+        }
+    }
+
+    // Link
+    let link_path = registry.join(&repo_name);
+    if link_path.exists() {
+        std::fs::remove_file(&link_path).ok(); // remove old symlink
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target_dir, &link_path)?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&target_dir, &link_path)?;
+
+    println!("{} Registered '{}'", "Success:".green(), repo_name);
+    Ok(())
+}
+
+async fn cmd_link(name: Option<String>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let cell_name = name.unwrap_or_else(|| cwd.file_name().unwrap().to_string_lossy().to_string());
+
+    let home = dirs::home_dir().expect("No HOME");
+    let registry = home.join(".cell/registry");
+    std::fs::create_dir_all(&registry)?;
+
+    let link_path = registry.join(&cell_name);
+    if link_path.exists() {
+        std::fs::remove_file(&link_path).ok();
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&cwd, &link_path)?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&cwd, &link_path)?;
+
+    println!("{} Linked '{}' -> {:?}", "Success:".green(), cell_name, cwd);
+    Ok(())
+}
+
+async fn cmd_run(release: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+
+    // Heuristic 1: Rust
+    if cwd.join("Cargo.toml").exists() {
+        let mut cmd = Command::new("cargo");
+        cmd.arg("run");
+        if release {
+            cmd.arg("--release");
+        }
+        // Forward args? The SDK calls this without args usually.
+
+        // Pass through stdio so we see output
+        cmd.stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        let status = cmd.status()?;
+        if !status.success() {
+            anyhow::bail!("Cell crashed (cargo run)");
+        }
+        return Ok(());
+    }
+
+    // Heuristic 2: Python
+    if cwd.join("main.py").exists() {
+        let mut cmd = Command::new("python3");
+        cmd.arg("main.py");
+        cmd.stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        let status = cmd.status()?;
+        if !status.success() {
+            anyhow::bail!("Cell crashed (python)");
+        }
+        return Ok(());
+    }
+
+    // Heuristic 3: Node
+    if cwd.join("package.json").exists() {
+        let mut cmd = Command::new("npm");
+        cmd.arg("start");
+        cmd.stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        let status = cmd.status()?;
+        if !status.success() {
+            anyhow::bail!("Cell crashed (npm start)");
+        }
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Unknown project type in {:?}. (No Cargo.toml, main.py, or package.json)",
+        cwd
+    );
 }
 
 // --- HELPERS ---

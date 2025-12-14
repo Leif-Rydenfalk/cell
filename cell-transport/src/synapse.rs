@@ -85,8 +85,23 @@ impl Synapse {
         let (gateway_name, target) = Self::resolve_gateway(connection_string);
 
         if gateway_name.is_none() {
-            if let Ok(syn) = Self::connect_local(target, &config).await {
-                return Ok(syn);
+            // AUTO-SPAWN LOGIC
+            match Self::connect_local(target, &config).await {
+                Ok(syn) => return Ok(syn),
+                Err(_) => {
+                    // Not running? Try to spawn it from registry
+                    if let Ok(true) = Self::try_spawn_from_registry(target).await {
+                        // Wait for it to come up
+                        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                        while std::time::Instant::now() < deadline {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            if let Ok(syn) = Self::connect_local(target, &config).await {
+                                info!("[Synapse] Auto-spawned and connected to '{}'", target);
+                                return Ok(syn);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -135,6 +150,50 @@ impl Synapse {
                 bail!("Gateway '{}' could not find target '{}'", gateway, target)
             }
             BridgeResponse::Error { message } => bail!("Gateway error: {}", message),
+        }
+    }
+
+    async fn try_spawn_from_registry(cell_name: &str) -> Result<bool> {
+        let registry_dir = cell_discovery::resolve_registry_dir();
+        let cell_path = registry_dir.join(cell_name);
+
+        if !cell_path.exists() {
+            return Ok(false);
+        }
+
+        info!("[Synapse] Spawning '{}' from registry...", cell_name);
+
+        // Call `cell run` in the cell's directory
+        let child = std::process::Command::new("cell")
+            .arg("run")
+            .arg("--release")
+            .current_dir(&cell_path)
+            .stdout(std::process::Stdio::null()) // Daemonize-ish
+            .stderr(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null())
+            .spawn();
+
+        match child {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                // Warning: 'cell' might not be in PATH if running from cargo
+                tracing::warn!(
+                    "Failed to spawn 'cell run': {}. Trying 'cargo run --release' directly...",
+                    e
+                );
+
+                // Fallback for dev environments where `cell` cli isn't installed in PATH
+                let cargo_child = std::process::Command::new("cargo")
+                    .arg("run")
+                    .arg("--release")
+                    .current_dir(&cell_path)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .stdin(std::process::Stdio::null())
+                    .spawn();
+
+                Ok(cargo_child.is_ok())
+            }
         }
     }
 
