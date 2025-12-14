@@ -4,15 +4,12 @@
 extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse::Parse, parse_macro_input, ItemImpl, Type, FnArg, Pat, ReturnType, Token, Ident, LitStr, GenericArgument, PathArguments};
+use syn::{parse::Parse, parse_macro_input, ItemImpl, Type, FnArg, Pat, ReturnType, Token, Ident, LitStr, GenericArgument, PathArguments, Item};
 use convert_case::{Case, Casing};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 // === CELL_REMOTE ===
-// Usage: cell_remote!(MyService = "my_service_name");
-// Generates: MyService::Client which auto-spawns "my_service_name"
-
 struct CellRemoteArgs {
     module_name: Ident,
     cell_name: String,
@@ -33,9 +30,19 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let module_name = args.module_name;
     let cell_name = &args.cell_name;
 
-    // Scan source code for the protocol definition
     let source_path = find_cell_source(cell_name);
+    
+    // 1. Extract Methods
     let methods = extract_handler_methods(&source_path);
+    if methods.is_empty() {
+        return syn::Error::new(
+            module_name.span(), 
+            format!("No #[handler] methods found in cell source: {:?}. Ensure the cell uses #[service] and #[handler] correctly.", source_path)
+        ).to_compile_error().into();
+    }
+
+    // 2. Extract Proteins (Shared Types)
+    let proteins = extract_proteins(&source_path);
 
     let protocol_name = format_ident!("{}Protocol", cell_name.to_case(Case::Pascal));
     let response_name = format_ident!("{}Response", cell_name.to_case(Case::Pascal));
@@ -57,12 +64,16 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         let arg_names: Vec<_> = args.iter().map(|(arg_name, _)| arg_name).collect();
 
         quote! {
-            pub async fn #name(&mut self, #(#arg_sigs),*) -> Result<#ret_type, ::cell_sdk::CellError> {
+            pub async fn #name(&mut self, #(#arg_sigs),*) -> ::anyhow::Result<#ret_type> {
                 let req = #protocol_name::#variant_name { #(#arg_names),* };
-                let resp: #response_name = self.conn.fire(&req).await?;
+                let resp: #response_name = self.conn.fire(&req).await
+                    .map_err(|e| ::anyhow::anyhow!("RPC Error: {}", e))?
+                    .deserialize()
+                    .map_err(|e| ::anyhow::anyhow!("Deserialization Error: {}", e))?;
+                    
                 match resp {
                     #response_name::#variant_name(result) => Ok(result),
-                    _ => Err(::cell_sdk::CellError::SerializationFailure),
+                    _ => Err(::anyhow::anyhow!("Protocol Mismatch")),
                 }
             }
         }
@@ -72,6 +83,9 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         #[allow(non_snake_case)]
         pub mod #module_name {
             use ::cell_sdk::*;
+
+            // Inject extracted types (Proteins)
+            #(#proteins)*
 
             #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize)]
             #[derive(::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize)]
@@ -91,9 +105,11 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
 
             impl Client {
                 pub async fn connect() -> ::anyhow::Result<Self> {
-                    // HERE IS THE MAGIC: Synapse::grow handles auto-spawning
                     let conn = ::cell_sdk::Synapse::grow(#cell_name).await?;
                     Ok(Self { conn })
+                }
+                pub fn new(conn: ::cell_sdk::Synapse) -> Self {
+                    Self { conn }
                 }
                 #(#client_methods)*
             }
@@ -102,26 +118,89 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-// Helper: Scans workspace to find cell source code
 fn find_cell_source(cell_name: &str) -> std::path::PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let current = std::path::Path::new(&manifest_dir);
+    let pkg_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
     
-    // Look up, down, and around for the source
-    let paths = vec![
+    // Ordered candidates to find the correct source file
+    let mut candidates = vec![
+        // 1. Peer/Sibling directory (e.g. client -> ../hello)
+        current.parent().unwrap_or(current).join(cell_name).join("src/main.rs"),
+        
+        // 2. Standard workspace structure locations
         current.join("cells").join(cell_name).join("src/main.rs"),
         current.join("../cells").join(cell_name).join("src/main.rs"),
         current.join("../../cells").join(cell_name).join("src/main.rs"),
+        current.join("../../../cells").join(cell_name).join("src/main.rs"),
+        
+        // 3. Examples
+        current.join("examples").join(cell_name).join("src/main.rs"),
+        current.join("../examples").join(cell_name).join("src/main.rs"),
+        current.join("../../examples").join(cell_name).join("src/main.rs"),
+        
+        // 4. Benchmarks/Deeply nested
         current.join("examples/cell-market-bench/cells").join(cell_name).join("src/main.rs"),
-        current.join("../examples/cell-market-bench/cells").join(cell_name).join("src/main.rs"),
-        current.join("../../examples/cell-market-bench/cells").join(cell_name).join("src/main.rs"),
     ];
 
-    for p in paths { if p.exists() { return p; } }
-    panic!("Cell source not found: {}", cell_name);
+    // 5. Current Crate (Self-reference) - ONLY if names match
+    if pkg_name == cell_name {
+        candidates.insert(0, current.join("src/main.rs"));
+    } else {
+        // As a last resort, check self
+        candidates.push(current.join("src/main.rs"));
+    }
+
+    for p in candidates { 
+        if p.exists() { return p; } 
+    }
+    
+    panic!("Cell source not found for: {}. Checked paths relative to {}", cell_name, manifest_dir);
 }
 
-// Helper: Extracts method signatures from the target implementation
+fn extract_proteins(path: &std::path::Path) -> Vec<proc_macro2::TokenStream> {
+    let src = std::fs::read_to_string(path).expect("Read failed");
+    let syntax = syn::parse_file(&src).expect("Parse failed");
+    let mut proteins = Vec::new();
+
+    for item in syntax.items {
+        match item {
+            Item::Struct(mut s) => {
+                if s.attrs.iter().any(|a| a.path().is_ident("protein")) {
+                    s.attrs.retain(|a| !a.path().is_ident("protein"));
+                    let tokens = quote! {
+                        #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize)]
+                        #[derive(::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize)]
+                        #[archive(check_bytes)]
+                        #[serde(crate = "::cell_sdk::serde")]
+                        #[archive(crate = "::cell_sdk::rkyv")]
+                        #[derive(Clone, Debug, PartialEq)]
+                        #s
+                    };
+                    proteins.push(tokens);
+                }
+            }
+            Item::Enum(mut e) => {
+                if e.attrs.iter().any(|a| a.path().is_ident("protein")) {
+                    e.attrs.retain(|a| !a.path().is_ident("protein"));
+                    let tokens = quote! {
+                        #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize)]
+                        #[derive(::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize)]
+                        #[archive(check_bytes)]
+                        #[serde(crate = "::cell_sdk::serde")]
+                        #[archive(crate = "::cell_sdk::rkyv")]
+                        #[derive(Clone, Debug, PartialEq)]
+                        #e
+                    };
+                    proteins.push(tokens);
+                }
+            }
+            _ => {}
+        }
+    }
+    proteins
+}
+
 fn extract_handler_methods(path: &std::path::Path) -> Vec<(Ident, Vec<(Ident, Type)>, Type)> {
     let src = std::fs::read_to_string(path).expect("Read failed");
     let syntax = syn::parse_file(&src).expect("Parse failed");
@@ -142,23 +221,7 @@ fn extract_handler_methods(path: &std::path::Path) -> Vec<(Ident, Vec<(Ident, Ty
                             None
                         }).collect();
                         
-                        let ret = match m.sig.output {
-                            ReturnType::Default => syn::parse_quote!{ () },
-                            ReturnType::Type(_, t) => {
-                                // Unwrap Result<T> -> T
-                                if let Type::Path(tp) = &*t {
-                                    if let Some(seg) = tp.path.segments.last() {
-                                        if seg.ident == "Result" {
-                                            if let PathArguments::AngleBracketed(args) = &seg.arguments {
-                                                if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                                                    inner.clone()
-                                                } else { *t.clone() }
-                                            } else { *t.clone() }
-                                        } else { *t.clone() }
-                                    } else { *t.clone() }
-                                } else { *t.clone() }
-                            }
-                        };
+                        let ret = extract_ok_type(&m.sig.output);
                         methods.push((name, args, ret));
                     }
                 }
@@ -166,6 +229,26 @@ fn extract_handler_methods(path: &std::path::Path) -> Vec<(Ident, Vec<(Ident, Ty
         }
     }
     methods
+}
+
+fn extract_ok_type(ret: &ReturnType) -> Type {
+    match ret {
+        ReturnType::Default => syn::parse_quote! { () },
+        ReturnType::Type(_, ty) => {
+            if let Type::Path(tp) = &**ty {
+                if let Some(seg) = tp.path.segments.last() {
+                    if seg.ident == "Result" {
+                        if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                            if let Some(GenericArgument::Type(inner)) = args.args.first() {
+                                return inner.clone();
+                            }
+                        }
+                    }
+                }
+            }
+            *ty.clone()
+        }
+    }
 }
 
 // === BOILERPLATE MACROS ===
@@ -192,43 +275,91 @@ pub fn protein(_: TokenStream, item: TokenStream) -> TokenStream {
 pub fn handler(_: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemImpl);
     let self_ty = &input.self_ty;
+    
     let service_name = match &**self_ty {
         Type::Path(p) => p.path.segments.last().unwrap().ident.clone(),
         _ => panic!("Handler must implement struct"),
     };
 
-    let methods: Vec<_> = input.items.iter().filter_map(|i| {
-        if let syn::ImplItem::Fn(m) = i { Some(m.sig.ident.clone()) } else { None }
-    }).collect();
-
     let protocol_name = format_ident!("{}Protocol", service_name);
     let response_name = format_ident!("{}Response", service_name);
+    let archived_protocol_name = format_ident!("Archived{}Protocol", service_name);
 
-    let dispatch_arms: Vec<_> = methods.iter().map(|name| {
-        let variant_name = format_ident!("{}", name.to_string().to_case(Case::Pascal));
+    let mut methods = Vec::new();
+    for impl_item in &input.items {
+        if let syn::ImplItem::Fn(m) = impl_item {
+            let name = m.sig.ident.clone();
+            let args: Vec<_> = m.sig.inputs.iter().filter_map(|arg| {
+                if let FnArg::Typed(pt) = arg {
+                    if let Pat::Ident(pi) = &*pt.pat {
+                        return Some((pi.ident.clone(), *pt.ty.clone()));
+                    }
+                }
+                None
+            }).collect();
+            let ret = extract_ok_type(&m.sig.output);
+            methods.push((name, args, ret));
+        }
+    }
+
+    let req_variants: Vec<_> = methods.iter().map(|(name, args, _)| {
+        let variant = format_ident!("{}", name.to_string().to_case(Case::Pascal));
+        let fields = args.iter().map(|(n, t)| quote! { #n: #t });
+        quote! { #variant { #(#fields),* } }
+    }).collect();
+
+    let resp_variants: Vec<_> = methods.iter().map(|(name, _, ret)| {
+        let variant = format_ident!("{}", name.to_string().to_case(Case::Pascal));
+        quote! { #variant(#ret) }
+    }).collect();
+
+    let dispatch_arms: Vec<_> = methods.iter().map(|(name, args, _)| {
+        let variant = format_ident!("{}", name.to_string().to_case(Case::Pascal));
+        
+        let field_names: Vec<_> = args.iter().map(|(n, _)| n).collect();
+        let field_bindings: Vec<_> = field_names.iter().map(|n| quote!{ #n }).collect();
+        
+        let deserializers: Vec<_> = args.iter().map(|(n, _)| {
+            quote! {
+                let #n = ::cell_sdk::rkyv::Deserialize::deserialize(
+                    #n, 
+                    &mut ::cell_sdk::rkyv::de::deserializers::SharedDeserializeMap::new()
+                ).map_err(|_| ::cell_sdk::CellError::SerializationFailure)?;
+            }
+        }).collect();
+        
+        let call_args = field_names;
+
         quote! {
-            ArchivedProtocol::#variant_name { .. } => {
-                // Simplified argument unpacking (assumes args match struct fields)
-                // In full version, this unpacks args from the enum variant
-                let result = self.#name(
-                    // Args injection would go here
-                ).await?;
-                Ok(#response_name::#variant_name(result))
+            #archived_protocol_name::#variant { #(#field_bindings),* } => {
+                #(#deserializers)*
+                let result = self.#name(#(#call_args),*).await?;
+                Ok(#response_name::#variant(result))
             }
         }
     }).collect();
 
-    // Since we are simplifying the extraction in this file, we rely on the full implementation
-    // provided in the input, but ensuring the critical `serve` method is generated.
-    
-    // Note: The full correct implementation of `handler` is long. 
-    // I am including the critical `serve` injection.
-    
     let mut hasher = DefaultHasher::new();
     service_name.to_string().hash(&mut hasher);
     let fingerprint = hasher.finish();
 
     let expanded = quote! {
+        // Generate Protocol Enums locally for the server
+        #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize)]
+        #[derive(::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize)]
+        #[archive(check_bytes)]
+        #[serde(crate = "::cell_sdk::serde")]
+        #[archive(crate = "::cell_sdk::rkyv")]
+        pub enum #protocol_name { #(#req_variants),* }
+
+        #[derive(::cell_sdk::serde::Serialize, ::cell_sdk::serde::Deserialize)]
+        #[derive(::cell_sdk::rkyv::Archive, ::cell_sdk::rkyv::Serialize, ::cell_sdk::rkyv::Deserialize)]
+        #[archive(check_bytes)]
+        #[serde(crate = "::cell_sdk::serde")]
+        #[archive(crate = "::cell_sdk::rkyv")]
+        pub enum #response_name { #(#resp_variants),* }
+
+        // The Implementation
         #input
 
         impl #service_name {
@@ -242,21 +373,22 @@ pub fn handler(_: TokenStream, item: TokenStream) -> TokenStream {
                         let svc = service.clone();
                         Box::pin(async move { svc.dispatch(archived_req).await })
                     },
+                    None, None, None // Genome, Consensus, Coordination
                 ).await
             }
 
-            async fn dispatch(&self, req: &<#protocol_name as ::cell_sdk::rkyv::Archive>::Archived) -> ::anyhow::Result<#response_name> {
-                // Dispatch logic is complex and usually requires full parsing of args
-                // For this example, we assume specific implementation is generated correctly
-                // by the full macro logic provided in the prompt's context.
-                // This is a placeholder for the generated dispatch table.
-                unimplemented!("Macro expansion requires full arg parsing logic")
+            // Fixed return type to map errors correctly to what Membrane expects
+            async fn dispatch(&self, req: &#archived_protocol_name) -> ::anyhow::Result<#response_name> {
+                let res: ::std::result::Result<#response_name, ::cell_sdk::CellError> = match req {
+                    #(#dispatch_arms),*
+                };
+                
+                match res {
+                    Ok(r) => Ok(r),
+                    Err(e) => Err(::anyhow::Error::new(e))
+                }
             }
         }
     };
-    
-    // Returning the input essentially in this truncated view, 
-    // relying on the previously provided correct implementation in the prompt content.
-    // The key takeaway is `serve` calling `Membrane::bind`.
     TokenStream::from(expanded)
 }

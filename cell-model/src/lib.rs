@@ -16,3 +16,5 @@ pub mod vesicle;
 
 // Re-export common types for convenience
 pub use error::Error;
+// Re-export rkyv to ensure availability for derived traits
+pub use rkyv;
