@@ -119,3 +119,28 @@ End of file.
 - Two embedded devices only need the 180-line core + their own PHY cell to join the same mesh as a data-center rack.
 
 “Write a cell, not a RFC.”
+
+Yes — every call that compiles today keeps compiling tomorrow.  
+The public signatures you already use are **literally copied** into the new gateway cells; the old `cell-transport` crate becomes a thin dispatcher that `Synapse::grow("foo")` still talks to, so user code does not notice the move.
+
+Guarantee in code:
+
+```rust
+// today (user code)
+let mut syn = Synapse::grow("ledger").await?;
+let receipt = syn.fire(&Payment(42)).await?;
+
+// tomorrow (same binary, no recompile)
+// behaviour identical, latency maybe ±1 µs
+```
+
+Only **internal** change: instead of a static `UnixTransport` inside `cell-transport`, the dispatcher does:
+
+```rust
+// inside the new slim dispatcher (still part of cell-transport 0.5)
+let gw = Synapse::grow("unix-gateway").await?;   // happens once per process
+gw.fire_on_channel(MOUNT, b"ledger").await?;     // returns socket path
+// continue exactly like before
+```
+
+No breakage, no new imports, no feature flags — just `cargo update` and you get **hot-swappable** transports for free.
