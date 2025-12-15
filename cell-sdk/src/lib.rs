@@ -7,7 +7,7 @@ pub use cell_core::{channel, CellError, Transport, Vesicle};
 pub use cell_discovery as discovery;
 pub use cell_macros::{cell_remote, expand, handler, protein, service};
 pub use cell_model::*;
-pub use cell_transport::{Membrane, Synapse}; // Export discovery module
+pub use cell_transport::{Membrane, Synapse};
 
 pub use anyhow;
 pub use clap;
@@ -40,14 +40,10 @@ pub mod prelude {
     };
 }
 
-// THE NEW RESOLVER LOGIC
 pub fn resolve_socket_dir() -> std::path::PathBuf {
-    // 1. Env Override (Runtime Context) - Set by CLI
     if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
         return std::path::PathBuf::from(p);
     }
-
-    // 2. Fallback (mostly for tests running without CLI)
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
     let instance = std::env::var("CELL_INSTANCE").unwrap_or_else(|_| "test-global".to_string());
     home.join(".cell/run").join(instance)

@@ -1,17 +1,17 @@
 // cells/router/src/main.rs
 // SPDX-License-Identifier: MIT
-// The Opt-In Network Switchboard. Pure P2P.
+// The P2P Switchboard.
 
 use anyhow::Result;
 use cell_sdk::*;
 use cell_core::{channel, VesicleHeader};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
+use std::path::PathBuf;
 
-// Defines topology in memory
 struct RouterState {
     // Hash -> Neighbor Name
     routes: HashMap<u64, String>, 
@@ -21,9 +21,13 @@ struct RouterState {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
     
-    // 1. Discover Neighbors from Filesystem
-    let mut routes = HashMap::new();
     let socket_dir = cell_sdk::resolve_socket_dir();
+    let io_dir = socket_dir.join("io");
+    std::fs::create_dir_all(&io_dir)?; // Ensure my IO inbox exists
+
+    // 1. Discover Outbound Routes (Neighbors I can send TO)
+    // I look in my 'neighbors' dir to see who I am wired to.
+    let mut routes = HashMap::new();
     let neighbors_dir = socket_dir.join("neighbors");
     
     if neighbors_dir.exists() {
@@ -31,163 +35,158 @@ async fn main() -> Result<()> {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
             
-            // Calculate Hash
             let hash = blake3::hash(name.as_bytes());
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(&hash.as_bytes()[..8]);
             let id = u64::from_le_bytes(bytes);
             
             routes.insert(id, name.clone());
-            println!("[Router] Route added: {} -> {}", id, name);
+            println!("[Router] Outbound route: {} -> {}", id, name);
         }
     }
-
-    // Also add "uplink" or "default" to recursive routes if they exist?
-    // For P2P recursion: If we have an "uplink" neighbor, we use it as default gateway.
+    
     let has_uplink = routes.values().any(|n| n == "uplink" || n == "default");
-
     let state = Arc::new(RwLock::new(RouterState { routes }));
+
+    // 2. Watch Inbound Pipes (My IO folder)
+    // Any cell that wants to talk to me creates pipes in MY io folder:
+    // <caller>_in (I read)
+    // <caller>_out (I write)
     
-    // 2. Bind Socket manually (We are a low-level infra cell)
-    let my_socket = socket_dir.join("cell.sock");
-    if my_socket.exists() { std::fs::remove_file(&my_socket)?; }
-    let listener = UnixListener::bind(&my_socket)?;
+    // We scan this directory and spawn handlers for new pipes.
+    // Simple polling loop for MVP.
+    println!("[Router] Watching {:?}", io_dir);
     
-    println!("[Router] Listening on {:?}", my_socket);
+    let mut handled_pipes = std::collections::HashSet::new();
 
     loop {
-        let (stream, _) = listener.accept().await?;
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, state, has_uplink).await {
-                eprintln!("Connection error: {}", e);
+        let mut entries = std::fs::read_dir(&io_dir)?;
+        while let Some(Ok(entry)) = entries.next() {
+            let path = entry.path();
+            let fname = entry.file_name().to_string_lossy().to_string();
+            
+            // We look for "_in" pipes (Incoming data to router)
+            if fname.ends_with("_in") && !handled_pipes.contains(&fname) {
+                let caller_name = fname.trim_end_matches("_in").to_string();
+                let pipe_out_name = format!("{}_out", caller_name);
+                let pipe_out_path = io_dir.join(&pipe_out_name);
+                
+                if pipe_out_path.exists() {
+                    // Found a pair!
+                    println!("[Router] New connection from: {}", caller_name);
+                    handled_pipes.insert(fname.clone());
+                    
+                    let state = state.clone();
+                    let rx_path = path.clone();
+                    let tx_path = pipe_out_path.clone();
+                    
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_pipe_pair(rx_path, tx_path, state, has_uplink).await {
+                            eprintln!("Pipe error [{}]: {}", caller_name, e);
+                        }
+                    });
+                }
             }
-        });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 
-async fn handle_connection(mut stream: UnixStream, state: Arc<RwLock<RouterState>>, has_uplink: bool) -> Result<()> {
-    // Protocol Loop
+async fn handle_pipe_pair(rx_path: PathBuf, tx_path: PathBuf, state: Arc<RwLock<RouterState>>, has_uplink: bool) -> Result<()> {
+    // Open Pipes
+    // Router opens RX (read) and TX (write)
+    let mut rx = OpenOptions::new().read(true).open(&rx_path).await?;
+    let mut tx = OpenOptions::new().write(true).open(&tx_path).await?;
+
     loop {
         // 1. Read Frame Length
         let mut len_buf = [0u8; 4];
-        if stream.read_exact(&mut len_buf).await.is_err() { break; } // EOF
+        if rx.read_exact(&mut len_buf).await.is_err() { break; } 
         let len = u32::from_le_bytes(len_buf) as usize;
         
-        // 2. Read Channel
         let mut chan_buf = [0u8; 1];
-        stream.read_exact(&mut chan_buf).await?;
+        rx.read_exact(&mut chan_buf).await?;
         let channel = chan_buf[0];
 
-        // 3. Routing Logic
         if channel == channel::ROUTING {
-            // Layout: [Header (24)][Payload...]
             let mut header_buf = [0u8; 24];
-            stream.read_exact(&mut header_buf).await?;
+            rx.read_exact(&mut header_buf).await?;
             
-            // Parse Header
             let target_id = u64::from_le_bytes(header_buf[0..8].try_into()?);
-            let _source_id = u64::from_le_bytes(header_buf[8..16].try_into()?);
             let mut ttl = header_buf[16];
-            let _pad = &header_buf[17..];
 
-            // Payload
-            let payload_len = len - 1 - 24; // Total - Chan - Header
+            let payload_len = len - 1 - 24;
             let mut payload = vec![0u8; payload_len];
-            stream.read_exact(&mut payload).await?;
+            rx.read_exact(&mut payload).await?;
 
-            // Lookup
             let guard = state.read().await;
             if let Some(neighbor) = guard.routes.get(&target_id) {
-                // FOUND LOCAL
-                forward_to_neighbor(neighbor, &payload).await?;
-                // We send back response? 
-                // This naive implementation is one-way or assumes req-resp on stream
-                // Real router needs to bridge streams.
-                // For MVP: We assume the target creates a new connection back? 
-                // No, RPC expects response on same stream.
-                // We need to bridge the connection.
-                
-                // Correct P2P Router Logic:
-                // We shouldn't have read the payload into memory if we want to stream.
-                // But for vesicle message passing, memory is fine.
-                // Problem: How to get response back to `stream`?
-                // `forward_to_neighbor` needs to write to neighbor AND read response AND write back to `stream`.
-                
-                // Let's implement simple request-response proxy
-                let response = proxy_request(neighbor, &payload).await?;
-                
-                // Write back to caller
-                let resp_total_len = 1 + response.len();
-                stream.write_all(&(resp_total_len as u32).to_le_bytes()).await?;
-                stream.write_u8(channel::APP).await?; // Return on APP channel (unwrapped)
-                stream.write_all(&response).await?;
-                
+                // Forward Local
+                let response = proxy_to_neighbor(neighbor, &payload).await?;
+                write_response(&mut tx, channel::APP, &response).await?;
             } else if ttl > 0 && has_uplink {
-                // RECURSIVE ROUTING
+                // Recursive
                 ttl -= 1;
-                // Re-pack header
                 let mut new_header = header_buf;
                 new_header[16] = ttl;
-                
-                let response = proxy_routed_request("uplink", &new_header, &payload).await?;
-                
-                let resp_total_len = 1 + response.len();
-                stream.write_all(&(resp_total_len as u32).to_le_bytes()).await?;
-                stream.write_u8(channel::APP).await?;
-                stream.write_all(&response).await?;
-                
+                let response = proxy_routed("uplink", &new_header, &payload).await?;
+                write_response(&mut tx, channel::APP, &response).await?;
             } else {
-                eprintln!("Route not found for {}", target_id);
+                eprintln!("Route not found: {}", target_id);
             }
         } else {
-            // Consume remaining bytes to keep stream sync (or drop)
             let mut discard = vec![0u8; len - 1];
-            stream.read_exact(&mut discard).await?;
+            rx.read_exact(&mut discard).await?;
         }
     }
     Ok(())
 }
 
-async fn proxy_request(neighbor: &str, payload: &[u8]) -> Result<Vec<u8>> {
-    // Connect to neighbor socket
+async fn proxy_to_neighbor(neighbor: &str, payload: &[u8]) -> Result<Vec<u8>> {
     let socket_dir = cell_sdk::resolve_socket_dir();
-    let sock_path = socket_dir.join("neighbors").join(neighbor);
+    let link_dir = socket_dir.join("neighbors").join(neighbor);
     
-    let mut conn = UnixStream::connect(sock_path).await?;
+    // Connect to neighbor's pipes (tx/rx relative to ME)
+    let mut tx = OpenOptions::new().write(true).open(link_dir.join("tx")).await?;
+    let mut rx = OpenOptions::new().read(true).open(link_dir.join("rx")).await?;
     
-    // Send standard APP frame
     let len = 1 + payload.len();
-    conn.write_all(&(len as u32).to_le_bytes()).await?;
-    conn.write_u8(channel::APP).await?;
-    conn.write_all(payload).await?;
+    tx.write_all(&(len as u32).to_le_bytes()).await?;
+    tx.write_u8(channel::APP).await?;
+    tx.write_all(payload).await?;
     
-    // Read Response
-    read_frame(&mut conn).await
+    read_response(&mut rx).await
 }
 
-async fn proxy_routed_request(neighbor: &str, header: &[u8], payload: &[u8]) -> Result<Vec<u8>> {
+async fn proxy_routed(neighbor: &str, header: &[u8], payload: &[u8]) -> Result<Vec<u8>> {
     let socket_dir = cell_sdk::resolve_socket_dir();
-    let sock_path = socket_dir.join("neighbors").join(neighbor);
-    let mut conn = UnixStream::connect(sock_path).await?;
+    let link_dir = socket_dir.join("neighbors").join(neighbor);
     
-    // Send ROUTING frame
+    let mut tx = OpenOptions::new().write(true).open(link_dir.join("tx")).await?;
+    let mut rx = OpenOptions::new().read(true).open(link_dir.join("rx")).await?;
+    
     let len = 1 + header.len() + payload.len();
-    conn.write_all(&(len as u32).to_le_bytes()).await?;
-    conn.write_u8(channel::ROUTING).await?;
-    conn.write_all(header).await?;
-    conn.write_all(payload).await?;
+    tx.write_all(&(len as u32).to_le_bytes()).await?;
+    tx.write_u8(channel::ROUTING).await?;
+    tx.write_all(header).await?;
+    tx.write_all(payload).await?;
     
-    // Read Response
-    read_frame(&mut conn).await
+    read_response(&mut rx).await
 }
 
-async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
+async fn write_response(tx: &mut File, chan: u8, payload: &[u8]) -> Result<()> {
+    let len = 1 + payload.len();
+    tx.write_all(&(len as u32).to_le_bytes()).await?;
+    tx.write_u8(chan).await?;
+    tx.write_all(payload).await?;
+    Ok(())
+}
+
+async fn read_response(rx: &mut File) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
+    rx.read_exact(&mut len_buf).await?;
     let len = u32::from_le_bytes(len_buf) as usize;
     let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await?;
-    // Strip channel
+    rx.read_exact(&mut buf).await?;
     if len > 0 { Ok(buf[1..].to_vec()) } else { Ok(vec![]) }
 }

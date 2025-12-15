@@ -20,7 +20,7 @@ pub mod channel {
     pub const CONSENSUS: u8 = 0x01;
     pub const OPS: u8 = 0x02;
     pub const MACRO_COORDINATION: u8 = 0x03;
-    pub const ROUTING: u8 = 0x04; // New channel for routed packets
+    pub const ROUTING: u8 = 0x04;
 }
 
 /// The Routing Header for P2P Mesh traversal
