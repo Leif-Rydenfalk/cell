@@ -1,13 +1,13 @@
 [package]
-name = "tcp-gateway"
+name = "router"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cell-sdk = { path = "../../cell-sdk" }
 anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
+cell-sdk = { path = "../../cell-sdk" }
+cell-core = { path = "../../cell-core" }
+blake3 = "1.5"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-rand = "0.8"
-cell-model = { path = "../../cell-model" }

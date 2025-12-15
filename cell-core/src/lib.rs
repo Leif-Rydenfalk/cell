@@ -1,5 +1,6 @@
+// cell-core/src/lib.rs
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+// The absolute minimum primitives.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -19,6 +20,17 @@ pub mod channel {
     pub const CONSENSUS: u8 = 0x01;
     pub const OPS: u8 = 0x02;
     pub const MACRO_COORDINATION: u8 = 0x03;
+    pub const ROUTING: u8 = 0x04; // New channel for routed packets
+}
+
+/// The Routing Header for P2P Mesh traversal
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VesicleHeader {
+    pub target_id: u64, // Blake3 Hash of target cell name
+    pub source_id: u64, // Blake3 Hash of sender cell name
+    pub ttl: u8,        // Time To Live
+    pub _pad: [u8; 7],  // Alignment
 }
 
 pub trait Transport: Send + Sync {

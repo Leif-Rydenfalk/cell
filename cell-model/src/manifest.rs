@@ -1,5 +1,5 @@
+// cell-model/src/manifest.rs
 // SPDX-License-Identifier: MIT
-// Declarative Mesh Definition (TOML)
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -8,13 +8,18 @@ use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CellManifest {
-    pub cell: CellMeta,
+    pub package: Option<PackageMeta>, // Support standard Cargo.toml structure
+    pub cell: Option<CellMeta>,       // Support explicit [cell] block
+
+    #[serde(default)]
+    pub neighbors: HashMap<String, NeighborConfig>,
+
     #[serde(default)]
     pub local: HashMap<String, String>,
     #[serde(default)]
     pub handlers: Vec<HandlerMeta>,
     #[serde(default)]
-    pub macros: HashMap<String, String>, // (layer, feature) -> function_name
+    pub macros: HashMap<String, String>,
     pub workspace: Option<WorkspaceMeta>,
 
     #[serde(default)]
@@ -24,9 +29,26 @@ pub struct CellManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PackageMeta {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CellMeta {
     pub name: String,
     pub version: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum NeighborConfig {
+    Path(String),
+    Detailed {
+        path: String,
+        #[serde(default)]
+        autostart: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -38,8 +60,6 @@ pub struct WorkspaceMeta {
 pub struct HandlerMeta {
     pub name: String,
 }
-
-// --- Runtime Structs ---
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ResourceLimits {
@@ -53,11 +73,4 @@ pub struct PlacementStrategy {
     pub zone: Option<String>,
     pub required_instruction_set: Option<String>,
     pub require_tee: bool,
-}
-
-// Kept for compatibility with older model code if any
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct MeshManifest {
-    pub mesh: String,
-    pub cells: Vec<CellManifest>,
 }
