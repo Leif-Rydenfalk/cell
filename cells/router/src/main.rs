@@ -1,6 +1,6 @@
 // cells/router/src/main.rs
 // SPDX-License-Identifier: MIT
-// The P2P Switchboard.
+// The P2P Switchboard. Defines the protocols (Laser, Satellite, etc).
 
 use anyhow::Result;
 use cell_sdk::*;
@@ -12,8 +12,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 use std::path::PathBuf;
 
+// This Router binary defines the Transport Protocol.
+// It could be using Lasers, RDMA, or Carrier Pigeons.
+// The SDK doesn't know. The SDK just writes to the pipe.
+
 struct RouterState {
-    // Hash -> Neighbor Name
     routes: HashMap<u64, String>, 
 }
 
@@ -23,10 +26,9 @@ async fn main() -> Result<()> {
     
     let socket_dir = cell_sdk::resolve_socket_dir();
     let io_dir = socket_dir.join("io");
-    std::fs::create_dir_all(&io_dir)?; // Ensure my IO inbox exists
+    std::fs::create_dir_all(&io_dir)?;
 
-    // 1. Discover Outbound Routes (Neighbors I can send TO)
-    // I look in my 'neighbors' dir to see who I am wired to.
+    // 1. Discover Outbound Routes
     let mut routes = HashMap::new();
     let neighbors_dir = socket_dir.join("neighbors");
     
@@ -41,20 +43,14 @@ async fn main() -> Result<()> {
             let id = u64::from_le_bytes(bytes);
             
             routes.insert(id, name.clone());
-            println!("[Router] Outbound route: {} -> {}", id, name);
+            println!("[Router] Route: {} -> {}", id, name);
         }
     }
     
     let has_uplink = routes.values().any(|n| n == "uplink" || n == "default");
     let state = Arc::new(RwLock::new(RouterState { routes }));
 
-    // 2. Watch Inbound Pipes (My IO folder)
-    // Any cell that wants to talk to me creates pipes in MY io folder:
-    // <caller>_in (I read)
-    // <caller>_out (I write)
-    
-    // We scan this directory and spawn handlers for new pipes.
-    // Simple polling loop for MVP.
+    // 2. Watch Inbound Pipes (From Local SDKs)
     println!("[Router] Watching {:?}", io_dir);
     
     let mut handled_pipes = std::collections::HashSet::new();
@@ -65,15 +61,13 @@ async fn main() -> Result<()> {
             let path = entry.path();
             let fname = entry.file_name().to_string_lossy().to_string();
             
-            // We look for "_in" pipes (Incoming data to router)
             if fname.ends_with("_in") && !handled_pipes.contains(&fname) {
                 let caller_name = fname.trim_end_matches("_in").to_string();
                 let pipe_out_name = format!("{}_out", caller_name);
                 let pipe_out_path = io_dir.join(&pipe_out_name);
                 
                 if pipe_out_path.exists() {
-                    // Found a pair!
-                    println!("[Router] New connection from: {}", caller_name);
+                    println!("[Router] Connected: {}", caller_name);
                     handled_pipes.insert(fname.clone());
                     
                     let state = state.clone();
@@ -93,13 +87,11 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_pipe_pair(rx_path: PathBuf, tx_path: PathBuf, state: Arc<RwLock<RouterState>>, has_uplink: bool) -> Result<()> {
-    // Open Pipes
-    // Router opens RX (read) and TX (write)
     let mut rx = OpenOptions::new().read(true).open(&rx_path).await?;
     let mut tx = OpenOptions::new().write(true).open(&tx_path).await?;
 
     loop {
-        // 1. Read Frame Length
+        // Read Frame
         let mut len_buf = [0u8; 4];
         if rx.read_exact(&mut len_buf).await.is_err() { break; } 
         let len = u32::from_le_bytes(len_buf) as usize;
@@ -121,11 +113,12 @@ async fn handle_pipe_pair(rx_path: PathBuf, tx_path: PathBuf, state: Arc<RwLock<
 
             let guard = state.read().await;
             if let Some(neighbor) = guard.routes.get(&target_id) {
-                // Forward Local
+                // HERE IS WHERE THE MAGIC HAPPENS
+                // If 'neighbor' is the Laser Controller, this call converts
+                // filesystem bytes into Laser Pulses.
                 let response = proxy_to_neighbor(neighbor, &payload).await?;
                 write_response(&mut tx, channel::APP, &response).await?;
             } else if ttl > 0 && has_uplink {
-                // Recursive
                 ttl -= 1;
                 let mut new_header = header_buf;
                 new_header[16] = ttl;
@@ -146,7 +139,6 @@ async fn proxy_to_neighbor(neighbor: &str, payload: &[u8]) -> Result<Vec<u8>> {
     let socket_dir = cell_sdk::resolve_socket_dir();
     let link_dir = socket_dir.join("neighbors").join(neighbor);
     
-    // Connect to neighbor's pipes (tx/rx relative to ME)
     let mut tx = OpenOptions::new().write(true).open(link_dir.join("tx")).await?;
     let mut rx = OpenOptions::new().read(true).open(link_dir.join("rx")).await?;
     

@@ -1,5 +1,5 @@
 // cell-cli/src/main.rs
-// The Plumber. Creates the FIFO topology.
+// The Plumber.
 
 use anyhow::{anyhow, Context, Result};
 use cell_model::manifest::{CellManifest, NeighborConfig};
@@ -58,81 +58,38 @@ async fn cmd_run(path: PathBuf, release: bool, instance_id: Option<String>) -> R
     let cell_root = abs_path.join(".cell");
     let run_dir = cell_root.join("run").join(&instance);
     let neighbors_dir = run_dir.join("neighbors");
-    let io_dir = run_dir.join("io"); // Where MY pipes live
+    let io_dir = run_dir.join("io");
 
     std::fs::create_dir_all(&neighbors_dir)?;
     std::fs::create_dir_all(&io_dir)?;
 
-    // 1. Create MY IO Pipes (Where I listen)
-    // Actually, cells connect peer-to-peer pipes. There isn't necessarily a central "listener"
-    // in the pure P2P file model unless implemented that way.
-    // BUT to support "Router" behavior, we likely want a standard interface for dynamic connections.
-    // However, the prompt specifies direct file communication defined by neighbors.
-
-    // We will create pipes for each configured neighbor.
-
+    // WIRE NEIGHBORS
+    // This creates the pipe topology based on the Manifest.
     for (neighbor_name, config) in &manifest.neighbors {
         let neighbor_path_str = match config {
             NeighborConfig::Path(p) => p,
             NeighborConfig::Detailed { path, .. } => path,
         };
 
-        // Paths
         let my_link_dir = neighbors_dir.join(neighbor_name);
         std::fs::create_dir_all(&my_link_dir)?;
-
-        // Physical Pipe location: We need a shared place.
-        // We use the SOURCE directory of the NEIGHBOR to find *their* runtime?
-        // No, we need a neutral ground or shared knowledge.
-        // Convention: The pipes live in the "server's" runtime dir if one acts as server?
-        // Or we create them in a shared temp dir?
-        // We are isolated in .cell/run/<instance>.
-
-        // Assumption: All cells in an instance share the filesystem view.
-        // We put pipes in the runtime dir of the TARGET (Neighbor).
 
         let neighbor_source_path = abs_path.join(neighbor_path_str);
         let neighbor_run_dir = neighbor_source_path.join(".cell/run").join(&instance);
 
-        // We can't write to neighbor dir if it doesn't exist yet (autostart race).
-        // Solution: Create pipes in OUR dir and symlink? Or a stable shared dir?
-        // Let's create pipes in the directory of the "alphabetically first" cell to break symmetry?
-        // Or simpler: Just create them in MY directory and assume neighbor links to ME?
-        // That requires neighbor to know about ME.
-
-        // Better: The "Router" or "Target" model.
-        // If I depend on "db", I expect "db" to have an interface.
-        // "db" should create a "gateway" pipe pair for incoming connections?
-        // No, pipes are 1:1.
-
-        // Let's implement: I create pipes in MY runtime dir for this connection.
-        // I wait for Neighbor to attach.
-        // BUT Neighbor needs to know where to attach.
-
-        // REVISED TOPOLOGY:
-        // We assume a 'Router' cell exists that scans dirs.
-        // But for direct P2P 'db' dependency:
-        // We use the Target's IO directory.
-        // Target: `db/.cell/run/<inst>/io/`
-        // We create: `db/.cell/run/<inst>/io/<my_name>.in` and `<my_name>.out`?
-        // That requires `db` to scan its IO dir.
-
-        // Let's implement the Scanner model for the Router/Target.
-        // 1. Ensure Target IO dir exists.
         let target_io = neighbor_run_dir.join("io");
-        std::fs::create_dir_all(&target_io)?; // We create it if missing
+        std::fs::create_dir_all(&target_io)?;
 
-        // 2. Create pipes there: <my_name>_to_target, target_to_<my_name>
-        let pipe_out = target_io.join(format!("{}_in", name)); // Write here
-        let pipe_in = target_io.join(format!("{}_out", name)); // Read here
+        // Create Pipes
+        // <my_name>_in  (I write here, they read)
+        // <my_name>_out (I read here, they write)
+        let pipe_out = target_io.join(format!("{}_in", name));
+        let pipe_in = target_io.join(format!("{}_out", name));
 
         create_fifo(&pipe_out)?;
         create_fifo(&pipe_in)?;
 
-        // 3. Symlink locally for ME to use
-        // neighbors/db/tx -> target_io/<me>_in
-        // neighbors/db/rx -> target_io/<me>_out
-
+        // Link to my view
         let my_tx = my_link_dir.join("tx");
         let my_rx = my_link_dir.join("rx");
 
@@ -142,7 +99,7 @@ async fn cmd_run(path: PathBuf, release: bool, instance_id: Option<String>) -> R
         println!("   ├─ Plumbed pipe to '{}': {:?}", neighbor_name, target_io);
     }
 
-    // 5. Build
+    // BUILD
     let mut build = Command::new("cargo");
     build.arg("build");
     if release {
@@ -155,7 +112,7 @@ async fn cmd_run(path: PathBuf, release: bool, instance_id: Option<String>) -> R
         anyhow::bail!("Ribosome failed to compile DNA");
     }
 
-    // 6. Spawn
+    // SPAWN
     let target_dir = abs_path
         .join("target")
         .join(if release { "release" } else { "debug" });
@@ -199,6 +156,9 @@ fn create_fifo(path: &Path) -> Result<()> {
         use nix::sys::stat;
         nix::unistd::mkfifo(path, stat::Mode::S_IRWXU)?;
     }
+    // Windows named pipes are created at open time usually,
+    // but for filesystem mapping we might need a placeholder or driver.
+    // For MVP, Unix FIFO is the standard.
     Ok(())
 }
 

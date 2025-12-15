@@ -40,6 +40,7 @@ pub mod prelude {
     };
 }
 
+// RESOLVER
 pub fn resolve_socket_dir() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
         return std::path::PathBuf::from(p);
