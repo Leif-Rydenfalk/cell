@@ -5,8 +5,7 @@
 use crate::resolve_socket_dir;
 use crate::response::Response;
 use anyhow::{anyhow, bail, Context, Result};
-use cell_core::channel;
-use cell_core::VesicleHeader;
+use cell_core::{channel, VesicleHeader};
 use cell_model::rkyv::ser::serializers::AllocSerializer;
 use rkyv::{Archive, Serialize};
 use std::path::{Path, PathBuf};

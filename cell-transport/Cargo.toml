@@ -1,44 +1,13 @@
 [package]
 name = "cell-transport"
-version = { workspace = true }
-edition = { workspace = true }
-
-[features]
-default = ["std", "shm"]
-std = [
-    "dep:tokio",
-    "dep:socket2",
-    "dep:dirs",
-    "dep:tracing",
-    "dep:fd-lock",
-    "dep:users",
-    "dep:nix",
-    "cell-core/std",
-]
-shm = ["std", "dep:memmap2", "dep:users"]
+version = "0.4.0"
+edition = "2021"
 
 [dependencies]
-cell-core = { workspace = true, optional = true }
-cell-codec = { workspace = true }
-cell-model = { workspace = true }
-cell-discovery = { workspace = true }
-
-rkyv = { workspace = true }
-rand = { workspace = true }
-blake3 = { workspace = true }
-anyhow = { workspace = true }
-thiserror = "1.0"
-serde_json = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-chacha20poly1305 = { workspace = true }
-
-# OS Primitives
-tokio = { workspace = true, optional = true }
-nix = { workspace = true, optional = true }
-memmap2 = { workspace = true, optional = true }
-fd-lock = { workspace = true, optional = true }
-socket2 = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
-dirs = { workspace = true, optional = true }
-users = { version = "0.11", optional = true }
-libc = { version = "0.2", optional = true }
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+cell-core = { path = "../cell-core" }
+cell-model = { path = "../cell-model" }
+rkyv = { version = "0.7", features = ["alloc"] }
+blake3 = "1.5"
+tracing = "0.1"
