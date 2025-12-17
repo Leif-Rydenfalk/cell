@@ -4,15 +4,12 @@ members = [
     "cell-core",
     "cell-codec",
     "cell-model",
-    "cell-transport",
-    "cell-discovery",
     "cell-sdk",
     "cell-macros",
     "cell-build",
-    "cell-cli",
-    "cells/*",                                   # Include all cells
     "examples/cell-market-bench/cells/exchange",
     "examples/cell-market-bench/cells/trader",
+    "examples/cell-market-bench/cells/router",
 ]
 exclude = []
 
@@ -28,10 +25,7 @@ description = "A biological distributed supercomputing substrate."
 cell-core = { path = "./cell-core", version = "0.4.0" }
 cell-codec = { path = "./cell-codec", version = "0.4.0" }
 cell-model = { path = "./cell-model", version = "0.4.0" }
-cell-transport = { path = "./cell-transport", version = "0.4.0", features = [
-    "std",
-    "shm",
-] }
+cell-transport = { path = "./cell-transport", version = "0.4.0" }
 cell-discovery = { path = "./cell-discovery", version = "0.4.0" }
 cell-sdk = { path = "./cell-sdk", version = "0.4.0" }
 cell-macros = { path = "./cell-macros", version = "0.3.0" }

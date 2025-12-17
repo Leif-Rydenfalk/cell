@@ -2,22 +2,14 @@
 name = "cell-sdk"
 version = { workspace = true }
 edition = { workspace = true }
-authors = { workspace = true }
-license = { workspace = true }
-description = "Zero-copy RPC framework and runtime SDK."
-repository = { workspace = true }
 
 [features]
-default = ["transport", "shm"]
-transport = ["dep:cell-transport"]
-shm = ["cell-transport/shm"]
+default = []
 
 [dependencies]
-cell-core = { workspace = true }
+cell-core = { path = "../cell-core", features = ["std"] }
 cell-model = { workspace = true }
 cell-macros = { workspace = true }
-cell-transport = { workspace = true, optional = true, features = ["std"] }
-cell-discovery = { workspace = true }
 
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -29,3 +21,4 @@ clap = { version = "4.5", features = ["derive"] }
 dirs = { workspace = true }
 rand = { workspace = true }
 toml = "0.8"
+blake3 = "1.5"

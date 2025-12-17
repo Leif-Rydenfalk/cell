@@ -33,19 +33,19 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let module_name = args.module_name;
     let cell_name = &args.cell_name;
 
-    // Fetch source over RPC from the running cell or fallback to disk
+    // 1. Fetch Source (Filesystem Only - No RPC)
     let source_code = fetch_remote_source_or_fallback(cell_name);
     
-    // 1. Extract Methods
+    // 2. Extract Methods
     let methods = extract_handler_methods(&source_code);
     if methods.is_empty() {
         return syn::Error::new(
             module_name.span(), 
-            format!("No #[handler] methods found for '{}'. Ensure source is accessible via RPC or Registry.", cell_name)
+            format!("No #[handler] methods found for '{}'. Ensure source is accessible in Workspace or Registry.", cell_name)
         ).to_compile_error().into();
     }
 
-    // 2. Extract Proteins
+    // 3. Extract Proteins
     let proteins = extract_proteins(&source_code);
 
     let protocol_name = format_ident!("{}Protocol", cell_name.to_case(Case::Pascal));
@@ -67,13 +67,27 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         let arg_sigs: Vec<_> = args.iter().map(|(arg_name, arg_type)| quote! { #arg_name: #arg_type }).collect();
         let arg_names: Vec<_> = args.iter().map(|(arg_name, _)| arg_name).collect();
 
+        // CHANGED: &mut self -> &self
         quote! {
-            pub async fn #name(&mut self, #(#arg_sigs),*) -> ::anyhow::Result<#ret_type> {
+            pub async fn #name(&self, #(#arg_sigs),*) -> ::anyhow::Result<#ret_type> {
                 let req = #protocol_name::#variant_name { #(#arg_names),* };
-                let resp: #response_name = self.conn.fire(&req).await
-                    .map_err(|e| ::anyhow::anyhow!("RPC Error: {}", e))?
-                    .deserialize()
-                    .map_err(|e| ::anyhow::anyhow!("Deserialization Error: {}", e))?;
+                
+                let resp_wrapper = self.conn.fire(&req).await
+                    .map_err(|e| ::anyhow::anyhow!("RPC Error: {}", e))?;
+                
+                let resp_bytes = resp_wrapper.into_owned();
+                
+                if resp_bytes.is_empty() {
+                     return Err(::anyhow::anyhow!("Empty response from cell"));
+                }
+
+                let archived = ::cell_sdk::rkyv::check_archived_root::<#response_name>(&resp_bytes)
+                    .map_err(|e| ::anyhow::anyhow!("Validation Error: {}", e))?;
+                
+                let resp: #response_name = ::cell_sdk::rkyv::Deserialize::deserialize(
+                    archived, 
+                    &mut ::cell_sdk::rkyv::de::deserializers::SharedDeserializeMap::new()
+                ).map_err(|e| ::anyhow::anyhow!("Deserialization Error: {}", e))?;
                     
                 match resp {
                     #response_name::#variant_name(result) => Ok(result),
@@ -122,84 +136,44 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
 }
 
 fn fetch_remote_source_or_fallback(cell_name: &str) -> String {
-    use cell_model::ops::{OpsRequest, OpsResponse};
-    use cell_model::rkyv::Deserialize;
-
-    // 1. Try RPC (Fast path if running)
-    // We use a small timeout to avoid blocking builds if the cell is down
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let rpc_result = rt.block_on(async {
-        let res = tokio::time::timeout(std::time::Duration::from_millis(100), async {
-            let mut syn = cell_transport::Synapse::grow(cell_name).await
-                .map_err(|_| cell_core::CellError::ConnectionRefused)?;
-            
-            let req = OpsRequest::GetSource;
-            let req_bytes = cell_model::rkyv::to_bytes::<_, 256>(&req)
-                .map_err(|_| cell_core::CellError::SerializationFailure)?
-                .into_vec();
-            
-            let resp = syn.fire_on_channel(cell_core::channel::OPS, &req_bytes).await?;
-            let bytes = match resp {
-                cell_transport::Response::Owned(v) => v,
-                cell_transport::Response::Borrowed(v) => v.to_vec(),
-                _ => return Err(cell_core::CellError::SerializationFailure),
-            };
-            let archived = cell_model::rkyv::check_archived_root::<OpsResponse>(&bytes)
-                .map_err(|_| cell_core::CellError::SerializationFailure)?;
-            Ok(archived.deserialize(&mut cell_model::rkyv::Infallible).unwrap())
-        }).await;
-        
-        match res {
-            Ok(Ok(OpsResponse::Source { bytes })) => Some(bytes),
-            _ => None
-        }
-    });
-
-    if let Some(bytes) = rpc_result {
-        return String::from_utf8(bytes).unwrap_or_default();
-    }
-
-    // 2. Fallback to Registry (Legacy/Manual registration)
-    let home = dirs::home_dir().expect("No HOME");
-    let registry = home.join(".cell/registry").join(cell_name);
-    
-    let candidates = [
-        registry.join("src/main.rs"),
-        registry.join("src/lib.rs"),
-    ];
-    for c in &candidates {
-        if c.exists() { return std::fs::read_to_string(c).unwrap_or_default(); }
-    }
-
-    // 3. Fallback to Workspace Heuristics (The Monorepo Fix)
+    // 1. Check Workspace (Monorepo)
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let current = std::path::Path::new(&manifest_dir);
-        let parent = current.parent().unwrap_or(current);
-        
-        // Search in:
-        // 1. ../{name} (Sibling)
-        // 2. ../cells/{name} (Standard Monorepo Layout)
-        // 3. ../../cells/{name} (Nested Example Layout)
-        let local_candidates = [
-            parent.join(cell_name).join("src/main.rs"),
-            parent.join("cells").join(cell_name).join("src/main.rs"),
-            parent.parent().unwrap_or(parent).join("cells").join(cell_name).join("src/main.rs"),
-        ];
-
-        for c in &local_candidates {
-            if c.exists() {
-                return std::fs::read_to_string(c).unwrap_or_default();
+        let mut candidate_root = current;
+        // Walk up a few levels to find the root
+        for _ in 0..4 {
+             let candidates = [
+                candidate_root.join(cell_name).join("src/main.rs"),
+                candidate_root.join("cells").join(cell_name).join("src/main.rs"),
+                candidate_root.join("examples").join("cell-market-bench").join("cells").join(cell_name).join("src/main.rs"),
+                candidate_root.join("examples").join("cell-market").join("cells").join(cell_name).join("src/main.rs"),
+            ];
+            
+            for c in &candidates {
+                if c.exists() {
+                    return std::fs::read_to_string(c).unwrap_or_default();
+                }
+            }
+            if let Some(p) = candidate_root.parent() {
+                candidate_root = p;
+            } else {
+                break;
             }
         }
     }
 
-    panic!("Could not find source for cell '{}'. Is it running, registered, or local?", cell_name);
+    // 2. Check Registry
+    let home = dirs::home_dir().expect("No HOME");
+    let registry = home.join(".cell/registry").join(cell_name);
+    let c = registry.join("src/main.rs");
+    if c.exists() { return std::fs::read_to_string(c).unwrap_or_default(); }
+
+    panic!("Could not find source for cell '{}'. It must be in the workspace or ~/.cell/registry", cell_name);
 }
 
 fn extract_proteins(src: &str) -> Vec<proc_macro2::TokenStream> {
     let syntax = syn::parse_file(src).unwrap_or_else(|_| syn::File { items: vec![], shebang: None, attrs: vec![] });
     let mut proteins = Vec::new();
-
     for item in syntax.items {
         match item {
             Item::Struct(mut s) => {
@@ -241,7 +215,6 @@ fn extract_proteins(src: &str) -> Vec<proc_macro2::TokenStream> {
 fn extract_handler_methods(src: &str) -> Vec<(Ident, Vec<(Ident, Type)>, Type)> {
     let syntax = syn::parse_file(src).unwrap_or_else(|_| syn::File { items: vec![], shebang: None, attrs: vec![] });
     let mut methods = Vec::new();
-
     for item in syntax.items {
         if let syn::Item::Impl(i) = item {
             if i.attrs.iter().any(|a| a.path().is_ident("handler")) {
@@ -256,7 +229,6 @@ fn extract_handler_methods(src: &str) -> Vec<(Ident, Vec<(Ident, Type)>, Type)> 
                             }
                             None
                         }).collect();
-                        
                         let ret = extract_ok_type(&m.sig.output);
                         methods.push((name, args, ret));
                     }
@@ -287,7 +259,7 @@ fn extract_ok_type(ret: &ReturnType) -> Type {
     }
 }
 
-// === BOILERPLATE MACROS ===
+// === ATTRIBUTE MACROS ===
 
 #[proc_macro_attribute]
 pub fn service(_: TokenStream, item: TokenStream) -> TokenStream { item }
@@ -403,7 +375,7 @@ pub fn handler(_: TokenStream, item: TokenStream) -> TokenStream {
 
         impl #service_name {
             pub const SCHEMA_FINGERPRINT: u64 = #fingerprint;
-            
+
             pub async fn serve(self, name: &str) -> ::anyhow::Result<()> {
                 let service = std::sync::Arc::new(self);
                 ::cell_sdk::Membrane::bind::<_, #protocol_name, #response_name>(
@@ -417,13 +389,8 @@ pub fn handler(_: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             async fn dispatch(&self, req: &#archived_protocol_name) -> ::anyhow::Result<#response_name> {
-                let res: ::std::result::Result<#response_name, ::cell_sdk::CellError> = match req {
+                match req {
                     #(#dispatch_arms),*
-                };
-                
-                match res {
-                    Ok(r) => Ok(r),
-                    Err(e) => Err(::anyhow::Error::new(e))
                 }
             }
         }

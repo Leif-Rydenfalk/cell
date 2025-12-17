@@ -1,0 +1,6 @@
+[package]
+name = "exchange"
+version = "0.2.0"
+
+[neighbors]
+# Exchange is a leaf node, it has no outgoing dependencies for this bench

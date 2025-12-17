@@ -5,12 +5,15 @@ edition = { workspace = true }
 description = "The absolute minimum no_std primitives for Cell."
 
 [features]
-default = []
+default = ["std"]
 std = []
-# Added features to support deriving traits on CellError if needed by downstream
 serde = ["dep:serde"]
 rkyv = ["dep:rkyv"]
 
 [dependencies]
-serde = { version = "1.0", default-features = false, optional = true, features = ["derive"] }
-rkyv = { version = "0.7", default-features = false, optional = true, features = ["size_32"] }
+serde = { version = "1.0", default-features = false, optional = true, features = [
+    "derive",
+] }
+rkyv = { version = "0.7", default-features = false, optional = true, features = [
+    "size_32",
+] }

@@ -3,11 +3,9 @@
 
 extern crate self as cell_sdk;
 
-pub use cell_core::{channel, CellError, Transport, Vesicle};
-pub use cell_discovery as discovery;
+pub use cell_core::{channel, CellError, Vesicle};
 pub use cell_macros::{cell_remote, expand, handler, protein, service};
 pub use cell_model::*;
-pub use cell_transport::{Membrane, Synapse};
 
 pub use anyhow;
 pub use clap;
@@ -21,12 +19,20 @@ pub mod config;
 pub mod crdt;
 pub mod identity;
 pub mod logging;
+pub mod membrane;
 pub mod mesh;
 pub mod metrics;
+pub mod organogenisis;
+pub mod response;
 pub mod runtime;
+pub mod synapse;
 pub mod system;
 pub mod test_context;
 pub mod tissue;
+
+pub use membrane::Membrane;
+pub use response::Response;
+pub use synapse::Synapse;
 
 pub mod prelude {
     pub use super::serde::{Deserialize, Serialize};
@@ -34,18 +40,8 @@ pub mod prelude {
         anyhow::{Error, Result},
         cell_remote,
         config::CellConfig,
-        discovery, expand, handler, protein,
+        expand, handler, protein,
         runtime::Runtime,
-        service, Synapse,
+        service, Membrane, Synapse,
     };
-}
-
-// RESOLVER
-pub fn resolve_socket_dir() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("CELL_SOCKET_DIR") {
-        return std::path::PathBuf::from(p);
-    }
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-    let instance = std::env::var("CELL_INSTANCE").unwrap_or_else(|_| "test-global".to_string());
-    home.join(".cell/run").join(instance)
 }

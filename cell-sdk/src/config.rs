@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+// cell-sdk/src/config.rs
 
-use crate::resolve_socket_dir;
 use anyhow::{Context, Result};
 use std::env;
 use std::path::PathBuf;
@@ -9,7 +8,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct CellConfig {
     pub node_id: u64,
-    pub socket_dir: PathBuf,
     pub peers: Vec<String>,
     pub raft_storage_path: Option<PathBuf>,
 }
@@ -21,13 +19,9 @@ impl CellConfig {
             .parse::<u64>()
             .context("CELL_NODE_ID must be a u64 integer")?;
 
-        let socket_dir = resolve_socket_dir();
-
-        let storage_path = if let Ok(p) = env::var("CELL_RAFT_PATH") {
-            PathBuf::from(p)
-        } else {
-            socket_dir.join(format!("{}.wal", cell_name))
-        };
+        // Storage is local to the cell's directory
+        let cwd = env::current_dir()?;
+        let storage_path = cwd.join(".cell/storage").join(format!("{}.wal", cell_name));
 
         let peers = env::var("CELL_PEERS")
             .unwrap_or_default()
@@ -38,18 +32,8 @@ impl CellConfig {
 
         Ok(Self {
             node_id,
-            socket_dir,
             peers,
             raft_storage_path: Some(storage_path),
         })
-    }
-
-    pub fn new(id: u64, peers: Vec<String>) -> Self {
-        Self {
-            node_id: id,
-            socket_dir: resolve_socket_dir(),
-            peers,
-            raft_storage_path: None,
-        }
     }
 }

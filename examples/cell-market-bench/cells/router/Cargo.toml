@@ -6,8 +6,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
-cell-sdk = { path = "../../cell-sdk" }
-cell-core = { path = "../../cell-core" }
-blake3 = "1.5"
+cell-sdk = { path = "../../../../cell-sdk" }
 tracing = "0.1"
 tracing-subscriber = "0.3"

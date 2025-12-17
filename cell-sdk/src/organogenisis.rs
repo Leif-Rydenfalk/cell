@@ -1,86 +1,61 @@
+// SPDX-License-Identifier: MIT
 // cell-sdk/src/organogenesis.rs
-// Bootstrapping the cell's physical structure from DNA (Cell.toml)
 
 use anyhow::{Context, Result};
 use cell_model::manifest::CellManifest;
 use std::fs;
-use std::path::{Path, PathBuf};
-use tracing::{info, warn};
 
-pub struct Organism {
-    pub manifest: CellManifest,
-    pub runtime_dir: PathBuf,
-}
+pub struct Organism;
 
 impl Organism {
-    /// Reads DNA, builds cytoskeleton (.cell directory), connects Axons (symlinks)
-    pub fn develop() -> Result<Self> {
+    pub fn develop() -> Result<()> {
         let cwd = std::env::current_dir()?;
         let manifest_path = cwd.join("Cell.toml");
 
         if !manifest_path.exists() {
-            // Fallback for raw binaries without manifest
-            return Ok(Self {
-                manifest: CellManifest {
-                    package: cell_model::manifest::PackageMeta {
-                        name: "unknown".into(),
-                        version: "0.0.0".into(),
-                    },
-                    neighbors: std::collections::HashMap::new(),
-                },
-                runtime_dir: cwd.join(".cell"),
-            });
+            fs::create_dir_all(cwd.join(".cell/io"))?;
+            return Ok(());
         }
 
         let content = fs::read_to_string(&manifest_path)?;
         let manifest: CellManifest =
             toml::from_str(&content).context("Failed to parse Cell.toml")?;
 
-        info!("🧬 Organogenesis: {}", manifest.package.name);
-
-        // 1. Create Runtime Directory (.cell)
         let runtime_dir = cwd.join(".cell");
-        if !runtime_dir.exists() {
-            fs::create_dir(&runtime_dir)?;
-        }
-
-        // 2. Create Neighbors Directory
         let neighbors_dir = runtime_dir.join("neighbors");
-        if !neighbors_dir.exists() {
-            fs::create_dir(&neighbors_dir)?;
-        }
+        let io_dir = runtime_dir.join("io");
 
-        // 3. Link Neighbors (Grow Axons)
-        for (name, rel_path) in &manifest.neighbors {
-            let target_path = cwd.join(rel_path);
-            let target_socket = target_path.join(".cell/me.sock");
-            let link_path = neighbors_dir.join(name);
+        fs::create_dir_all(&neighbors_dir)?;
+        fs::create_dir_all(&io_dir)?;
 
-            // Clean old link
-            if link_path.exists() || link_path.is_symlink() {
-                fs::remove_file(&link_path).ok();
+        for (name, config) in &manifest.neighbors {
+            let rel_path_str = match config {
+                cell_model::manifest::NeighborConfig::Path(p) => p,
+                cell_model::manifest::NeighborConfig::Detailed { path, .. } => path,
+            };
+
+            let target_root = cwd.join(rel_path_str);
+            let target_io = target_root.join(".cell/io");
+            let link_dir = neighbors_dir.join(name);
+
+            // We create the target IO dir so we can link to it,
+            // BUT we do NOT create the 'in' file anymore.
+            // The Membrane will bind it as a socket.
+            // A broken symlink is valid in Unix until the socket appears.
+            fs::create_dir_all(&target_io)?;
+            fs::create_dir_all(&link_dir)?;
+
+            let my_tx_link = link_dir.join("tx");
+            let target_in_socket = target_io.join("in");
+
+            if my_tx_link.exists() || fs::symlink_metadata(&my_tx_link).is_ok() {
+                fs::remove_file(&my_tx_link).ok();
             }
 
-            // We link to where the socket WILL be.
-            // Note: We don't link to the socket file directly because it might not exist yet.
-            // We link to the directory or handle the path resolution at runtime.
-            // Actually, symlinking the socket path is standard for Unix.
             #[cfg(unix)]
-            {
-                use std::os::unix::fs::symlink;
-                // We create a broken symlink if the target doesn't exist yet. That's fine.
-                // Mitosis will handle the wake-up.
-                if let Err(e) = symlink(&target_socket, &link_path) {
-                    warn!("Failed to link neighbor '{}': {}", name, e);
-                } else {
-                    info!("🔗 Linked neighbor '{}' -> {:?}", name, target_path);
-                }
-            }
+            std::os::unix::fs::symlink(&target_in_socket, &my_tx_link)?;
         }
 
-        Ok(Self {
-            manifest,
-            runtime_dir,
-        })
+        Ok(())
     }
 }

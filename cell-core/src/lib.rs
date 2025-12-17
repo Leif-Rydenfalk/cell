@@ -1,30 +1,28 @@
 // cell-core/src/lib.rs
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
-use alloc::vec::Vec;
+
+#[cfg(feature = "std")]
+extern crate std;
+
+pub mod error;
+pub mod vesicle;
+
+pub use error::CellError;
+pub use vesicle::{Vesicle, VesicleHeader};
 
 pub mod channel {
     pub const APP: u8 = 0;
-    // ...
+    pub const ROUTING: u8 = 1;
+    pub const OPS: u8 = 2;
+    pub const MACRO_COORDINATION: u8 = 3;
 }
 
-/// The Packet Header (24 bytes)
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct VesicleHeader {
-    pub target_id: u64, // Destination Cell ID
-    pub source_id: u64, // Sender Cell ID
-    pub ttl: u8,
-    pub _pad: [u8; 7],
-}
-
-/// The .router file format (64 bytes)
-/// Located at: .cell/routers/<TARGET_ID_HEX>.router
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RouterDescriptor {
-    pub pipe_name: [u8; 32], // The filename in .cell/pipes/ to write to
-    pub transport_type: u8,  // 0=File, 1=Shm... (Metadata only)
+    pub pipe_name: [u8; 32],
+    pub transport_type: u8,
     pub _pad: [u8; 31],
 }
 

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+// cell-sdk/src/runtime.rs
 
+use crate::identity::Identity;
+use crate::membrane::Membrane;
 use crate::mesh::MeshBuilder;
-use anyhow::Result;
+use crate::organogenisis::Organism;
+use anyhow::{Context, Result};
 use cell_model::macro_coordination::{ExpansionContext, MacroInfo};
-use cell_model::protocol::MitosisSignal;
-use cell_transport::{CoordinationHandler, Membrane};
 use std::future::Future;
 use std::pin::Pin;
 use tracing::{info, warn};
@@ -13,22 +14,10 @@ use tracing::{info, warn};
 pub struct Runtime;
 
 impl Runtime {
-    fn emit_signal(signal: MitosisSignal) {
-        if let Some(mutex) = crate::identity::GAP_JUNCTION.get() {
-            if let Ok(mut junction) = mutex.lock() {
-                let _ = junction.signal(signal);
-            }
-        }
-    }
-
-    /// Entry point for macro-generated cells that have explicit infrastructure dependencies.
+    /// Entry point for cells with dependencies.
     pub async fn ignite_with_deps<S, Req, Resp>(service: S, name: &str, deps: &[&str]) -> Result<()>
     where
-        S: for<'a> Fn(
-                &'a Req::Archived,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<Resp>> + Send + 'a>,
-            >
+        S: for<'a> Fn(&'a Req::Archived) -> Pin<Box<dyn Future<Output = Result<Resp>> + Send + 'a>>
             + Send
             + Sync
             + 'static
@@ -41,20 +30,20 @@ impl Runtime {
             + Send
             + 'static,
     {
+        // 1. Declare Dependencies
         let deps_vec: Vec<String> = deps.iter().map(|s| s.to_string()).collect();
         MeshBuilder::declare_dependencies(name, deps_vec).await;
+
+        // 2. Wait for Dependencies (Check neighbor paths)
         MeshBuilder::wait_for_dependencies(deps).await?;
 
         Self::ignite::<S, Req, Resp>(service, name).await
     }
 
+    /// Standard entry point.
     pub async fn ignite<S, Req, Resp>(service: S, name: &str) -> Result<()>
     where
-        S: for<'a> Fn(
-                &'a Req::Archived,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<Resp>> + Send + 'a>,
-            >
+        S: for<'a> Fn(&'a Req::Archived) -> Pin<Box<dyn Future<Output = Result<Resp>> + Send + 'a>>
             + Send
             + Sync
             + 'static
@@ -73,18 +62,15 @@ impl Runtime {
         .await
     }
 
+    /// Advanced entry point with Macro Coordination.
     pub async fn ignite_with_coordination<S, Req, Resp, F>(
         service: S,
-        _name: &str,
+        name: &str,
         macros: Vec<MacroInfo>,
-        expander: F,
+        _expander: F, // Unused in runtime for now, used by build tools
     ) -> Result<()>
     where
-        S: for<'a> Fn(
-                &'a Req::Archived,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<Resp>> + Send + 'a>,
-            >
+        S: for<'a> Fn(&'a Req::Archived) -> Pin<Box<dyn Future<Output = Result<Resp>> + Send + 'a>>
             + Send
             + Sync
             + 'static
@@ -101,77 +87,48 @@ impl Runtime {
             + Sync
             + 'static,
     {
+        // 1. Setup Global Error Handling
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            Self::emit_signal(MitosisSignal::Necrosis);
+            tracing::error!("Cell Panic: {:?}", info);
             default_hook(info);
         }));
 
-        let identity = crate::identity::Identity::get();
-        let cell_name = identity.cell_name.clone();
-        let node_id = identity.node_id;
+        // 2. Load Identity (Env / Config)
+        let config = Identity::get();
+        info!(
+            "[Runtime] Booting Cell '{}' (Node {})",
+            config.cell_name, config.node_id
+        );
 
-        Self::emit_signal(MitosisSignal::Prophase);
+        // 3. Organogenesis (Build Filesystem Structure)
+        Organism::develop().context("Failed to build cell anatomy")?;
 
-        info!("[Runtime] Booting Cell '{}' (Node {})", cell_name, node_id);
-
-        let manifest_path = std::env::current_dir()
-            .unwrap_or_default()
-            .join("Cell.toml");
-        if manifest_path.exists() {
-            info!("[Runtime] Loading manifest from {:?}", manifest_path);
-            match std::fs::read_to_string(&manifest_path) {
-                Ok(content) => {
-                    match toml::from_str::<cell_model::manifest::CellManifest>(&content) {
-                        Ok(manifest) => {
-                            if !manifest.local.is_empty() {
-                                let deps: Vec<String> = manifest.local.keys().cloned().collect();
-                                let deps_refs: Vec<&str> =
-                                    deps.iter().map(|s| s.as_str()).collect();
-                                info!("[Runtime] Waiting for local dependencies: {:?}", deps);
-                                if let Err(e) = MeshBuilder::wait_for_dependencies(&deps_refs).await
-                                {
-                                    warn!(
-                                        "[Runtime] Failed waiting for manifest dependencies: {}",
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => warn!("[Runtime] Failed to parse Cell.toml: {}", e),
-                    }
-                }
-                Err(e) => warn!("[Runtime] Failed to read Cell.toml: {}", e),
-            }
+        // 4. Register with Mesh (File-based registry)
+        if let Err(e) = MeshBuilder::announce_self(name).await {
+            warn!("[Runtime] Failed to announce self to mesh: {}", e);
         }
 
-        let coordination_handler = if !macros.is_empty() {
-            Some(CoordinationHandler::new(&cell_name, macros, expander))
+        // 5. Macro Coordination Handler
+        // If this cell provides macros, we might need to listen on a specific channel.
+        // For simplicity in this FS architecture, we pass the info to the Membrane.
+        let coordination_ctx = if !macros.is_empty() {
+            Some(macros) // Membrane can expose this via metadata endpoint
         } else {
             None
         };
 
-        let socket_dir = crate::resolve_socket_dir();
-        let socket_path = socket_dir.join(format!("{}.sock", cell_name));
+        info!("[Runtime] Membrane binding to io/in");
 
-        Self::emit_signal(MitosisSignal::Prometaphase {
-            socket_path: socket_path.to_string_lossy().to_string(),
-        });
-
-        info!("[Runtime] Membrane binding to {}", cell_name);
-
-        Self::emit_signal(MitosisSignal::Cytokinesis);
-
-        match Membrane::bind::<S, Req, Resp>(&cell_name, service, None, None, coordination_handler)
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                Self::emit_signal(MitosisSignal::Apoptosis {
-                    reason: e.to_string(),
-                });
-                Err(e)
-            }
-        }
+        // 6. Start the Membrane (Main Loop)
+        // Note: Membrane::bind loop is infinite
+        Membrane::bind::<S, Req, Resp>(
+            name,
+            service,
+            None,
+            None,
+            coordination_ctx.map(|_| ()), // Type erasure for now
+        )
+        .await
     }
 }

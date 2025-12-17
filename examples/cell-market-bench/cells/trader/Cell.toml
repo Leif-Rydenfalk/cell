@@ -1,0 +1,9 @@
+[package]
+name = "trader"
+version = "0.2.0"
+
+[neighbors]
+# TRICK: We name the neighbor 'exchange' because the code looks for `Exchange`.
+# BUT: We point it to the '../router' directory.
+# The Trader thinks it's talking to the Exchange, but it's hitting the Router.
+exchange = "../router"

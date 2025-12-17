@@ -1,52 +1,51 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+// cell-sdk/src/tissue.rs
 
-use crate::Synapse;
-use anyhow::{Result, bail};
-use cell_transport::load_balancer::{LoadBalancer, LoadBalanceStrategy};
+use crate::{Response, Synapse};
+use anyhow::{bail, Result};
+use cell_model::rkyv::ser::serializers::AllocSerializer;
+use rkyv::Serialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use rkyv::{Archive, Serialize};
-use cell_model::rkyv::ser::serializers::AllocSerializer;
-use cell_transport::Response;
 
 pub struct Tissue {
     cell_name: String,
     synapses: Arc<RwLock<Vec<Synapse>>>,
-    _balancer: Arc<LoadBalancer>,
 }
 
 impl Tissue {
     pub async fn connect(cell_name: &str) -> Result<Self> {
         let mut synapses = Vec::new();
 
-        // 1. Try Localhost / Proxy
-        // If Axon is running, it creates a local proxy socket for remote cells.
-        // Synapse::grow connects to that socket transparently.
+        // 1. Try Direct Neighbor (Local Monorepo)
         if let Ok(local) = Synapse::grow(cell_name).await {
             synapses.push(local);
         }
 
-        // Note: We currently only support one "instance" via the proxy socket abstraction.
-        // The Axon Gateway acts as the load balancer to the remote swarm.
-        // In the future, Axon could expose multiple sockets like `cell_name.1.sock`, `cell_name.2.sock`.
+        // 2. Future: Discovery via Gossip (requires a 'gossip' neighbor)
+        // For now, we rely on 1.
 
         if synapses.is_empty() {
-            bail!("No instances of tissue '{}' found locally. Ensure Axon is bridging remote cells.", cell_name);
+            bail!("No instances of tissue '{}' found locally.", cell_name);
         }
 
         Ok(Self {
             cell_name: cell_name.to_string(),
             synapses: Arc::new(RwLock::new(synapses)),
-            _balancer: LoadBalancer::new(LoadBalanceStrategy::RoundRobin),
         })
     }
 
-    pub async fn distribute<'a, Req, Resp>(&'a mut self, request: &Req) -> Result<Response<'a, Resp>>
+    /// Distribute request (Round Robin)
+    pub async fn distribute<'a, Req, Resp>(
+        &'a mut self,
+        request: &Req,
+    ) -> Result<Response<'a, Resp>>
     where
         Req: Serialize<AllocSerializer<1024>>,
-        Resp: Archive + 'a,
-        Resp::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
+        // Tissue usage requires manual deserialization by caller for now or wrapping
+        // For the sake of the compiler error, we return Response<Resp> but
+        // the underlying fire returns Response<()>.
+        // We need to fix Synapse::fire signature in synapse.rs first (Done in step 6)
     {
         let mut guard = self.synapses.write().await;
         if guard.is_empty() {
@@ -54,41 +53,44 @@ impl Tissue {
         }
 
         let result = {
-            let synapse = guard.first_mut().unwrap(); 
+            let synapse = guard.first_mut().unwrap();
+            // Synapse::fire returns Result<Response<Vec<u8>>>
             synapse.fire(request).await
         };
 
-        // Convert CellError to anyhow::Error
-        let detached = result
-            .map(|r| r.into_owned())
-            .map_err(|e| anyhow::anyhow!("Distribution error: {}", e));
-            
+        // Rotate Round Robin
         guard.rotate_left(1);
-        
-        detached
+
+        // The macros expect Response<Resp>. We must cast or wrap.
+        // Since we are moving to "Bytes In/Out", this signature is actually legacy.
+        // However, to satisfy existing code, we return the Owned bytes
+        // and let the caller/macro cast it.
+
+        match result {
+            Ok(resp) => {
+                // Ugly unsafe cast? No.
+                // We just return Response::Owned bytes. The generic <Resp> is phantom here
+                // until deserialization happens.
+                Ok(Response::Owned(resp.into_owned()))
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    pub async fn broadcast<'a, Req, Resp>(&'a mut self, request: &Req) -> Vec<Result<Response<'a, Resp>>>
+    pub async fn broadcast<'a, Req, Resp>(
+        &'a mut self,
+        request: &Req,
+    ) -> Vec<Result<Response<'a, Resp>>>
     where
         Req: Serialize<AllocSerializer<1024>> + Clone,
-        Resp: Archive + 'a,
-        Resp::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
     {
         let mut guard = self.synapses.write().await;
         let mut results = Vec::new();
 
         for syn in guard.iter_mut() {
             let res = syn.fire(request).await;
-            // Convert CellError to anyhow::Error
-            results.push(
-                res.map(|r| r.into_owned())
-                   .map_err(|e| anyhow::anyhow!("Broadcast error: {}", e))
-            );
+            results.push(res.map(|r| Response::Owned(r.into_owned())));
         }
         results
-    }
-    
-    pub async fn refresh(&self) -> Result<()> {
-        Ok(())
     }
 }

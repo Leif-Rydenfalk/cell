@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+// cell-core/src/error.rs
 
 use core::fmt;
 
@@ -17,13 +17,27 @@ pub enum CellError {
     InvalidHeader = 200,
     SerializationFailure = 203,
     Corruption = 204,
+    ProtocolMismatch = 205,
 }
 
 impl fmt::Display for CellError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
+        match self {
+            CellError::ConnectionRefused => write!(f, "Connection Refused"),
+            CellError::ConnectionReset => write!(f, "Connection Reset"),
+            CellError::Timeout => write!(f, "Timeout"),
+            CellError::AccessDenied => write!(f, "Access Denied"),
+            CellError::CapabilityMissing => write!(f, "Capability Missing"),
+            CellError::IoError => write!(f, "I/O Error"),
+            CellError::CircuitBreakerOpen => write!(f, "Circuit Breaker Open"),
+            CellError::InvalidHeader => write!(f, "Invalid Vesicle Header"),
+            CellError::SerializationFailure => write!(f, "Serialization Failure"),
+            CellError::Corruption => write!(f, "Data Corruption Detected"),
+            CellError::ProtocolMismatch => write!(f, "Protocol Mismatch"),
+        }
     }
 }
 
+// Now this works because `extern crate std` is conditional in lib.rs
 #[cfg(feature = "std")]
 impl std::error::Error for CellError {}
