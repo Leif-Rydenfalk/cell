@@ -7,7 +7,7 @@ edition = { workspace = true }
 default = []
 
 [dependencies]
-cell-core = { path = "../cell-core", features = ["std"] }
+cell-core = { workspace = true }
 cell-model = { workspace = true }
 cell-macros = { workspace = true }
 
@@ -22,3 +22,5 @@ dirs = { workspace = true }
 rand = { workspace = true }
 toml = "0.8"
 blake3 = "1.5"
+memmap2 = "0.5"
+nix = { version = "0.27", features = ["fs", "mman", "signal"] }

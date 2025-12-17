@@ -25,6 +25,7 @@ pub mod metrics;
 pub mod organogenisis;
 pub mod response;
 pub mod runtime;
+pub mod shm;
 pub mod synapse;
 pub mod system;
 pub mod test_context;
