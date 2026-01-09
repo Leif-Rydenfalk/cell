@@ -18,6 +18,7 @@ pub use tracing;
 pub mod config;
 pub mod crdt;
 pub mod identity;
+pub mod io_client;
 pub mod logging;
 pub mod membrane;
 pub mod mesh;

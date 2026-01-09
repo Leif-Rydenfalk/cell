@@ -8,6 +8,7 @@ extern crate alloc;
 pub mod bridge;
 pub mod config;
 pub mod error;
+pub mod io;
 pub mod macro_coordination;
 pub mod manifest;
 pub mod ops;

@@ -1,6 +1,7 @@
 // cell-sdk/src/membrane.rs
 // SPDX-License-Identifier: MIT
 
+use crate::io_client::IoClient;
 use anyhow::{Context, Result};
 use cell_core::channel;
 use cell_model::rkyv::ser::serializers::AllocSerializer;
@@ -9,7 +10,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream}; // Changed to Net
+use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -35,28 +36,23 @@ impl Membrane {
             for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>> + 'static,
         Resp: rkyv::Serialize<AllocSerializer<1024>> + Send + 'static,
     {
-        let cwd = std::env::current_dir()?;
-        let io_dir = cwd.join(".cell/io");
-        std::fs::create_dir_all(&io_dir)?;
+        // 1. Ask IO Cell for the FD
+        let std_listener = IoClient::bind_membrane(name)
+            .await
+            .context("Failed to acquire listener from IO Cell")?;
 
-        let rx_path = io_dir.join("in");
+        std_listener.set_nonblocking(true)?;
 
-        // Clean up old socket file if it exists
-        if rx_path.exists() {
-            std::fs::remove_file(&rx_path)?;
-        }
+        // 2. Convert to Tokio
+        let listener = UnixListener::from_std(std_listener)?;
 
-        // Bind Unix Listener
-        let listener = UnixListener::bind(&rx_path)
-            .context(format!("Failed to bind Membrane to {:?}", rx_path))?;
-
-        info!("[Membrane] {} listening on {:?}", name, rx_path);
+        info!("[Membrane] {} online (FD inherited)", name);
 
         let handler = Arc::new(handler);
 
         loop {
-            // Accept connection (High performance, async)
-            let (mut stream, _) = match listener.accept().await {
+            // Removing 'mut' as accept() does not require it on the returned stream variable in this context
+            let (stream, _) = match listener.accept().await {
                 Ok(s) => s,
                 Err(e) => {
                     error!("Accept error: {}", e);
@@ -65,8 +61,6 @@ impl Membrane {
             };
 
             let handler = handler.clone();
-
-            // Spawn task per connection to handle concurrency
             tokio::spawn(async move {
                 let _ = Self::handle_connection::<F, Req, Resp>(stream, handler).await;
             });
@@ -82,19 +76,16 @@ impl Membrane {
         Resp: rkyv::Serialize<AllocSerializer<1024>> + Send + 'static,
     {
         loop {
-            // 1. Read Length Header
             let mut len_buf = [0u8; 4];
             match stream.read_exact(&mut len_buf).await {
                 Ok(_) => (),
-                Err(_) => break, // EOF or Error, close connection
+                Err(_) => break,
             }
             let len = u32::from_le_bytes(len_buf) as usize;
 
-            // 2. Read Frame
             let mut buf = vec![0u8; len];
             stream.read_exact(&mut buf).await?;
 
-            // Frame: [Header:24] [Channel:1] [Payload]
             if buf.len() < 25 {
                 break;
             }
@@ -114,8 +105,6 @@ impl Membrane {
                 };
 
                 let resp_bytes = rkyv::to_bytes::<_, 1024>(&response)?.into_vec();
-
-                // Reply on the SAME stream (Request/Response correlation is implicit in TCP/UDS)
                 let total_len = resp_bytes.len();
                 stream.write_all(&(total_len as u32).to_le_bytes()).await?;
                 stream.write_all(&resp_bytes).await?;

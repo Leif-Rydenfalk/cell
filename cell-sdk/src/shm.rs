@@ -4,9 +4,10 @@
 use cell_core::CellError;
 use memmap2::MmapMut;
 use rkyv::ser::serializers::AllocSerializer;
-use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::{Archive, Deserialize}; // Fixed: Removed unused Serialize
 use std::fs::File;
 use std::marker::PhantomData;
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -52,94 +53,10 @@ unsafe impl Send for RingBuffer {}
 unsafe impl Sync for RingBuffer {}
 
 impl RingBuffer {
-    #[cfg(target_os = "linux")]
-    pub fn create(name: &str) -> anyhow::Result<(Arc<Self>, std::os::unix::io::RawFd)> {
-        use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
-        use std::ffi::CString;
-        use std::os::unix::io::AsRawFd;
-
-        let name_cstr = CString::new(name)?;
-        let flags = MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING;
-
-        let owned_fd = match memfd_create(&name_cstr, flags) {
-            Ok(fd) => fd,
-            Err(e) => return Err(e.into()),
-        };
-
-        let file = File::from(owned_fd);
-        file.set_len(RING_SIZE as u64)?;
-
-        let raw_fd = file.as_raw_fd();
-        let seals = nix::fcntl::SealFlag::F_SEAL_GROW
-            | nix::fcntl::SealFlag::F_SEAL_SHRINK
-            | nix::fcntl::SealFlag::F_SEAL_SEAL;
-        nix::fcntl::fcntl(raw_fd, nix::fcntl::F_ADD_SEALS(seals))?;
-
-        let mut mmap = unsafe { MmapMut::map_mut(&file)? };
-        mmap[..DATA_OFFSET + 4096].fill(0);
-
-        let control = mmap.as_mut_ptr() as *mut RingControl;
-        let data = unsafe { mmap.as_mut_ptr().add(DATA_OFFSET) };
-
-        Ok((
-            Arc::new(Self {
-                control,
-                data,
-                capacity: DATA_CAPACITY,
-                _mmap: mmap,
-                _file: Some(file),
-            }),
-            raw_fd,
-        ))
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn create(name: &str) -> anyhow::Result<(Arc<Self>, std::os::unix::io::RawFd)> {
-        use nix::fcntl::OFlag;
-        use nix::sys::mman::{shm_open, shm_unlink};
-        use nix::sys::stat::Mode;
-        use nix::unistd::ftruncate;
-        use std::ffi::CString;
-        use std::os::unix::io::AsRawFd;
-
-        let unique_name = format!("/{}_{}", name, rand::random::<u32>());
-        let name_cstr = CString::new(unique_name)?;
-
-        let owned_fd = shm_open(
-            name_cstr.as_c_str(),
-            OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_EXCL,
-            Mode::S_IRUSR | Mode::S_IWUSR,
-        )?;
-
-        let _ = shm_unlink(name_cstr.as_c_str());
-        ftruncate(&owned_fd, RING_SIZE as i64)?;
-
-        let file = File::from(owned_fd);
-        let raw_fd = file.as_raw_fd();
-
-        let mut mmap = unsafe { MmapMut::map_mut(&file)? };
-        mmap[..DATA_OFFSET + 4096].fill(0);
-
-        let control = mmap.as_mut_ptr() as *mut RingControl;
-        let data = unsafe { mmap.as_mut_ptr().add(DATA_OFFSET) };
-
-        Ok((
-            Arc::new(Self {
-                control,
-                data,
-                capacity: DATA_CAPACITY,
-                _mmap: mmap,
-                _file: Some(file),
-            }),
-            raw_fd,
-        ))
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub unsafe fn attach(fd: std::os::unix::io::RawFd) -> anyhow::Result<Arc<Self>> {
-        use std::os::unix::io::FromRawFd;
-        let owned_fd = std::os::unix::io::OwnedFd::from_raw_fd(fd);
-        let file = File::from(owned_fd);
+    /// Consumes a RawFd received via SCM_RIGHTS, mmaps it, and wraps it.
+    /// The SDK does NO creation, sealing, or file system ops.
+    pub unsafe fn attach(fd: RawFd) -> anyhow::Result<Arc<Self>> {
+        let file = File::from_raw_fd(fd);
         let mut mmap = MmapMut::map_mut(&file)?;
 
         let control = mmap.as_mut_ptr() as *mut RingControl;
@@ -153,6 +70,10 @@ impl RingBuffer {
             _file: Some(file),
         }))
     }
+
+    // Removed create() methods as they are now strictly IO-Cell responsibilities.
+    // Tests that relied on create() should use attach() with manually created FDs
+    // or mock the IO interaction.
 
     pub fn try_alloc(&self, exact_size: usize) -> Option<WriteSlot<'_>> {
         const MAX_ALLOC_SIZE: usize = 16 * 1024 * 1024;

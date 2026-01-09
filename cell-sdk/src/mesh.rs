@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: MIT
 // cell-sdk/src/mesh.rs
 
-use crate::Synapse;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 
 static DEPENDENCY_MAP: OnceLock<RwLock<HashMap<String, HashSet<String>>>> = OnceLock::new();
 

@@ -10,7 +10,8 @@ pub struct System;
 
 impl System {
     pub async fn spawn(cell_name: &str, config: Option<CellInitConfig>) -> Result<String> {
-        let mut synapse = Synapse::grow("hypervisor")
+        // Fixed: Removed unused 'mut'
+        let synapse = Synapse::grow("hypervisor")
             .await
             .map_err(|_| anyhow!("Hypervisor neighbor not found."))?;
 
