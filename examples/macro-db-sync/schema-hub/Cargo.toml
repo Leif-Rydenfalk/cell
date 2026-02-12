@@ -1,0 +1,17 @@
+[package]
+name = "schema-hub"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cell-sdk = { workspace = true }
+cell-macros = { workspace = true }
+cell-model = { workspace = true }  # Added missing dependency
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }       # Added missing dependency
+dirs = "5.0"
+
+[build-dependencies]
+cell-build = { path = "../../cell-build" }

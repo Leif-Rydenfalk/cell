@@ -13,6 +13,7 @@ pub mod macro_coordination;
 pub mod manifest;
 pub mod ops;
 pub mod protocol;
+pub mod schema;
 pub mod vesicle;
 
 // Re-export common types for convenience

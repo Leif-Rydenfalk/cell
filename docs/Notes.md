@@ -1,0 +1,1 @@
+rm -rf ~/.cell/io

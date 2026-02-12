@@ -9,11 +9,11 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use syn::parse_file; // Removed unused Item
+use syn::parse_file;
 use syn::visit_mut::VisitMut;
 use walkdir::WalkDir;
 
-// --- PROTOCOL ---
+// === PROTOCOL ===
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ResolverRequest {
     EnsureRunning { cell_name: String },
@@ -25,11 +25,27 @@ pub enum ResolverResponse {
     Error { message: String },
 }
 
-// --- MACRO RUNNER (Optimized with Binary Caching) ---
+// === MACRO RUNNER (Optimized with Binary Caching) ===
 
 pub struct MacroRunner;
 
 impl MacroRunner {
+    /// Run a macro expansion by compiling and executing a provider cell.
+    ///
+    /// # Arguments
+    /// * `layer` - The cell name providing the macro
+    /// * `feature` - The specific macro feature to invoke
+    /// * `struct_source` - The source code of the struct to expand
+    ///
+    /// # Returns
+    /// Generated Rust code as a string
+    ///
+    /// # Caching Strategy
+    /// 1. Hash the provider source code
+    /// 2. Check if cached binary exists and matches hash
+    /// 3. If cache miss: compile provider to temporary binary
+    /// 4. Execute binary with struct_source as stdin
+    /// 5. Return stdout as generated code
     pub fn run(layer: &str, feature: &str, struct_source: &str) -> Result<String> {
         let cell_name = layer;
         let home = dirs::home_dir().context("No HOME")?;
@@ -132,17 +148,24 @@ quote = "1.0"
 
         let main_rs = format!(
             r#"
-use {}::{};
+use {}::{} as macro_fn;
 use std::io::Read;
+
 fn main() {{
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input).unwrap();
+    std::io::stdin().read_to_string(&mut input).expect("Failed to read stdin");
+    
+    // Parse the input struct
     let ast: syn::ItemStruct = syn::parse_str(&input).expect("Parse failed");
-    let tokens = {}(&ast);
+    
+    // Call the macro function
+    let tokens = macro_fn(&ast);
+    
+    // Output the generated tokens
     println!("{{}}", tokens);
 }}
 "#,
-            cell, fn_name, fn_name
+            cell, fn_name
         );
 
         fs::write(temp_dir.join("Cargo.toml"), cargo_toml)?;
@@ -183,7 +206,7 @@ fn main() {{
     }
 }
 
-// --- MONOREPO REGISTRATION ---
+// === MONOREPO REGISTRATION ===
 
 #[derive(Deserialize)]
 struct PartialManifest {
@@ -301,7 +324,7 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-// --- RESOLVER LOGIC ---
+// === RESOLVER LOGIC ===
 
 pub fn resolve(cell_name: &str) -> Result<String> {
     let current_pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();

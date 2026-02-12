@@ -4,3 +4,4 @@ run/
 trash/
 personal-docs/
 .DS_Store
+.env

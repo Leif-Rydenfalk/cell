@@ -1,0 +1,130 @@
+{
+    "resources": [
+        {
+            "type": "camera",
+            "name": "cam_feed",
+            "url": "http://192.168.50.208:8080/shot.jpg",
+            "width": 640,
+            "height": 480
+        },
+        {
+            "type": "buffer",
+            "name": "latent_in",
+            "size": 1228800,
+            "usage": [
+                "storage"
+            ]
+        },
+        {
+            "type": "buffer",
+            "name": "latent_out",
+            "size": 1228800,
+            "usage": [
+                "storage"
+            ]
+        },
+        {
+            "type": "buffer",
+            "name": "neuron_state",
+            "size": 614400,
+            "usage": [
+                "storage"
+            ]
+        },
+        {
+            "type": "texture",
+            "name": "vis_out",
+            "width": 640,
+            "height": 480,
+            "format": "rgba8unorm"
+        },
+        {
+            "type": "texture",
+            "name": "debug_latent",
+            "width": 160,
+            "height": 120,
+            "format": "rgba8unorm"
+        },
+        {
+            "type": "sampler",
+            "name": "linear_sampler",
+            "address_mode": "clamp",
+            "filter_mode": "linear"
+        }
+    ],
+    "passes": [
+        {
+            "type": "compute",
+            "name": "init_brain",
+            "shader": "src/shaders/neuron_driver_v2.wgsl",
+            "entry_point": "cs_init",
+            "inputs": [
+                {
+                    "binding": 0,
+                    "resource": "latent_in",
+                    "writable": true
+                },
+                {
+                    "binding": 1,
+                    "resource": "latent_out",
+                    "writable": true
+                },
+                {
+                    "binding": 2,
+                    "resource": "neuron_state",
+                    "writable": true
+                }
+            ],
+            "workgroups": [
+                19200,
+                1,
+                1
+            ],
+            "enabled": true
+        },
+        {
+            "type": "compute",
+            "name": "brain_update",
+            "shader": "src/shaders/neuron_driver_v2.wgsl",
+            "entry_point": "cs_main",
+            "inputs": [
+                {
+                    "binding": 0,
+                    "resource": "latent_in",
+                    "writable": true
+                },
+                {
+                    "binding": 1,
+                    "resource": "latent_out",
+                    "writable": true
+                },
+                {
+                    "binding": 2,
+                    "resource": "neuron_state",
+                    "writable": true
+                },
+                {
+                    "binding": 3,
+                    "resource": "cam_feed",
+                    "writable": false
+                },
+                {
+                    "binding": 4,
+                    "resource": "vis_out",
+                    "writable": true
+                },
+                {
+                    "binding": 5,
+                    "resource": "debug_latent",
+                    "writable": true
+                }
+            ],
+            "workgroups": [
+                20,
+                15,
+                1
+            ],
+            "enabled": true
+        }
+    ]
+}

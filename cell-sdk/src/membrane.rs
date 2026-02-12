@@ -1,5 +1,5 @@
-// cell-sdk/src/membrane.rs
 // SPDX-License-Identifier: MIT
+// cell-sdk/src/membrane.rs
 
 use crate::io_client::IoClient;
 use anyhow::{Context, Result};
@@ -31,19 +31,19 @@ impl Membrane {
             + Sync
             + 'static
             + Clone,
-        Req: Archive + Send,
-        Req::Archived:
-            for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>> + 'static,
+        Req: Archive + Send + 'static,
+        // CRITICAL: Require Archived to be Send + Sync, but NOT the CheckBytes::Error
+        for<'a> Req::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>>
+            + Send
+            + Sync
+            + 'static,
         Resp: rkyv::Serialize<AllocSerializer<1024>> + Send + 'static,
     {
-        // 1. Ask IO Cell for the FD
         let std_listener = IoClient::bind_membrane(name)
             .await
             .context("Failed to acquire listener from IO Cell")?;
 
         std_listener.set_nonblocking(true)?;
-
-        // 2. Convert to Tokio
         let listener = UnixListener::from_std(std_listener)?;
 
         info!("[Membrane] {} online (FD inherited)", name);
@@ -51,7 +51,6 @@ impl Membrane {
         let handler = Arc::new(handler);
 
         loop {
-            // Removing 'mut' as accept() does not require it on the returned stream variable in this context
             let (stream, _) = match listener.accept().await {
                 Ok(s) => s,
                 Err(e) => {
@@ -70,9 +69,11 @@ impl Membrane {
     async fn handle_connection<F, Req, Resp>(mut stream: UnixStream, handler: Arc<F>) -> Result<()>
     where
         F: Fn(&Req::Archived) -> BoxFuture<Result<Resp>> + Send + Sync + 'static,
-        Req: Archive + Send,
-        Req::Archived:
-            for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>> + 'static,
+        Req: Archive + Send + 'static,
+        for<'a> Req::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>>
+            + Send
+            + Sync
+            + 'static,
         Resp: rkyv::Serialize<AllocSerializer<1024>> + Send + 'static,
     {
         loop {
@@ -84,30 +85,97 @@ impl Membrane {
             let len = u32::from_le_bytes(len_buf) as usize;
 
             let mut buf = vec![0u8; len];
-            stream.read_exact(&mut buf).await?;
+            if let Err(e) = stream.read_exact(&mut buf).await {
+                error!("Read error: {}", e);
+                break;
+            }
 
             if buf.len() < 25 {
-                break;
+                error!("Message too short: {} bytes", buf.len());
+                continue;
             }
 
             let channel = buf[24];
             let payload = &buf[25..];
 
             if channel == channel::APP {
-                let archived = unsafe { rkyv::archived_root::<Req>(payload) };
+                let aligned_payload = payload.to_vec();
 
+                // CRITICAL PATTERN: Convert CheckBytes error to String immediately
+                // The CheckBytes::Error type is NOT Send, so we must NOT hold it across await points.
+                // We use a synchronous block to perform validation, converting any error to String
+                // before entering the async error handling path.
+                let validation_result: Result<&Req::Archived, String> = {
+                    // This block is synchronous - no await points here
+                    match rkyv::check_archived_root::<Req>(&aligned_payload) {
+                        Ok(archived) => Ok(archived),
+                        Err(check_err) => {
+                            // IMMEDIATE CONVERSION: Drop check_err by formatting it
+                            Err(format!("Request validation failed: {:?}", check_err))
+                        }
+                    }
+                };
+
+                let archived = match validation_result {
+                    Ok(a) => a,
+                    Err(err_msg) => {
+                        error!("{}", err_msg);
+
+                        // Safe to await now - err_msg is a String (Send)
+                        let err_bytes = err_msg.into_bytes();
+                        let write_fut = async {
+                            stream
+                                .write_all(&(err_bytes.len() as u32).to_le_bytes())
+                                .await?;
+                            stream.write_all(&err_bytes).await
+                        };
+
+                        if let Err(e) = write_fut.await {
+                            error!("Write error: {}", e);
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                };
+
+                // Now call handler - archived is a simple reference
                 let response = match handler(archived).await {
                     Ok(r) => r,
                     Err(e) => {
                         error!("Handler Error: {}", e);
-                        break;
+                        let err_bytes = format!("Handler error: {}", e).into_bytes();
+                        if let Err(e) = stream
+                            .write_all(&(err_bytes.len() as u32).to_le_bytes())
+                            .await
+                        {
+                            error!("Write error: {}", e);
+                            break;
+                        }
+                        if let Err(e) = stream.write_all(&err_bytes).await {
+                            error!("Write error: {}", e);
+                            break;
+                        }
+                        continue;
                     }
                 };
 
-                let resp_bytes = rkyv::to_bytes::<_, 1024>(&response)?.into_vec();
+                let resp_bytes = match rkyv::to_bytes::<_, 1024>(&response) {
+                    Ok(b) => b.into_vec(),
+                    Err(e) => {
+                        error!("Response serialization failed: {}", e);
+                        continue;
+                    }
+                };
+
                 let total_len = resp_bytes.len();
-                stream.write_all(&(total_len as u32).to_le_bytes()).await?;
-                stream.write_all(&resp_bytes).await?;
+                if let Err(e) = stream.write_all(&(total_len as u32).to_le_bytes()).await {
+                    error!("Write error: {}", e);
+                    break;
+                }
+                if let Err(e) = stream.write_all(&resp_bytes).await {
+                    error!("Write error: {}", e);
+                    break;
+                }
             }
         }
         Ok(())

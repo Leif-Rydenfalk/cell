@@ -11,6 +11,7 @@ use std::io::IoSliceMut;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
+use tracing::info;
 use tracing::warn;
 
 pub struct IoClient;
@@ -38,31 +39,117 @@ impl IoClient {
         // 2. Fallback: Local Bind
         warn!("[IO] Router unavailable. Falling back to local syscalls.");
 
-        let home = dirs::home_dir().context("No HOME dir")?;
-        let io_dir = home.join(".cell/io"); // Namespace support would go here
+        let cwd = std::env::current_dir().context("No CWD")?;
+        let io_dir = cwd.join(".cell/io");
         std::fs::create_dir_all(&io_dir)?;
 
-        // Remove old socket if exists
-        // NOTE: In a real deployment, the Router manages this to prevent port stealing.
-        let sock_path = io_dir.join("in"); // Membrane usually binds to 'in' relative to CWD,
-                                           // but for global addressing we adhere to the registry.
-
-        // Wait! The previous membrane implementation bound to CWD/.cell/io/in
-        // To be compatible with 'cargo run' in a specific directory:
-        let cwd_sock = std::env::current_dir()?.join(".cell/io/in");
-        std::fs::create_dir_all(cwd_sock.parent().unwrap())?;
-        if cwd_sock.exists() {
-            std::fs::remove_file(&cwd_sock)?;
+        // Bind to CWD/.cell/io/in (the membrane socket)
+        let sock_path = io_dir.join("in");
+        if sock_path.exists() {
+            std::fs::remove_file(&sock_path)?;
         }
 
-        let listener = std::os::unix::net::UnixListener::bind(&cwd_sock)?;
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path)?;
+
+        // ALSO create the bootstrap socket for global discovery
+        let home = dirs::home_dir().context("No HOME dir")?;
+        let global_io = home.join(".cell/io");
+        std::fs::create_dir_all(&global_io)?;
+        let global_sock = global_io.join(format!("{}.sock", cell_name));
+        if global_sock.exists() {
+            std::fs::remove_file(&global_sock)?;
+        }
+
+        // Create symlink from global to local for compatibility
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&sock_path, &global_sock).ok();
+        }
+
+        // CRITICAL: Create the neighbor structure so other cells can find us
+        // When running in a workspace, other cells look in .cell/neighbors/
+        let neighbors_dir = cwd.join(".cell/neighbors");
+        std::fs::create_dir_all(&neighbors_dir)?;
+        let cell_neighbor_dir = neighbors_dir.join(cell_name);
+        std::fs::create_dir_all(&cell_neighbor_dir)?;
+
+        let tx_link = cell_neighbor_dir.join("tx");
+        if tx_link.exists() || std::fs::symlink_metadata(&tx_link).is_ok() {
+            std::fs::remove_file(&tx_link).ok();
+        }
+
+        // Point the neighbor link to our socket
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&sock_path, &tx_link)
+            .context("Failed to create neighbor tx symlink")?;
+
+        info!(
+            "[IO] Bound membrane at {:?}, neighbor link at {:?}",
+            sock_path, tx_link
+        );
+
         Ok(listener)
     }
 
     /// Connects to the IO cell and requests a connection to a target.
     /// FALLBACK: If IO cell is down, connects directly to target socket.
+    ///
+    /// RETRY: Implements exponential backoff for connection attempts
     pub async fn connect(target: &str) -> Result<std::os::unix::net::UnixStream> {
-        // 1. Try Router
+        // Retry configuration
+        const MAX_RETRIES: u32 = 10;
+        const INITIAL_DELAY_MS: u64 = 100;
+        const MAX_DELAY_MS: u64 = 2000;
+
+        let mut delay_ms = INITIAL_DELAY_MS;
+
+        for attempt in 0..MAX_RETRIES {
+            // Try to connect via multiple methods
+            match Self::try_connect_once(target).await {
+                Ok(stream) => {
+                    if attempt > 0 {
+                        tracing::info!(
+                            "[IO] Connected to '{}' after {} attempts",
+                            target,
+                            attempt + 1
+                        );
+                    }
+                    return Ok(stream);
+                }
+                Err(e) => {
+                    if attempt == 0 {
+                        tracing::debug!("[IO] Initial connection to '{}' failed: {}", target, e);
+                    }
+
+                    if attempt < MAX_RETRIES - 1 {
+                        tracing::debug!(
+                            "[IO] Retrying '{}' in {}ms (attempt {}/{})",
+                            target,
+                            delay_ms,
+                            attempt + 1,
+                            MAX_RETRIES
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+
+                        // Exponential backoff with cap
+                        delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
+                    } else {
+                        return Err(e).with_context(|| {
+                            format!(
+                                "Failed to connect to '{}' after {} attempts",
+                                target, MAX_RETRIES
+                            )
+                        });
+                    }
+                }
+            }
+        }
+
+        unreachable!()
+    }
+
+    async fn try_connect_once(target: &str) -> Result<std::os::unix::net::UnixStream> {
+        // 1. Try Router (IO Cell)
         if let Ok(mut stream) = Self::connect_to_io().await {
             let req = IoRequest::Connect {
                 target_cell: target.to_string(),
@@ -77,31 +164,58 @@ impl IoClient {
             }
         }
 
-        // 2. Fallback: Direct Connect
-        // We assume the standard topology where neighbors are linked in .cell/neighbors/NAME/tx
-        // OR we look up the global registry if that fails.
-
+        // 2. Check neighbor link FIRST (before global registry)
         let cwd = std::env::current_dir()?;
         let neighbor_link = cwd.join(".cell/neighbors").join(target).join("tx");
 
         if neighbor_link.exists() {
-            let socket = std::os::unix::net::UnixStream::connect(neighbor_link)?;
+            // Check if the symlink target exists
+            match std::fs::read_link(&neighbor_link) {
+                Ok(target_path) => {
+                    if !target_path.exists() {
+                        // Symlink exists but target doesn't - cell not ready yet
+                        return Err(anyhow::anyhow!(
+                            "Neighbor link exists but target socket not ready"
+                        ));
+                    }
+                }
+                Err(_) => {
+                    // Can't read symlink, try anyway
+                }
+            }
+
+            match std::os::unix::net::UnixStream::connect(&neighbor_link) {
+                Ok(socket) => return Ok(socket),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(anyhow::anyhow!(
+                        "Neighbor socket not found (cell not ready)"
+                    ));
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("Failed to connect to neighbor: {}", e));
+                }
+            }
+        }
+
+        // 3. Fallback: Check global registry
+        let home = dirs::home_dir().context("No HOME")?;
+        let global_sock = home.join(".cell/io").join(format!("{}.sock", target));
+
+        if global_sock.exists() {
+            let socket =
+                std::os::unix::net::UnixStream::connect(&global_sock).with_context(|| {
+                    format!("Failed to connect to global socket at {:?}", global_sock)
+                })?;
             return Ok(socket);
         }
 
-        // Last ditch: check global registry (Development mode)
-        let home = dirs::home_dir().context("No HOME")?;
-        // This pathing assumption needs to match how the cells bind in fallback mode.
-        // If they bind to CWD, we can't easily find them unless we know their CWD.
-        // However, IoClient::bind_membrane fallback above used CWD.
-        // Real discovery requires the Mesh logic.
-        // For 'bench' examples, they use relative paths in Cell.toml, so 'neighbor_link' should work
-        // IF Organogenesis ran.
-
         anyhow::bail!(
-            "IO Router down and direct neighbor link not found at {:?}",
-            neighbor_link
-        );
+            "IO Router down and no connection path found for '{}'. \
+        Tried neighbor link at {:?} and global socket at {:?}",
+            target,
+            neighbor_link,
+            global_sock
+        )
     }
 
     async fn connect_to_io() -> Result<UnixStream> {

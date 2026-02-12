@@ -1,0 +1,14 @@
+[package]
+name = "cell-model"
+version = { workspace = true }
+edition = { workspace = true }
+
+[features]
+default = ["std"]
+std = ["rkyv/std", "serde/std"]
+alloc = []
+
+[dependencies]
+cell-core = { workspace = true }
+rkyv = { workspace = true }
+serde = { workspace = true, features = ["derive"] }

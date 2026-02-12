@@ -1,0 +1,1 @@
+I will use cells as a scripting language for hotswappable logic in my game engine. one mod can have hundreds of cells working at the same time - they are that lightweight.

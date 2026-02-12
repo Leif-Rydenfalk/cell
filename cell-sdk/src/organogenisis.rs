@@ -35,25 +35,45 @@ impl Organism {
             };
 
             let target_root = cwd.join(rel_path_str);
-            let target_io = target_root.join(".cell/io");
+
+            // The target's socket is always at .cell/io/in relative to its CWD
+            // BUT we need to know its CWD. For local paths, we can resolve it.
+            let target_cwd = if rel_path_str.starts_with('.') || !rel_path_str.contains('/') {
+                // Relative path from current cell to neighbor
+                cwd.join(rel_path_str)
+            } else {
+                // Absolute or different relative - canonicalize
+                fs::canonicalize(&target_root).unwrap_or(target_root)
+            };
+
+            let target_io = target_cwd.join(".cell/io");
             let link_dir = neighbors_dir.join(name);
 
-            // We create the target IO dir so we can link to it,
-            // BUT we do NOT create the 'in' file anymore.
-            // The Membrane will bind it as a socket.
-            // A broken symlink is valid in Unix until the socket appears.
-            fs::create_dir_all(&target_io)?;
             fs::create_dir_all(&link_dir)?;
 
             let my_tx_link = link_dir.join("tx");
             let target_in_socket = target_io.join("in");
 
+            // Remove old link if exists
             if my_tx_link.exists() || fs::symlink_metadata(&my_tx_link).is_ok() {
                 fs::remove_file(&my_tx_link).ok();
             }
 
+            // Create symlink to target's expected socket location
+            // Note: This might be a broken symlink until target actually binds
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&target_in_socket, &my_tx_link)?;
+            std::os::unix::fs::symlink(&target_in_socket, &my_tx_link).with_context(|| {
+                format!(
+                    "Failed to create neighbor link for '{}' -> {:?}",
+                    name, target_in_socket
+                )
+            })?;
+
+            tracing::info!(
+                "[Organogenesis] Linked neighbor '{}' -> {:?}",
+                name,
+                target_in_socket
+            );
         }
 
         Ok(())

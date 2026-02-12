@@ -175,3 +175,25 @@ $ cell swap ledger
 
 # Stop everything
 $ cell down
+
+
+### Quick Reference Card
+
+// === DEFINING ===
+
+#[protein]          // Shared data structure
+#[service]          // Service container
+#[handler]          // RPC method implementation
+#[expand("x","y")]  // Compile-time code generation
+
+// === CONNECTING ===
+
+Synapse::grow("name").await?           // Connect to cell
+Tissue::connect("name").await?         // Connect to load-balanced pool
+service.serve("name").await            // Start serving
+
+// === GENERATED ===
+
+cell_remote!(Mod = "cell-name");        // Generate client module
+Mod::Client::connect().await?;          // Connect via generated client
+client.method_name(args).await?;        // Call remote method

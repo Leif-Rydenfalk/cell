@@ -1,0 +1,172 @@
+{
+    "resources": [
+        {
+            "type": "camera",
+            "name": "cam_feed",
+            "url": "http://192.168.50.208:8080/shot.jpg",
+            "width": 640,
+            "height": 480
+        },
+        {
+            "type": "buffer",
+            "name": "w_encoder",
+            "size": 4915200,
+            "usage": [
+                "storage"
+            ]
+        },
+        {
+            "type": "buffer",
+            "name": "w_decoder",
+            "size": 4915200,
+            "usage": [
+                "storage"
+            ]
+        },
+        {
+            "type": "buffer",
+            "name": "w_predict",
+            "size": 1228800,
+            "usage": [
+                "storage"
+            ]
+        },
+        {
+            "type": "buffer",
+            "name": "state_buffer",
+            "size": 307200,
+            "usage": [
+                "storage"
+            ]
+        },
+        {
+            "type": "texture",
+            "name": "neural_out",
+            "width": 640,
+            "height": 480,
+            "format": "rgba8unorm"
+        },
+        {
+            "type": "texture",
+            "name": "layer_latent",
+            "width": 160,
+            "height": 120,
+            "format": "rgba8unorm"
+        },
+        {
+            "type": "sampler",
+            "name": "linear_sampler",
+            "address_mode": "clamp",
+            "filter_mode": "linear"
+        }
+    ],
+    "passes": [
+        {
+            "type": "compute",
+            "name": "init_net",
+            "shader": "src/shaders/neuron_driver_v1.wgsl",
+            "entry_point": "cs_init",
+            "inputs": [
+                {
+                    "binding": 0,
+                    "resource": "w_encoder",
+                    "writable": true
+                },
+                {
+                    "binding": 1,
+                    "resource": "w_decoder",
+                    "writable": true
+                },
+                {
+                    "binding": 2,
+                    "resource": "w_predict",
+                    "writable": true
+                },
+                {
+                    "binding": 3,
+                    "resource": "state_buffer",
+                    "writable": true
+                }
+            ],
+            "workgroups": [
+                19200,
+                1,
+                1
+            ],
+            "enabled": true
+        },
+        {
+            "type": "compute",
+            "name": "brain_loop",
+            "shader": "src/shaders/neuron_driver_v1.wgsl",
+            "entry_point": "cs_main",
+            "inputs": [
+                {
+                    "binding": 0,
+                    "resource": "w_encoder",
+                    "writable": true
+                },
+                {
+                    "binding": 1,
+                    "resource": "w_decoder",
+                    "writable": true
+                },
+                {
+                    "binding": 2,
+                    "resource": "w_predict",
+                    "writable": true
+                },
+                {
+                    "binding": 3,
+                    "resource": "state_buffer",
+                    "writable": true
+                },
+                {
+                    "binding": 4,
+                    "resource": "cam_feed",
+                    "writable": false
+                },
+                {
+                    "binding": 5,
+                    "resource": "neural_out",
+                    "writable": true
+                },
+                {
+                    "binding": 6,
+                    "resource": "layer_latent",
+                    "writable": true
+                }
+            ],
+            "workgroups": [
+                20,
+                15,
+                1
+            ],
+            "enabled": true
+        },
+        {
+            "type": "render",
+            "name": "display",
+            "shader": "src/shaders/neuron_driver_v1.wgsl",
+            "vs_entry": "vs_main",
+            "fs_entry": "fs_main",
+            "inputs": [
+                {
+                    "binding": 10,
+                    "resource": "neural_out",
+                    "writable": false
+                },
+                {
+                    "binding": 11,
+                    "resource": "linear_sampler",
+                    "writable": false
+                }
+            ],
+            "targets": [
+                "Backbuffer"
+            ],
+            "vertex_count": 3,
+            "enabled": true
+        }
+    ]
+}

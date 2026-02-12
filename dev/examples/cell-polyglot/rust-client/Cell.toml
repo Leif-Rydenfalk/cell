@@ -1,0 +1,7 @@
+[genome]
+name = "rust-client"
+binary = "rust-client"
+
+[axons]
+# We connect to the python worker
+py-worker = "axon://127.0.0.1:9005"

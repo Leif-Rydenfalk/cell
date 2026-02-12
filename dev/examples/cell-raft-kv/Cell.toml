@@ -1,0 +1,8 @@
+[genome]
+name = "kv-store"
+binary = "cell-raft-kv"
+listen = "0.0.0.0:9000"
+
+[consensus]
+id = 1
+peers = ["127.0.0.1:10002", "127.0.0.1:10003"]

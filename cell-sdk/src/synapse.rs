@@ -28,7 +28,28 @@ impl Synapse {
     pub async fn grow(cell_name: &str) -> Result<Self> {
         crate::organogenisis::Organism::develop()?;
 
+        // 1. Try to connect via neighbor link first (most common case)
         let cwd = std::env::current_dir()?;
+        let neighbor_tx = cwd.join(".cell/neighbors").join(cell_name).join("tx");
+
+        let _stream = if neighbor_tx.exists() {
+            // Direct neighbor connection
+            let std_stream = std::os::unix::net::UnixStream::connect(&neighbor_tx)
+                .with_context(|| format!("Failed to connect to neighbor at {:?}", neighbor_tx))?;
+            std_stream.set_nonblocking(true)?;
+            UnixStream::from_std(std_stream)?
+        } else {
+            // Fall back to IO Cell / global discovery
+            let std_stream = IoClient::connect(cell_name).await.with_context(|| {
+                format!(
+                    "Failed to connect to '{}' via IO Cell or direct link",
+                    cell_name
+                )
+            })?;
+            std_stream.set_nonblocking(true)?;
+            UnixStream::from_std(std_stream)?
+        };
+
         let my_name = cwd.file_name().unwrap_or_default().to_string_lossy();
         let hash = blake3::hash(my_name.as_bytes());
         let my_id = u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap());

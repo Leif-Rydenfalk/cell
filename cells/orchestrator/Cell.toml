@@ -1,0 +1,8 @@
+[package]
+name = "orchestrator"
+version = "0.1.0"
+autostart = true
+
+[neighbors]
+# The orchestrator can manage cells without being their neighbor
+# It discovers them by scanning the workspace

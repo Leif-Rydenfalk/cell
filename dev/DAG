@@ -1,0 +1,70 @@
+
+@firstnamelastname-oy7es
+för 2 år sedan
+A volume of bits at 131,072 cubed would take up 281 terabytes if it was un compressed.
+
+So the compressed version at 900 megabytes is only 312,222th the size of the uncompressed version.
+
+42
+
+
+Svara
+
+
+@NoahThatsWack
+för 1 år sedan
+Yah I'm wondering what compression technique this guy is using, his compression ratio is like ~280,000:1, which is insane, especially if its lossless. Personally I would try and see if using a combination of SVO and RLE could achieve this. Def gotta mess around with this and see what algorithms work best haha.
+
+4
+
+
+Svara
+
+
+@michaels851
+för 1 år sedan (redigerad)
+ @NoahThatsWack  Its in the title of the video, DAG, The larger the dataset the more efficient DAGs are, there's also Hashed Dags which allow you to edit them super efficiently while still in their compressed format
+
+11
+
+
+@cyber_robot889
+för 2 år sedan
+Wow! But how?! Is it possible for gaming?
+
+4
+
+
+Svara
+
+
+@AntonioNoack
+för 2 år sedan (redigerad)
+Look up their paper (will link it in a second comment, because comments with links often get lost/blocked on/by YT), or their presentation.
+And yes, ofc, this could use used in games. It's just that it has to perform well enough, and someone has to implement it on their own, and create a game with it (much easier said than done).
+
+7
+
+
+Svara
+
+
+@barlex9113
+för 2 år sedan (redigerad)
+ @AntonioNoack It appears the second comment got ghosted, could you maybe give the full title of the paper instead?
+
+1
+
+
+Svara
+
+
+@AntonioNoack
+för 2 år sedan (redigerad)
+ @barlex9113  The video title is 1:1 the title of their paper ("High resolution sparse voxel DAGs").
+On their ACM Digital Library page, there is a free-to-watch video presentation with lots of details :)
+If you can't find it, it's under "HomeACM/JournalsACM/Transactions on Graphics/Vol. 32, No. 4"
+
+7
+
+

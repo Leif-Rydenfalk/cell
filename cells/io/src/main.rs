@@ -9,6 +9,7 @@ use std::io::IoSlice;
 use std::os::unix::io::{AsRawFd, RawFd};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info};
+use cell_model::rkyv::Deserialize;
 
 #[tokio::main]
 async fn main() -> Result<()> {

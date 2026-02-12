@@ -1,0 +1,20 @@
+[package]
+name = "renderer"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+# Downgraded to 0.29 to match the WindowBuilder/EventLoop code used in main.rs
+winit = "0.29"
+wgpu = "0.20"
+bytemuck = { version = "1.16", features = ["derive"] }
+pollster = "0.3"
+env_logger = "0.11"
+log = "0.4"
+lazy_static = "1.4"
+
+# No "serde" needed here. The SDK handles it via the macro.
+cell-sdk = { path = "../../../../cell-sdk" }
+cell-macros = { path = "../../../../cell-macros" }

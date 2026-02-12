@@ -1,0 +1,7 @@
+[genome]
+name = "coordinator"
+binary = "coordinator"
+
+[axons]
+# Connects to the Worker via TCP (Myelinated)
+worker = "axon://127.0.0.1:9000"

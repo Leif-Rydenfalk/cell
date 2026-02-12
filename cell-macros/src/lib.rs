@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
+// Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell 
 
 extern crate proc_macro;
 use proc_macro::TokenStream;
@@ -11,6 +11,7 @@ use std::hash::{Hash, Hasher};
 
 mod expand;
 mod test;
+mod coordination;
 
 // === CELL_REMOTE ===
 struct CellRemoteArgs {
@@ -67,7 +68,6 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         let arg_sigs: Vec<_> = args.iter().map(|(arg_name, arg_type)| quote! { #arg_name: #arg_type }).collect();
         let arg_names: Vec<_> = args.iter().map(|(arg_name, _)| arg_name).collect();
 
-        // CHANGED: &mut self -> &self
         quote! {
             pub async fn #name(&self, #(#arg_sigs),*) -> ::anyhow::Result<#ret_type> {
                 let req = #protocol_name::#variant_name { #(#arg_names),* };
@@ -239,6 +239,7 @@ fn extract_handler_methods(src: &str) -> Vec<(Ident, Vec<(Ident, Type)>, Type)> 
     methods
 }
 
+/// Extracts T from Result<T, E> or returns the type as-is
 fn extract_ok_type(ret: &ReturnType) -> Type {
     match ret {
         ReturnType::Default => syn::parse_quote! { () },
@@ -332,6 +333,7 @@ pub fn handler(_: TokenStream, item: TokenStream) -> TokenStream {
         let field_names: Vec<_> = args.iter().map(|(n, _)| n).collect();
         let field_bindings: Vec<_> = field_names.iter().map(|n| quote!{ #n }).collect();
         
+        // CRITICAL FIX: Deserialize each field individually, handling Result properly
         let deserializers: Vec<_> = args.iter().map(|(n, _)| {
             quote! {
                 let #n = ::cell_sdk::rkyv::Deserialize::deserialize(
@@ -346,7 +348,10 @@ pub fn handler(_: TokenStream, item: TokenStream) -> TokenStream {
         quote! {
             #archived_protocol_name::#variant { #(#field_bindings),* } => {
                 #(#deserializers)*
-                let result = self.#name(#(#call_args),*).await?;
+                // Call the actual handler method - it returns Result<T>
+                let result = self.#name(#(#call_args),*).await
+                    .map_err(|e| ::cell_sdk::CellError::SerializationFailure)?;
+                // Wrap in response enum - variant holds T directly, not Result<T>
                 Ok(#response_name::#variant(result))
             }
         }

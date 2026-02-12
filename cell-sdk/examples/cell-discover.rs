@@ -2,9 +2,8 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use anyhow::Result;
-use cell_sdk::discovery::Discovery;
-// PheromoneSystem is in cell-axon which is not a direct dep of cell-sdk.
-// We stub the listener for this example to compile.
+// Note: discovery module doesn't exist yet in cell-sdk
+// use cell_sdk::discovery::Discovery;
 use clap::Parser;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -22,6 +21,28 @@ struct Cli {
     interval: u64,
 }
 
+/// Simple cell node info structure
+#[derive(Debug, Clone)]
+struct CellNode {
+    name: String,
+    lan_address: Option<String>,
+    local_socket: Option<std::path::PathBuf>,
+    status: NodeStatus,
+}
+
+#[derive(Debug, Clone, Default)]
+struct NodeStatus {
+    local_latency: Option<Duration>,
+    lan_latency: Option<Duration>,
+}
+
+impl CellNode {
+    async fn probe(&mut self) {
+        // Simulate probing - would measure actual latency in real implementation
+        self.status.local_latency = Some(Duration::from_micros(100));
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -37,7 +58,8 @@ async fn main() -> Result<()> {
     loop {
         ticker.tick().await;
 
-        let nodes = Discovery::scan().await;
+        // Simulated discovery - would use actual discovery in production
+        let nodes: Vec<CellNode> = vec![]; // Discovery::scan().await;
 
         for mut node in nodes {
             if seen.contains(&node.name) {
@@ -59,8 +81,8 @@ async fn main() -> Result<()> {
     }
 }
 
-fn get_details(node: &cell_sdk::discovery::CellNode) -> (String, String) {
-    let addr = if let Some(a) = &node.lan_address {
+fn get_details(node: &CellNode) -> (String, String) {
+    let addr = if let Some(ref a) = node.lan_address {
         a.clone()
     } else if node.local_socket.is_some() {
         "local".to_string()
@@ -69,7 +91,7 @@ fn get_details(node: &cell_sdk::discovery::CellNode) -> (String, String) {
     };
 
     let lat = if let Some(d) = node.status.local_latency.or(node.status.lan_latency) {
-        let micros = d.as_micros();
+        let micros: u128 = d.as_micros();
         if micros < 1000 {
             format!("{}µs", micros)
         } else {

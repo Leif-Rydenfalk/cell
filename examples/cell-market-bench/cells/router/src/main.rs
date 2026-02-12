@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use cell_sdk::Synapse;
-use tokio::net::UnixListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixListener;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,15 +14,17 @@ async fn main() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let io_dir = cwd.join(".cell/io");
     std::fs::create_dir_all(&io_dir)?;
-    
+
     let rx_path = io_dir.join("in");
-    if rx_path.exists() { std::fs::remove_file(&rx_path)?; }
+    if rx_path.exists() {
+        std::fs::remove_file(&rx_path)?;
+    }
     let listener = UnixListener::bind(&rx_path).context("Failed to bind router socket")?;
 
     // 2. Main Loop
     loop {
         let (mut client_stream, _) = listener.accept().await?;
-        
+
         // Spawn per connection
         tokio::spawn(async move {
             if let Err(e) = handle_proxy(client_stream).await {
@@ -53,8 +55,10 @@ async fn handle_proxy(mut client_stream: tokio::net::UnixStream) -> Result<()> {
         // 3. Forward to Exchange
         // We split the frame because Synapse::fire_on_channel expects payload + channel
         // Frame = [Header:24] [Channel:1] [Payload...]
-        if buf.len() < 25 { continue; }
-        
+        if buf.len() < 25 {
+            continue;
+        }
+
         let channel = buf[24];
         let payload = &buf[25..];
 
@@ -64,7 +68,9 @@ async fn handle_proxy(mut client_stream: tokio::net::UnixStream) -> Result<()> {
 
         // 4. Send Reply back to Client
         let total_len = resp_bytes.len();
-        client_stream.write_all(&(total_len as u32).to_le_bytes()).await?;
+        client_stream
+            .write_all(&(total_len as u32).to_le_bytes())
+            .await?;
         client_stream.write_all(&resp_bytes).await?;
     }
     Ok(())

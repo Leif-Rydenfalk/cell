@@ -1,0 +1,14 @@
+[package]
+name = "cell-raft-kv"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cell-sdk = { path = "../../cell-sdk" }
+cell-macros = { path = "../../cell-macros" }
+cell-consensus = { path = "../../cell-consensus" }
+
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+dashmap = "5.5"                                    # Concurrent HashMap

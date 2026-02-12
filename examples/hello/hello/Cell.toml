@@ -1,0 +1,12 @@
+[package]
+name = "hello"
+version = "0.1.0"
+
+[neighbors]
+# Client needs to find hello, but hello is the same directory
+# For single-cell examples, we need a way for client to find server
+# Option 1: Use relative path to parent (if client runs from examples/hello)
+# Option 2: Use absolute path or global registry
+
+# For this example, let's use a path that works when both run from examples/hello
+hello = "." # Self-reference - client looks for ./.cell/io/in

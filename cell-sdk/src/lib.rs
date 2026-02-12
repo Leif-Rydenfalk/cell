@@ -16,6 +16,7 @@ pub use serde;
 pub use tracing;
 
 pub mod config;
+pub mod connection_manager;
 pub mod crdt;
 pub mod identity;
 pub mod io_client;
@@ -31,6 +32,7 @@ pub mod synapse;
 pub mod system;
 pub mod test_context;
 pub mod tissue;
+pub use connection_manager::{ConnectionManager, PoolConfig};
 
 pub use membrane::Membrane;
 pub use response::Response;
