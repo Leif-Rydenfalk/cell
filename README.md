@@ -197,3 +197,7 @@ service.serve("name").await            // Start serving
 cell_remote!(Mod = "cell-name");        // Generate client module
 Mod::Client::connect().await?;          // Connect via generated client
 client.method_name(args).await?;        // Call remote method
+
+
+
+A core idea is that any app can be broken down into many many applications talking to eachother using shared memory - this makes any app hot reloadable, moddable, infinately extendible and multiplayer automatically (by simply running some cells on the cloud).

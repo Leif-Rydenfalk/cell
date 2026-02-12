@@ -12,22 +12,50 @@ cell-core = { workspace = true }
 cell-model = { workspace = true }
 cell-macros = { workspace = true }
 
+# Async runtime
 tokio = { workspace = true }
+
+# Serialization
 serde = { workspace = true }
 rkyv = { workspace = true }
+
+# Error handling and utilities
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI and configuration
 clap = { version = "4.5", features = ["derive"] }
 dirs = { workspace = true }
+
+# Random and hashing
 rand = { workspace = true }
+blake3 = { workspace = true }
+
+# Configuration parsing
 toml = "0.8"
-blake3 = "1.5"
-memmap2 = "0.5"
+
+# Shared memory and memory mapping
+memmap2 = "0.9"
+
+# Unix-specific features
 # Added socket and uio features required for SCM_RIGHTS
-nix = { version = "0.27", features = ["fs", "mman", "signal", "socket", "uio"] }
+nix = { version = "0.27", features = [
+    "fs",
+    "mman",
+    "signal",
+    "socket",
+    "uio",
+    "process",
+] }
+
+# Temporary file creation for SHM channels
+tempfile = "3.10"
+
+# Async utilities
+futures = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
 scopeguard = "1.2"
-futures = "0.3"

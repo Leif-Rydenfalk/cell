@@ -137,12 +137,12 @@ impl Default for PoolConfig {
 
 /// Production-grade connection manager
 pub struct ConnectionManager {
-    pools: Arc<RwLock<HashMap<String, ConnectionPool>>>,
+    pools: Arc<RwLock<HashMap<String, Arc<Mutex<ConnectionPool>>>>>,
     config: PoolConfig,
     global_metrics: Arc<RwLock<GlobalMetrics>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct GlobalMetrics {
     total_connections: u64,
     total_requests: u64,
@@ -170,7 +170,7 @@ impl ConnectionManager {
         {
             let pools = self.pools.read().await;
             if let Some(pool) = pools.get(cell_name) {
-                return Ok(Arc::new(Mutex::new(pool.clone()))); // TODO: fix clone issue
+                return Ok(pool.clone());
             }
         }
 
@@ -179,7 +179,7 @@ impl ConnectionManager {
 
         // Double-check
         if let Some(pool) = pools.get(cell_name) {
-            return Ok(Arc::new(Mutex::new(pool.clone())));
+            return Ok(pool.clone());
         }
 
         info!("Creating new connection pool for '{}'", cell_name);
@@ -191,12 +191,11 @@ impl ConnectionManager {
             config: self.config.clone(),
         };
 
-        // Warm up minimum connections
-        let pool = Arc::new(Mutex::new(pool));
-        pools.insert(cell_name.to_string(), pool.lock().await.clone());
+        let pool_arc = Arc::new(Mutex::new(pool));
+        pools.insert(cell_name.to_string(), pool_arc.clone());
 
         // Spawn pool initialization
-        let pool_clone = pool.clone();
+        let pool_clone = pool_arc.clone();
         let cell_name = cell_name.to_string();
         let config = self.config.clone();
 
@@ -206,7 +205,7 @@ impl ConnectionManager {
             }
         });
 
-        Ok(pool)
+        Ok(pool_arc)
     }
 
     /// Execute a request with full resilience patterns
@@ -275,11 +274,13 @@ impl ConnectionManager {
             .get(cell_name)
             .ok_or_else(|| CellError::ConnectionRefused)?;
 
+        let pool_guard = pool.lock().await;
+
         // Find best connection (least loaded, healthy)
         let mut best: Option<Arc<Mutex<ManagedConnection>>> = None;
         let mut best_score = f64::MAX;
 
-        for conn in &pool.connections {
+        for conn in &pool_guard.connections {
             let guard = conn.lock().await;
             let score = match guard.state {
                 ConnState::Dead => continue,
@@ -294,6 +295,9 @@ impl ConnectionManager {
                 best = Some(conn.clone());
             }
         }
+
+        drop(pool_guard);
+        drop(pools);
 
         best.ok_or_else(|| CellError::ConnectionRefused.into())
     }
@@ -461,20 +465,9 @@ impl ConnectionManager {
         });
     }
 
-    /// Get current metrics
+    /// Get current metrics snapshot
     pub async fn metrics(&self) -> GlobalMetrics {
-        self.global_metrics.read().await.clone()
-    }
-}
-
-// Clone implementation for ConnectionPool (needed for HashMap)
-impl Clone for ConnectionPool {
-    fn clone(&self) -> Self {
-        Self {
-            cell_name: self.cell_name.clone(),
-            connections: Vec::new(), // Don't clone actual connections
-            max_connections: self.max_connections,
-            config: self.config.clone(),
-        }
+        let guard = self.global_metrics.read().await;
+        guard.clone()
     }
 }
