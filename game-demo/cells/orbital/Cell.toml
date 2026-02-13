@@ -1,0 +1,7 @@
+[package]
+name = "orbital"
+version = "0.1.0"
+autostart = true
+
+[neighbors]
+renderer = "../renderer"

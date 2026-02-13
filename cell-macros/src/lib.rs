@@ -34,6 +34,9 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
     let module_name = args.module_name;
     let cell_name = &args.cell_name;
 
+    println!("cargo:warning=cell_remote! macro running for cell: {}", cell_name);
+    println!("cargo:warning=This should appear during build!");
+
     // 1. Fetch Source (Filesystem Only - No RPC)
     let source_code = fetch_remote_source_or_fallback(cell_name);
     
@@ -72,13 +75,14 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
             pub async fn #name(&self, #(#arg_sigs),*) -> ::anyhow::Result<#ret_type> {
                 let req = #protocol_name::#variant_name { #(#arg_names),* };
                 
+                // CHANGED: Use ResilientSynapse for automatic reconnection
                 let resp_wrapper = self.conn.fire(&req).await
                     .map_err(|e| ::anyhow::anyhow!("RPC Error: {}", e))?;
                 
                 let resp_bytes = resp_wrapper.into_owned();
                 
                 if resp_bytes.is_empty() {
-                     return Err(::anyhow::anyhow!("Empty response from cell"));
+                    return Err(::anyhow::anyhow!("Empty response from cell"));
                 }
 
                 let archived = ::cell_sdk::rkyv::check_archived_root::<#response_name>(&resp_bytes)
@@ -97,6 +101,7 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
         }
     }).collect();
 
+    // CHANGED: Update the Client struct to use ResilientSynapse
     let expanded = quote! {
         #[allow(non_snake_case)]
         pub mod #module_name {
@@ -118,17 +123,48 @@ pub fn cell_remote(input: TokenStream) -> TokenStream {
             #[archive(crate = "::cell_sdk::rkyv")]
             pub enum #response_name { #(#resp_variants),* }
 
-            pub struct Client { conn: ::cell_sdk::Synapse }
+            pub struct Client {
+                // CHANGED: Use ResilientSynapse instead of Arc<Synapse>
+                conn: ::cell_sdk::ResilientSynapse,
+            }
 
             impl Client {
                 pub async fn connect() -> ::anyhow::Result<Self> {
-                    let conn = ::cell_sdk::Synapse::grow(#cell_name).await?;
+                    // CHANGED: Use ResilientSynapse::grow for automatic reconnection
+                    let conn = ::cell_sdk::ResilientSynapse::grow(#cell_name).await?;
                     Ok(Self { conn })
                 }
-                pub fn new(conn: ::cell_sdk::Synapse) -> Self {
+                
+                // CHANGED: Constructor takes ResilientSynapse
+                pub fn new(conn: ::cell_sdk::ResilientSynapse) -> Self {
                     Self { conn }
                 }
+
+                // NEW: Get connection state for monitoring
+                pub async fn connection_state(&self) -> ::cell_sdk::ConnState {
+                    self.conn.state().await
+                }
+
+                // NEW: Get connection metrics
+                pub async fn metrics(&self) -> ::cell_sdk::ConnMetrics {
+                    self.conn.metrics.read().await.clone()
+                }
+
+                // NEW: Force reconnection if needed
+                pub async fn reconnect(&self) -> ::anyhow::Result<()> {
+                    self.conn.force_reconnect().await
+                }
+
+                // ⚡ GENERATED CLIENT METHODS ⚡
                 #(#client_methods)*
+            }
+
+            impl Clone for Client {
+                fn clone(&self) -> Self {
+                    Self {
+                        conn: self.conn.clone(),
+                    }
+                }
             }
         }
     };

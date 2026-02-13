@@ -13,7 +13,7 @@ cell-model = { workspace = true }
 cell-macros = { workspace = true }
 
 # Async runtime
-tokio = { workspace = true }
+tokio = { version = "1.36", features = ["full", "time", "sync"] }
 
 # Serialization
 serde = { workspace = true }
@@ -40,7 +40,6 @@ toml = "0.8"
 memmap2 = "0.9"
 
 # Unix-specific features
-# Added socket and uio features required for SCM_RIGHTS
 nix = { version = "0.27", features = [
     "fs",
     "mman",

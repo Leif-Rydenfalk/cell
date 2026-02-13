@@ -1,0 +1,18 @@
+[package]
+name = "renderer"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+cell-sdk = { path = "../../../cell-sdk" }
+wgpu = "0.20"
+winit = "0.29"
+cgmath = "0.18"
+bytemuck = { version = "1.16", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+parking_lot = "0.12"

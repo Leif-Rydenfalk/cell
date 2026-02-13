@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "cells/renderer",
+    "cells/brain",
+    "cells/atlas",
+    "cells/orbital",
+    "cells/player",
+]
+
+[package]
+name = "game-demo"
+version = "0.1.0"

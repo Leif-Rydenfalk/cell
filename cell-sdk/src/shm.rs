@@ -9,10 +9,10 @@
 //! - Robust error handling and corruption detection
 //! - Epoch-based memory reclamation for safety
 
-use cell_core::CellError;
+use crate::error::CellError;
 use memmap2::{MmapMut, MmapOptions};
 use rkyv::ser::serializers::AllocSerializer;
-use rkyv::{Archive, Deserialize};
+use rkyv::{Archive, Deserialize, Serialize};
 use std::fs::File;
 use std::marker::PhantomData;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
@@ -45,9 +45,10 @@ impl From<ShmError> for CellError {
     fn from(e: ShmError) -> Self {
         match e {
             ShmError::Corruption(_) | ShmError::GenerationMismatch => CellError::Corruption,
-            ShmError::Serialization(_) | ShmError::Deserialization(_) => {
-                CellError::SerializationFailure
-            }
+            ShmError::Serialization(_) => CellError::SerializationFailure,
+            ShmError::Deserialization(_) => CellError::DeserializationFailure,
+            ShmError::CapacityExceeded => CellError::ResourceExhausted,
+            ShmError::StaleProcess(_) => CellError::ConnectionReset,
             _ => CellError::IoError,
         }
     }
@@ -566,7 +567,7 @@ where
         let mut deserializer = rkyv::de::deserializers::SharedDeserializeMap::new();
         self.archived
             .deserialize(&mut deserializer)
-            .map_err(|_| CellError::SerializationFailure)
+            .map_err(|_| CellError::DeserializationFailure)
     }
 }
 
@@ -620,11 +621,11 @@ impl ShmClient {
             match self.rx.try_read_raw() {
                 Ok(Some(msg)) => return Ok(msg),
                 Ok(None) => {}
-                Err(CellError::Corruption) => {
+                Err(ShmError::Corruption(_)) => {
                     // Stale/corrupt read, retry
                     warn!("SHM corruption detected, retrying read");
                 }
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             }
 
             spin += 1;
@@ -638,6 +639,36 @@ impl ShmClient {
                 backoff = (backoff * 2).min(10_000_000);
             }
         }
+    }
+
+    /// Send a typed request and receive a typed response
+    pub async fn request<Req, Resp>(
+        &self,
+        req: &Req,
+        channel: u8,
+    ) -> Result<ShmMessage<Resp>, CellError>
+    where
+        Req: Serialize<ShmSerializer>,
+        Resp: Archive,
+        Resp::Archived:
+            rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
+    {
+        let bytes = rkyv::to_bytes::<_, 1024>(req)
+            .map_err(|_| CellError::SerializationFailure)?
+            .into_vec();
+        let msg = self.request_raw(&bytes, channel).await?;
+
+        let archived_ref = match rkyv::check_archived_root::<Resp>(msg.data) {
+            Ok(a) => a,
+            Err(_) => return Err(CellError::DeserializationFailure),
+        };
+        let archived_static: &'static Resp::Archived = unsafe { std::mem::transmute(archived_ref) };
+
+        Ok(ShmMessage {
+            archived: archived_static,
+            _token: msg._token,
+            _phantom: PhantomData,
+        })
     }
 
     /// Create a new SHM client pair from file descriptors
