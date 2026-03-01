@@ -1,7 +1,10 @@
 [package]
 name = "cell-model"
-version = { workspace = true }
-edition = { workspace = true }
+version = "0.4.1"
+edition = "2021"
+description = "Data models for the Cell distributed computing framework"
+license = "MIT"
+repository = "https://github.com/Leif-Rydenfalk/cell"
 
 [features]
 default = ["std"]
@@ -9,6 +12,13 @@ std = ["rkyv/std", "serde/std"]
 alloc = []
 
 [dependencies]
-cell-core = { workspace = true }
-rkyv = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+cell-core = { version = "0.4.1" } # Version only, no path
+rkyv = { version = "0.7", default-features = false, features = [
+    "size_32",
+    "alloc",
+    "validation",
+] }
+serde = { version = "1.0", default-features = false, features = [
+    "derive",
+    "alloc",
+] }
