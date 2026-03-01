@@ -7,10 +7,16 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Leif-Rydenfalk/cell"
 description = "Procedural macros for Cell schemas."
 
+[features]
+default = []
+std = []     # Add this empty feature
+
 [lib]
 proc-macro = true
 
 [dependencies]
+cell-core-macros = { version = "0.4.1", path = "../cell-core-macros" }
+cell-build = { version = "0.4.1", path = "../cell-build" }
 quote = "1.0"
 syn = { version = "2.0", features = [
     "full",
@@ -26,6 +32,3 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rkyv = { version = "0.7", features = ["validation"] }
 anyhow = "1.0"
-cell-build = { path = "../cell-build", version = "0.4.1" }
-cell-core = { path = "../cell-core", version = "0.4.0" }
-cell-model = { path = "../cell-model", version = "0.4.0" }
