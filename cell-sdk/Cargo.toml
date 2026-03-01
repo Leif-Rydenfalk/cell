@@ -8,22 +8,26 @@ repository = "https://github.com/Leif-Rydenfalk/cell"
 
 [features]
 default = ["std"]
-std = []
+std = ["tokio", "anyhow", "cell-macros/std"]
+build = []
 
 [dependencies]
-cell-core = { version = "0.4.1" }
-cell-model = { version = "0.4.1" }
-cell-macros = { version = "0.4.1" }
+cell-core-macros = { version = "0.4.1", path = "../cell-core-macros" }
+cell-macros = { version = "0.4.1", path = "../cell-macros" }
 
 # Async runtime
-tokio = { version = "1.36", features = ["full", "time", "sync"] }
+tokio = { version = "1.36", optional = true, features = [
+    "full",
+    "time",
+    "sync",
+] }
 
 # Serialization
 serde = { workspace = true }
 rkyv = { workspace = true }
 
 # Error handling and utilities
-anyhow = { workspace = true }
+anyhow = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
