@@ -1,8 +1,12 @@
 [package]
 name = "cell-core"
-version = { workspace = true }
-edition = { workspace = true }
-description = "The absolute minimum no_std primitives for Cell."
+version = "0.4.1"
+edition = "2021"
+description = "Core primitives for the Cell distributed computing framework"
+license = "MIT"
+repository = "https://github.com/Leif-Rydenfalk/cell"
+keywords = ["distributed", "actor", "rpc", "zero-copy"]
+categories = ["network-programming", "asynchronous"]
 
 [features]
 default = ["std"]
