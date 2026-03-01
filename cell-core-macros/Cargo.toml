@@ -1,10 +1,15 @@
 [package]
 name = "cell-core-macros"
-version.workspace = true
-authors.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-description.workspace = true
+version = "0.4.1"
+edition = "2021"
+description = "Core macro types for the Cell framework"
+license = "MIT"
+repository = "https://github.com/Leif-Rydenfalk/cell"
 
 [dependencies]
+rkyv = { version = "0.7", default-features = false, features = ["size_32", "alloc", "validation"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+
+[features]
+default = []
+alloc = ["rkyv/alloc", "serde/alloc"]

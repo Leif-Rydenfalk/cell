@@ -1,12 +1,16 @@
+// SPDX-License-Identifier: MIT
 // cell-core-macros/src/lib.rs
+
+#![no_std]
+
+extern crate alloc;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
-#[derive(
-    Archive, RkyvSerialize, RkyvDeserialize, SerdeSerialize, SerdeDeserialize, Debug, Clone,
-)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, SerdeSerialize, SerdeDeserialize, Debug, Clone)]
 #[archive(check_bytes)]
 pub struct MacroInfo {
     pub name: String,
@@ -15,16 +19,7 @@ pub struct MacroInfo {
     pub dependencies: Vec<String>,
 }
 
-#[derive(
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    SerdeSerialize,
-    SerdeDeserialize,
-    Debug,
-    Clone,
-    PartialEq,
-)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, SerdeSerialize, SerdeDeserialize, Debug, Clone, PartialEq)]
 #[archive(check_bytes)]
 pub enum MacroKind {
     Attribute,
@@ -32,9 +27,7 @@ pub enum MacroKind {
     Function,
 }
 
-#[derive(
-    Archive, RkyvSerialize, RkyvDeserialize, SerdeSerialize, SerdeDeserialize, Debug, Clone,
-)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, SerdeSerialize, SerdeDeserialize, Debug, Clone)]
 #[archive(check_bytes)]
 pub struct ExpansionContext {
     pub struct_name: String,
@@ -43,9 +36,7 @@ pub struct ExpansionContext {
     pub other_cells: Vec<String>,
 }
 
-#[derive(
-    Archive, RkyvSerialize, RkyvDeserialize, SerdeSerialize, SerdeDeserialize, Debug, Clone,
-)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, SerdeSerialize, SerdeDeserialize, Debug, Clone)]
 #[archive(check_bytes)]
 pub enum MacroCoordinationRequest {
     WhatMacrosDoYouProvide,
@@ -62,14 +53,22 @@ pub enum MacroCoordinationRequest {
     },
 }
 
-#[derive(
-    Archive, RkyvSerialize, RkyvDeserialize, SerdeSerialize, SerdeDeserialize, Debug, Clone,
-)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, SerdeSerialize, SerdeDeserialize, Debug, Clone)]
 #[archive(check_bytes)]
 pub enum MacroCoordinationResponse {
-    Macros { macros: Vec<MacroInfo> },
-    MacroInfo { info: MacroInfo },
-    GeneratedCode { code: String },
-    QueryResult { result: String },
-    Error { message: String },
+    Macros {
+        macros: Vec<MacroInfo>,
+    },
+    MacroInfo {
+        info: MacroInfo,
+    },
+    GeneratedCode {
+        code: String,
+    },
+    QueryResult {
+        result: String,
+    },
+    Error {
+        message: String,
+    },
 }
