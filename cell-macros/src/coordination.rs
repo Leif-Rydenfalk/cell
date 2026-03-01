@@ -2,7 +2,7 @@
 // Copyright (c) 2025 Leif Rydenfalk – https://github.com/Leif-Rydenfalk/cell
 
 use anyhow::Result;
-use cell_model::macro_coordination::*;
+use cell_core_macros::*;
 use rkyv::Deserialize;
 use std::time::Duration;
 
