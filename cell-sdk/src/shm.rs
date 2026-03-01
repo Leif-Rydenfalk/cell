@@ -642,28 +642,35 @@ impl ShmClient {
     }
 
     /// Send a typed request and receive a typed response
-    pub async fn request<Req, Resp>(&self, req: &Req, channel: u8) -> Result<ShmMessage<Resp>, CellError>
-        where
-            Req: Serialize<ShmSerializer>,
-            Resp: Archive,
-            Resp::Archived: CheckBytes<DefaultValidator<'static>> + 'static,
-        {
-            let msg = self.request_raw(req_bytes, channel).await?;
-            
-            // First try to deserialize as ErrorResponse
-            if let Ok(error_archived) = rkyv::check_archived_root::<ErrorResponse>(msg.data) {
-                let error: ErrorResponse = error_archived.deserialize(...)?;
-                return Err(CellError::RemoteError(error));
-            }
-            
-            // Then try the expected type
-            let archived_ref = rkyv::check_archived_root::<Resp>(msg.data)
+    pub async fn request<Req, Resp>(
+        &self,
+        req: &Req,
+        channel: u8,
+    ) -> Result<ShmMessage<Resp>, CellError>
+    where
+        Req: Serialize<ShmSerializer>,
+        Resp: Archive,
+        Resp::Archived: for<'a> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'a>> + 'static,
+    {
+        let req_bytes = rkyv::to_bytes::<_, 1024>(req).map_err(|_| CellError::SerializationFailure)?;
+        let msg = self.request_raw(&req_bytes, channel).await?;
+
+        // First try to deserialize as ErrorResponse
+        if let Ok(error_archived) = rkyv::check_archived_root::<crate::ErrorResponse>(msg.get_bytes()) {
+            let _error: crate::ErrorResponse = error_archived
+                .deserialize(&mut rkyv::de::deserializers::SharedDeserializeMap::new())
                 .map_err(|_| CellError::DeserializationFailure)?;
+            return Err(CellError::InternalError);
+        }
+
+        // Then try the expected type
+        let archived_ref = rkyv::check_archived_root::<Resp>(msg.get_bytes())
+            .map_err(|_| CellError::DeserializationFailure)?;
         let archived_static: &'static Resp::Archived = unsafe { std::mem::transmute(archived_ref) };
 
         Ok(ShmMessage {
             archived: archived_static,
-            _token: msg._token,
+            _token: msg.token(),
             _phantom: PhantomData,
         })
     }

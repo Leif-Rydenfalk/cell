@@ -8,37 +8,35 @@ repository = "https://github.com/Leif-Rydenfalk/cell"
 
 [features]
 default = ["std"]
-std = ["tokio", "anyhow", "cell-macros/std"]
+std = ["tokio", "anyhow", "cell-macros/std", "rkyv/std", "serde/std"]
 build = []
 
 [dependencies]
+cell-core = { version = "0.4.1", path = "../cell-core" }
+cell-model = { version = "0.4.1", path = "../cell-model" }
 cell-core-macros = { version = "0.4.1", path = "../cell-core-macros" }
 cell-macros = { version = "0.4.1", path = "../cell-macros" }
 
 # Async runtime
-tokio = { version = "1.36", optional = true, features = [
-    "full",
-    "time",
-    "sync",
-] }
+tokio = { version = "1.36", optional = true, features = ["full", "time", "sync"] }
 
 # Serialization
-serde = { workspace = true }
-rkyv = { workspace = true }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+rkyv = { version = "0.7", default-features = false, features = ["size_32", "alloc", "validation"] }
 
 # Error handling and utilities
-anyhow = { workspace = true, optional = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
+anyhow = { version = "1.0", default-features = false, optional = true }
+thiserror = "1.0"
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # CLI and configuration
 clap = { version = "4.5", features = ["derive"] }
-dirs = { workspace = true }
+dirs = "5.0"
 
 # Random and hashing
-rand = { workspace = true }
-blake3 = { workspace = true }
+rand = "0.8"
+blake3 = { version = "1.5", default-features = false }
 
 # Configuration parsing
 toml = "0.8"
@@ -47,14 +45,7 @@ toml = "0.8"
 memmap2 = "0.9"
 
 # Unix-specific features
-nix = { version = "0.27", features = [
-    "fs",
-    "mman",
-    "signal",
-    "socket",
-    "uio",
-    "process",
-] }
+nix = { version = "0.27", features = ["fs", "mman", "signal", "socket", "uio", "process"] }
 
 # Temporary file creation for SHM channels
 tempfile = "3.10"
@@ -65,7 +56,3 @@ futures = "0.3"
 [dev-dependencies]
 tokio-test = "0.4"
 scopeguard = "1.2"
-
-# Missing dependencies for crates.io
-cell-core = { version = "0.4.1" }
-cell-model = { version = "0.4.1" }
