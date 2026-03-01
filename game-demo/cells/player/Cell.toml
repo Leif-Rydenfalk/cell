@@ -6,3 +6,9 @@ autostart = true
 [neighbors]
 renderer = "../renderer"
 orbital = "../orbital"
+physics = "../physics"
+world = "../world"
+inventory = "../inventory"
+factory = "../factory"
+ui = "../ui"
+asteroid = "../asteroid"

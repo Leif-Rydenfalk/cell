@@ -3,15 +3,27 @@
 
 extern crate self as cell_sdk;
 
+pub use anyhow;
 pub use cell_core::{channel, CellError, Vesicle};
 pub use cell_macros::{cell_remote, expand, handler, protein, service};
 pub use cell_model::*;
-
-pub use anyhow;
 pub use clap;
 pub use dirs;
 pub use rand;
 pub use rkyv;
+pub use rkyv::{
+    validation::{validators::DefaultValidator, ArchiveContext},
+    CheckBytes,
+};
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
+pub struct ErrorResponse {
+    pub code: u32,
+    pub message: String,
+    pub cell: String,
+}
+
 pub use serde;
 pub use tracing;
 

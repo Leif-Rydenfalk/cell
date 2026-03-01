@@ -14,7 +14,6 @@ pub const SHM_UPGRADE_ACK: &[u8] = b"__SHM_UPGRADE_ACK__";
 
 pub const GAP_JUNCTION_FD: i32 = 3;
 
-// ... (Existing CellGenome structs remain unchanged) ...
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CellGenome {
     pub name: String,

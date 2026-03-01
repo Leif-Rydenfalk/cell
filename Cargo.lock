@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "cell-build"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "cell-codec"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cell-core",
  "rkyv",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "cell-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "rkyv",
  "serde",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "cell-macros"
-version = "0.3.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "cell-build",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "cell-model"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cell-core",
  "rkyv",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "cell-sdk"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -376,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "exchange"
-version = "0.2.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "cell-macros",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "router"
-version = "0.1.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "cell-sdk",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "trader"
-version = "0.2.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "cell-macros",

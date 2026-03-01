@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use cell_sdk::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -105,10 +105,8 @@ impl RendererLink {
         let mut client_guard = self.client.lock().await;
         
         if let Some(client) = client_guard.as_ref() {
-            // Test connection with ping
-            if client.ping(Renderer::Ping).await.is_ok() {
-                return Ok(client.clone());
-            }
+            // Assume connected if present (ResilientSynapse handles reconnection)
+            return Ok(client.clone());
         }
         
         // Reconnect
@@ -508,6 +506,8 @@ impl OrbitalEngine {
 #[derive(Clone)]
 struct OrbitalService {
     engine: Arc<RwLock<OrbitalEngine>>,
+    // Add set to track what we've spawned
+    spawned_bodies: Arc<RwLock<HashSet<String>>>,
 }
 
 #[handler]
@@ -571,19 +571,68 @@ async fn main() -> Result<()> {
     
     let service = OrbitalService {
         engine: Arc::new(RwLock::new(OrbitalEngine::new())),
+        spawned_bodies: Arc::new(RwLock::new(HashSet::new())),
     };
     
     // Spawn physics ticker (60Hz)
     let service_clone = service.clone();
     let mut last_time = std::time::Instant::now();
+    
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(16)); // 60Hz
+        
+        // Wait for renderer to be ready
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        
         loop {
             interval.tick().await;
             let delta = last_time.elapsed().as_secs_f32();
             last_time = std::time::Instant::now();
             
-            let _ = service_clone.update_positions(UpdatePositions { delta_seconds: delta }).await;
+            // Get updated bodies and spawn visual entities if needed
+            if let Ok(bodies) = service_clone.update_positions(UpdatePositions { delta_seconds: delta }).await {
+                // Check spawning in a separate scope to avoid long locks
+                let bodies_to_spawn: Vec<CelestialBody> = {
+                    let spawned = service_clone.spawned_bodies.read().unwrap();
+                    bodies.iter()
+                        .filter(|b| !spawned.contains(&b.id))
+                        .cloned()
+                        .collect()
+                };
+                
+                if !bodies_to_spawn.is_empty() {
+                    // Extract link in a block to drop the lock guard immediately
+                    let renderer_link = {
+                        let engine = service_clone.engine.read().unwrap();
+                        engine.renderer_link.clone()
+                    }; 
+                    
+                    if let Ok(client) = renderer_link.ensure_connected().await {
+                        for body in bodies_to_spawn {
+                            tracing::info!("[Orbital] Spawning visual for {}", body.name);
+                            let scale = if body.id == "sun" { body.radius * 2.0 } else { body.radius * 3.0 };
+                            
+                            // We use a cube for now as placeholder
+                            // In real game we would have sphere meshes
+                            let _ = client.spawn_entity(Renderer::SpawnEntity {
+                                entity_id: format!("body_{}", body.id),
+                                pass_id: "ship".to_string(), // Re-use ship pass for now
+                                buffer_id: "cube".to_string(),
+                                vertex_count: 36,
+                                instance_count: 1,
+                                transform: [
+                                    scale, 0.0, 0.0, 0.0,
+                                    0.0, scale, 0.0, 0.0,
+                                    0.0, 0.0, scale, 0.0,
+                                    body.position[0], body.position[1], body.position[2], 1.0,
+                                ],
+                            }).await;
+                            
+                            service_clone.spawned_bodies.write().unwrap().insert(body.id);
+                        }
+                    }
+                }
+            }
         }
     });
     

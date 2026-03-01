@@ -118,23 +118,18 @@ impl Membrane {
 
                 let archived = match validation_result {
                     Ok(a) => a,
-                    Err(err_msg) => {
-                        error!("{}", err_msg);
-
-                        // Safe to await now - err_msg is a String (Send)
-                        let err_bytes = err_msg.into_bytes();
-                        let write_fut = async {
-                            stream
-                                .write_all(&(err_bytes.len() as u32).to_le_bytes())
-                                .await?;
-                            stream.write_all(&err_bytes).await
+                   Err(err_msg) => {
+                        let error_response = ErrorResponse {
+                            code: 500,
+                            message: err_msg,
+                            cell: name.to_string(),
                         };
-
-                        if let Err(e) = write_fut.await {
-                            error!("Write error: {}", e);
-                            return Ok(());
-                        }
-                        continue;
+                        let err_bytes = rkyv::to_bytes::<_, 256>(&error_response)
+                            .unwrap_or_else(|_| vec![0u8; 4].into()); // Fallback
+                        
+                        // Write with a special header or channel indicating error
+                        stream.write_all(&(err_bytes.len() as u32).to_le_bytes()).await?;
+                        stream.write_all(&err_bytes).await?;
                     }
                 };
 

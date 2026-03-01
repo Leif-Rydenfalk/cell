@@ -642,26 +642,23 @@ impl ShmClient {
     }
 
     /// Send a typed request and receive a typed response
-    pub async fn request<Req, Resp>(
-        &self,
-        req: &Req,
-        channel: u8,
-    ) -> Result<ShmMessage<Resp>, CellError>
-    where
-        Req: Serialize<ShmSerializer>,
-        Resp: Archive,
-        Resp::Archived:
-            rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'static>> + 'static,
-    {
-        let bytes = rkyv::to_bytes::<_, 1024>(req)
-            .map_err(|_| CellError::SerializationFailure)?
-            .into_vec();
-        let msg = self.request_raw(&bytes, channel).await?;
-
-        let archived_ref = match rkyv::check_archived_root::<Resp>(msg.data) {
-            Ok(a) => a,
-            Err(_) => return Err(CellError::DeserializationFailure),
-        };
+    pub async fn request<Req, Resp>(&self, req: &Req, channel: u8) -> Result<ShmMessage<Resp>, CellError>
+        where
+            Req: Serialize<ShmSerializer>,
+            Resp: Archive,
+            Resp::Archived: CheckBytes<DefaultValidator<'static>> + 'static,
+        {
+            let msg = self.request_raw(req_bytes, channel).await?;
+            
+            // First try to deserialize as ErrorResponse
+            if let Ok(error_archived) = rkyv::check_archived_root::<ErrorResponse>(msg.data) {
+                let error: ErrorResponse = error_archived.deserialize(...)?;
+                return Err(CellError::RemoteError(error));
+            }
+            
+            // Then try the expected type
+            let archived_ref = rkyv::check_archived_root::<Resp>(msg.data)
+                .map_err(|_| CellError::DeserializationFailure)?;
         let archived_static: &'static Resp::Archived = unsafe { std::mem::transmute(archived_ref) };
 
         Ok(ShmMessage {

@@ -4,8 +4,7 @@
 //! 1. Owns the wgpu device/queue and window
 //! 2. Provides a stable RPC API for graphics operations
 //! 3. 60 FPS render loop with WORKING camera and transforms
-//! 4. FIXED: Entity transforms are applied via push constants
-//! 5. FIXED: Camera matrices are passed to shaders
+//! 4. TYPED input API - semantic movement controls!
 
 use anyhow::Result;
 use cell_sdk::*;
@@ -18,7 +17,7 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
-use winit::keyboard::PhysicalKey;
+use winit::keyboard::{KeyCode, PhysicalKey};
 use std::time::Instant;
 use cgmath::{Matrix4, SquareMatrix};
 
@@ -124,15 +123,31 @@ pub struct SetCamera {
     pub far: f32,
 }
 
+// ========= TYPED INPUT API =========
+// NO MORE RAW KEY CODES - semantic input only!
 #[protein]
 pub struct GetInputState;
 
 #[protein]
+#[derive(Default)]
 pub struct InputState {
-    pub keys_down: Vec<u16>,
-    pub keys_pressed: Vec<u16>,
-    pub keys_released: Vec<u16>,
-    pub mouse_delta: [f32; 2],
+    // Movement controls - semantic, not hardware-specific
+    pub move_forward: bool,   // W or Up Arrow
+    pub move_backward: bool,  // S or Down Arrow
+    pub move_left: bool,      // A or Left Arrow
+    pub move_right: bool,     // D or Right Arrow
+    pub move_up: bool,        // Space
+    pub move_down: bool,      // Shift or Ctrl
+    
+    // Camera control
+    pub look_delta: [f32; 2], // Mouse delta (accumulated, zeroed after read)
+    
+    // Actions (edge-triggered - true only on press frame)
+    pub reset: bool,          // R pressed this frame
+    pub escape: bool,         // Escape pressed this frame
+    
+    // Raw access for debugging or advanced use
+    pub keys_down: Vec<String>,
     pub mouse_position: [f32; 2],
     pub mouse_buttons: u8,
     pub scroll_delta: f32,
@@ -192,6 +207,116 @@ struct RendererState {
     camera_bind_group_layout: wgpu::BindGroupLayout,
 }
 
+// ========= INPUT PROCESSING =========
+struct InputAccumulator {
+    // Semantic state
+    move_forward: bool,
+    move_backward: bool,
+    move_left: bool,
+    move_right: bool,
+    move_up: bool,
+    move_down: bool,
+    
+    // Mouse
+    look_delta: [f32; 2],
+    mouse_position: [f32; 2],
+    mouse_buttons: u8,
+    scroll_delta: f32,
+    
+    // Edge-triggered actions (cleared after read)
+    reset_pressed: bool,
+    escape_pressed: bool,
+    
+    // Raw key tracking
+    keys_down: Vec<String>,
+}
+
+impl Default for InputAccumulator {
+    fn default() -> Self {
+        Self {
+            move_forward: false,
+            move_backward: false,
+            move_left: false,
+            move_right: false,
+            move_up: false,
+            move_down: false,
+            look_delta: [0.0, 0.0],
+            mouse_position: [0.0, 0.0],
+            mouse_buttons: 0,
+            scroll_delta: 0.0,
+            reset_pressed: false,
+            escape_pressed: false,
+            keys_down: Vec::new(),
+        }
+    }
+}
+
+impl InputAccumulator {
+    fn process_key(&mut self, key: &str, pressed: bool) {
+        if pressed {
+            if !self.keys_down.contains(&key.to_string()) {
+                self.keys_down.push(key.to_string());
+            }
+        } else {
+            self.keys_down.retain(|k| k != key);
+        }
+        
+        // Map to semantic controls
+        match key {
+            "KeyW" | "ArrowUp" => self.move_forward = pressed,
+            "KeyS" | "ArrowDown" => self.move_backward = pressed,
+            "KeyA" | "ArrowLeft" => self.move_left = pressed,
+            "KeyD" | "ArrowRight" => self.move_right = pressed,
+            "Space" => self.move_up = pressed,
+            "ShiftLeft" | "ShiftRight" | "ControlLeft" | "ControlRight" => {
+                self.move_down = pressed;
+            }
+            "KeyR" => {
+                if pressed {
+                    self.reset_pressed = true;
+                }
+            }
+            "Escape" => {
+                if pressed {
+                    self.escape_pressed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    fn consume(&mut self) -> InputState {
+        InputState {
+            move_forward: self.move_forward,
+            move_backward: self.move_backward,
+            move_left: self.move_left,
+            move_right: self.move_right,
+            move_up: self.move_up,
+            move_down: self.move_down,
+            look_delta: self.look_delta,
+            mouse_position: self.mouse_position,
+            mouse_buttons: self.mouse_buttons,
+            scroll_delta: self.scroll_delta,
+            reset: std::mem::take(&mut self.reset_pressed),
+            escape: std::mem::take(&mut self.escape_pressed),
+            keys_down: self.keys_down.clone(),
+        }
+    }
+    
+    fn reset_frame(&mut self) {
+        self.look_delta = [0.0, 0.0];
+        self.scroll_delta = 0.0;
+    }
+}
+
+enum InputEvent {
+    KeyPress(String),
+    KeyRelease(String),
+    MouseMove(f32, f32),
+    MouseButton(u8, bool),
+    Scroll(f32),
+}
+
 // ========= RENDERER SERVICE =========
 #[service]
 #[derive(Clone)]
@@ -202,16 +327,8 @@ struct RendererService {
     surface: Arc<wgpu::Surface<'static>>,
     depth_view: Arc<wgpu::TextureView>,
     state: Arc<RwLock<RendererState>>,
-    input: Arc<parking_lot::Mutex<InputState>>,
+    input_accumulator: Arc<parking_lot::Mutex<InputAccumulator>>,
     input_events: Arc<parking_lot::Mutex<Vec<InputEvent>>>,
-}
-
-enum InputEvent {
-    KeyPress(u16),
-    KeyRelease(u16),
-    MouseMove(f32, f32),
-    MouseButton(u8, bool),
-    Scroll(f32),
 }
 
 #[handler]
@@ -274,7 +391,7 @@ impl RendererService {
             bind_group_layouts: &[&state.camera_bind_group_layout],
             push_constant_ranges: &[wgpu::PushConstantRange {
                 stages: wgpu::ShaderStages::VERTEX,
-                range: 0..64, // 16 floats * 4 bytes = 64 bytes for mat4x4
+                range: 0..64,
             }],
         });
         drop(state);
@@ -352,13 +469,6 @@ impl RendererService {
         
         let usage = wgpu::BufferUsages::from_bits_truncate(usage_bits)
             | wgpu::BufferUsages::COPY_DST;
-        
-        if usage.contains(wgpu::BufferUsages::MAP_READ) && !usage.contains(wgpu::BufferUsages::COPY_SRC) {
-            return Err(anyhow::anyhow!("MAP_READ requires COPY_SRC"));
-        }
-        if usage.contains(wgpu::BufferUsages::MAP_READ) && usage.contains(wgpu::BufferUsages::VERTEX) {
-            return Err(anyhow::anyhow!("MAP_READ cannot be combined with VERTEX"));
-        }
         
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&req.buffer_id),
@@ -465,65 +575,49 @@ impl RendererService {
             far: req.far,
         });
         
-        // ALWAYS set the active camera to the one being updated
         state.active_camera = camera_id.clone();
         
-        tracing::info!("[Renderer] 📷 Active camera set to '{}' at position [{:.1}, {:.1}, {:.1}]", 
-            state.active_camera, req.position[0], req.position[1], req.position[2]);
-        
+        tracing::info!("[Renderer] 📷 Active camera set to '{}'", state.active_camera);
         Ok(())
     }
     
     async fn get_input_state(&self, _req: GetInputState) -> Result<InputState> {
+        // Process all pending events
         let mut events = self.input_events.lock();
-        let mut input = self.input.lock();
-        
-        let mut keys_pressed = Vec::new();
-        let mut keys_released = Vec::new();
+        let mut accumulator = self.input_accumulator.lock();
         
         for event in events.drain(..) {
             match event {
-                InputEvent::KeyPress(key) => {
-                    if !input.keys_down.contains(&key) {
-                        input.keys_down.push(key);
-                        keys_pressed.push(key);
-                    }
-                }
-                InputEvent::KeyRelease(key) => {
-                    input.keys_down.retain(|&k| k != key);
-                    keys_released.push(key);
-                }
+                InputEvent::KeyPress(key) => accumulator.process_key(&key, true),
+                InputEvent::KeyRelease(key) => accumulator.process_key(&key, false),
                 InputEvent::MouseMove(dx, dy) => {
-                    input.mouse_delta[0] += dx;
-                    input.mouse_delta[1] += dy;
-                    input.mouse_position[0] += dx;
-                    input.mouse_position[1] += dy;
+                    accumulator.look_delta[0] += dx;
+                    accumulator.look_delta[1] += dy;
+                    accumulator.mouse_position[0] += dx;
+                    accumulator.mouse_position[1] += dy;
                 }
                 InputEvent::MouseButton(btn, pressed) => {
                     if pressed {
-                        input.mouse_buttons |= btn;
+                        accumulator.mouse_buttons |= btn;
                     } else {
-                        input.mouse_buttons &= !btn;
+                        accumulator.mouse_buttons &= !btn;
                     }
                 }
                 InputEvent::Scroll(dy) => {
-                    input.scroll_delta += dy;
+                    accumulator.scroll_delta += dy;
                 }
             }
         }
         
-        let state = InputState {
-            keys_down: input.keys_down.clone(),
-            keys_pressed,
-            keys_released,
-            mouse_delta: input.mouse_delta,
-            mouse_position: input.mouse_position,
-            mouse_buttons: input.mouse_buttons,
-            scroll_delta: input.scroll_delta,
-        };
+        // Consume state for this frame
+        let mut state = accumulator.consume();
         
-        input.mouse_delta = [0.0, 0.0];
-        input.scroll_delta = 0.0;
+        // Reset per-frame accumulators
+        accumulator.reset_frame();
+        
+        // Also ensure mouse position is bounded to window
+        state.mouse_position[0] = state.mouse_position[0].clamp(0.0, self.config.width as f32);
+        state.mouse_position[1] = state.mouse_position[1].clamp(0.0, self.config.height as f32);
         
         Ok(state)
     }
@@ -531,106 +625,98 @@ impl RendererService {
 
 impl RendererService {
     fn update_camera_uniform(&self) {
-    // First, get the camera data WITHOUT holding the lock across the write
-    let (camera_data, active_camera_name) = {
-        let state = self.state.read();
-        
-        // Get active camera
-        if let Some(cam) = state.cameras.get(&state.active_camera) {
-            (cam.clone(), state.active_camera.clone())
-        } else {
-            drop(state); // Release read lock
+        let (camera_data, active_camera_name) = {
+            let state = self.state.read();
             
-            // Create default camera
-            let eye = cgmath::Point3::new(20.0, 15.0, 40.0);
-            let target = cgmath::Point3::new(0.0, 0.0, 0.0);
-            let up = cgmath::Vector3::new(0.0, 1.0, 0.0);
-            
-            let view = cgmath::Matrix4::look_at_rh(eye, target, up);
-            let proj = cgmath::perspective(
-                cgmath::Deg(60.0),
-                self.config.width as f32 / self.config.height as f32,
-                0.1,
-                1000.0,
-            );
-            
-            let view_matrix: [[f32; 4]; 4] = view.into();
-            let proj_matrix: [[f32; 4]; 4] = proj.into();
-            
-            let view_flat = [
-                view_matrix[0][0], view_matrix[0][1], view_matrix[0][2], view_matrix[0][3],
-                view_matrix[1][0], view_matrix[1][1], view_matrix[1][2], view_matrix[1][3],
-                view_matrix[2][0], view_matrix[2][1], view_matrix[2][2], view_matrix[2][3],
-                view_matrix[3][0], view_matrix[3][1], view_matrix[3][2], view_matrix[3][3],
-            ];
-            
-            let proj_flat = [
-                proj_matrix[0][0], proj_matrix[0][1], proj_matrix[0][2], proj_matrix[0][3],
-                proj_matrix[1][0], proj_matrix[1][1], proj_matrix[1][2], proj_matrix[1][3],
-                proj_matrix[2][0], proj_matrix[2][1], proj_matrix[2][2], proj_matrix[2][3],
-                proj_matrix[3][0], proj_matrix[3][1], proj_matrix[3][2], proj_matrix[3][3],
-            ];
-            
-            // Store default camera
-            let mut state = self.state.write();
-            state.cameras.insert("default".to_string(), Camera {
-                position: [20.0, 15.0, 40.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                view_matrix: view_flat,
-                proj_matrix: proj_flat,
-                fov: 60.0,
-                near: 0.1,
-                far: 1000.0,
-            });
-            
-            if state.active_camera.is_empty() {
-                state.active_camera = "default".to_string();
+            if let Some(cam) = state.cameras.get(&state.active_camera) {
+                (cam.clone(), state.active_camera.clone())
+            } else {
+                drop(state);
+                
+                // Create default camera
+                let eye = cgmath::Point3::new(20.0, 15.0, 40.0);
+                let target = cgmath::Point3::new(0.0, 0.0, 0.0);
+                let up = cgmath::Vector3::new(0.0, 1.0, 0.0);
+                
+                let view = cgmath::Matrix4::look_at_rh(eye, target, up);
+                let proj = cgmath::perspective(
+                    cgmath::Deg(60.0),
+                    self.config.width as f32 / self.config.height as f32,
+                    0.1,
+                    1000.0,
+                );
+                
+                let view_matrix: [[f32; 4]; 4] = view.into();
+                let proj_matrix: [[f32; 4]; 4] = proj.into();
+                
+                let view_flat = [
+                    view_matrix[0][0], view_matrix[0][1], view_matrix[0][2], view_matrix[0][3],
+                    view_matrix[1][0], view_matrix[1][1], view_matrix[1][2], view_matrix[1][3],
+                    view_matrix[2][0], view_matrix[2][1], view_matrix[2][2], view_matrix[2][3],
+                    view_matrix[3][0], view_matrix[3][1], view_matrix[3][2], view_matrix[3][3],
+                ];
+                
+                let proj_flat = [
+                    proj_matrix[0][0], proj_matrix[0][1], proj_matrix[0][2], proj_matrix[0][3],
+                    proj_matrix[1][0], proj_matrix[1][1], proj_matrix[1][2], proj_matrix[1][3],
+                    proj_matrix[2][0], proj_matrix[2][1], proj_matrix[2][2], proj_matrix[2][3],
+                    proj_matrix[3][0], proj_matrix[3][1], proj_matrix[3][2], proj_matrix[3][3],
+                ];
+                
+                let mut state = self.state.write();
+                state.cameras.insert("default".to_string(), Camera {
+                    position: [20.0, 15.0, 40.0],
+                    target: [0.0, 0.0, 0.0],
+                    up: [0.0, 1.0, 0.0],
+                    view_matrix: view_flat,
+                    proj_matrix: proj_flat,
+                    fov: 60.0,
+                    near: 0.1,
+                    far: 1000.0,
+                });
+                
+                if state.active_camera.is_empty() {
+                    state.active_camera = "default".to_string();
+                }
+                
+                let cam = state.cameras.get(&state.active_camera).unwrap().clone();
+                (cam, state.active_camera.clone())
             }
-            
-            let cam = state.cameras.get(&state.active_camera).unwrap().clone();
-            (cam, state.active_camera.clone())
-        }
-    };
-    
-    // Now we have the camera data without holding any locks
-    tracing::debug!("[Renderer] 🎥 Updating uniform with camera '{}' at [{:.1}, {:.1}, {:.1}]",
-        active_camera_name, camera_data.position[0], camera_data.position[1], camera_data.position[2]);
-    
-    // Calculate view-projection matrix
-    let view = Matrix4::new(
-        camera_data.view_matrix[0], camera_data.view_matrix[1], camera_data.view_matrix[2], camera_data.view_matrix[3],
-        camera_data.view_matrix[4], camera_data.view_matrix[5], camera_data.view_matrix[6], camera_data.view_matrix[7],
-        camera_data.view_matrix[8], camera_data.view_matrix[9], camera_data.view_matrix[10], camera_data.view_matrix[11],
-        camera_data.view_matrix[12], camera_data.view_matrix[13], camera_data.view_matrix[14], camera_data.view_matrix[15],
-    );
-    
-    let proj = Matrix4::new(
-        camera_data.proj_matrix[0], camera_data.proj_matrix[1], camera_data.proj_matrix[2], camera_data.proj_matrix[3],
-        camera_data.proj_matrix[4], camera_data.proj_matrix[5], camera_data.proj_matrix[6], camera_data.proj_matrix[7],
-        camera_data.proj_matrix[8], camera_data.proj_matrix[9], camera_data.proj_matrix[10], camera_data.proj_matrix[11],
-        camera_data.proj_matrix[12], camera_data.proj_matrix[13], camera_data.proj_matrix[14], camera_data.proj_matrix[15],
-    );
-    
-    let view_proj = proj * view;
-    let view_proj_array: [[f32; 4]; 4] = view_proj.into();
-    
-    // Update uniform buffer - acquire write lock only for this
-    let mut state = self.state.write();
-    state.camera_uniform = CameraUniform {
-        view_proj: view_proj_array,
-        position: [camera_data.position[0], camera_data.position[1], camera_data.position[2], 1.0],
-    };
-    
-    self.queue.write_buffer(
-        &state.camera_buffer,
-        0,
-        bytemuck::bytes_of(&state.camera_uniform),
-    );
-}
+        };
+        
+        // Calculate view-projection matrix
+        let view = Matrix4::new(
+            camera_data.view_matrix[0], camera_data.view_matrix[1], camera_data.view_matrix[2], camera_data.view_matrix[3],
+            camera_data.view_matrix[4], camera_data.view_matrix[5], camera_data.view_matrix[6], camera_data.view_matrix[7],
+            camera_data.view_matrix[8], camera_data.view_matrix[9], camera_data.view_matrix[10], camera_data.view_matrix[11],
+            camera_data.view_matrix[12], camera_data.view_matrix[13], camera_data.view_matrix[14], camera_data.view_matrix[15],
+        );
+        
+        let proj = Matrix4::new(
+            camera_data.proj_matrix[0], camera_data.proj_matrix[1], camera_data.proj_matrix[2], camera_data.proj_matrix[3],
+            camera_data.proj_matrix[4], camera_data.proj_matrix[5], camera_data.proj_matrix[6], camera_data.proj_matrix[7],
+            camera_data.proj_matrix[8], camera_data.proj_matrix[9], camera_data.proj_matrix[10], camera_data.proj_matrix[11],
+            camera_data.proj_matrix[12], camera_data.proj_matrix[13], camera_data.proj_matrix[14], camera_data.proj_matrix[15],
+        );
+        
+        let view_proj = proj * view;
+        let view_proj_array: [[f32; 4]; 4] = view_proj.into();
+        
+        // Update uniform buffer
+        let mut state = self.state.write();
+        state.camera_uniform = CameraUniform {
+            view_proj: view_proj_array,
+            position: [camera_data.position[0], camera_data.position[1], camera_data.position[2], 1.0],
+        };
+        
+        self.queue.write_buffer(
+            &state.camera_buffer,
+            0,
+            bytemuck::bytes_of(&state.camera_uniform),
+        );
+    }
     
     fn render_frame(&self) {
-        // Update camera uniform before rendering
         self.update_camera_uniform();
         
         let frame = match self.surface.get_current_texture() {
@@ -701,14 +787,11 @@ impl RendererService {
                     if let Some(buffer) = state.buffers.get(&entity.buffer_id) {
                         rpass.set_pipeline(&pass.pipeline);
                         rpass.set_bind_group(0, &pass.bind_group, &[]);
-                        
-                        // FIXED: Apply entity transform via push constants
                         rpass.set_push_constants(
                             wgpu::ShaderStages::VERTEX,
                             0,
                             bytemuck::cast_slice(&entity.transform),
                         );
-                        
                         rpass.set_vertex_buffer(0, buffer.slice(..));
                         rpass.draw(0..entity.vertex_count, 0..entity.instance_count);
                     }
@@ -721,12 +804,11 @@ impl RendererService {
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         
-        // Update frame count
         let mut state = self.state.write();
         state.frame_count += 1;
         state.last_frame_time = Instant::now();
         
-        if state.frame_count % 60 == 0 {
+        if state.frame_count % 6000 == 0 {
             tracing::info!("[Renderer] Frame {}, entities: {}", state.frame_count, entity_count);
         }
     }
@@ -739,10 +821,12 @@ async fn main() -> Result<()> {
         .with_level(true)
         .init();
 
-    println!("🎨 Renderer Cell starting...");
-    println!("   └─ 🔧 FIXED: Push constants for transforms!");
-    println!("   └─ 🔧 FIXED: Camera matrices in shaders!");
-    println!("   └─ 🔧 FIXED: Active camera switching!");
+    println!("🎨 Renderer Cell - TYPED INPUT API");
+    println!("   └─ 🔧 Semantic movement controls (move_forward, move_left, etc)");
+    println!("   └─ 🔧 Edge-triggered actions (reset, escape)");
+    println!("   └─ 🔧 No more raw key codes!");
+    println!("   └─ 🔧 Push constants for transforms");
+    println!("   └─ 🔧 Camera matrices in shaders");
 
     let event_loop = EventLoop::new().unwrap();
     let window = Arc::new(WindowBuilder::new()
@@ -837,15 +921,7 @@ async fn main() -> Result<()> {
             camera_buffer,
             camera_bind_group_layout,
         })),
-        input: Arc::new(parking_lot::Mutex::new(InputState {
-            keys_down: Vec::new(),
-            keys_pressed: Vec::new(),
-            keys_released: Vec::new(),
-            mouse_delta: [0.0, 0.0],
-            mouse_position: [0.0, 0.0],
-            mouse_buttons: 0,
-            scroll_delta: 0.0,
-        })),
+        input_accumulator: Arc::new(parking_lot::Mutex::new(InputAccumulator::default())),
         input_events: Arc::new(parking_lot::Mutex::new(Vec::new())),
     };
     
@@ -862,65 +938,84 @@ async fn main() -> Result<()> {
     tracing::info!("[Renderer] Ready. Waiting for client connections...");
 
     event_loop.run(move |event, target| {
-    target.set_control_flow(ControlFlow::Poll);
-    
-    match event {
-        Event::WindowEvent { event, .. } => match event {
-            WindowEvent::CloseRequested => target.exit(),
-            WindowEvent::Resized(size) => {
-                let mut config = (*service.config).clone();
-                config.width = size.width.max(1);
-                config.height = size.height.max(1);
-                service.surface.configure(&service.device, &config);
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    let mut events = input_events.lock();
-                    match event.state {
-                        ElementState::Pressed => {
-                            events.push(InputEvent::KeyPress(code as u16));
-                        }
-                        ElementState::Released => {
-                            events.push(InputEvent::KeyRelease(code as u16));
+        target.set_control_flow(ControlFlow::Poll);
+        
+        match event {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => target.exit(),
+                WindowEvent::Resized(size) => {
+                    let mut config = (*service.config).clone();
+                    config.width = size.width.max(1);
+                    config.height = size.height.max(1);
+                    service.surface.configure(&service.device, &config);
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        let key_str = match code {
+                            KeyCode::KeyW => "KeyW",
+                            KeyCode::KeyA => "KeyA",
+                            KeyCode::KeyS => "KeyS",
+                            KeyCode::KeyD => "KeyD",
+                            KeyCode::KeyR => "KeyR",
+                            KeyCode::Space => "Space",
+                            KeyCode::ShiftLeft => "ShiftLeft",
+                            KeyCode::ShiftRight => "ShiftRight",
+                            KeyCode::ControlLeft => "ControlLeft",
+                            KeyCode::ControlRight => "ControlRight",
+                            KeyCode::Escape => "Escape",
+                            KeyCode::ArrowUp => "ArrowUp",
+                            KeyCode::ArrowDown => "ArrowDown",
+                            KeyCode::ArrowLeft => "ArrowLeft",
+                            KeyCode::ArrowRight => "ArrowRight",
+                            _ => return,
+                        }.to_string();
+                        
+                        let mut events = input_events.lock();
+                        match event.state {
+                            ElementState::Pressed => {
+                                events.push(InputEvent::KeyPress(key_str));
+                            }
+                            ElementState::Released => {
+                                events.push(InputEvent::KeyRelease(key_str));
+                            }
                         }
                     }
                 }
+                WindowEvent::CursorMoved { position, .. } => {
+                    let mut events = input_events.lock();
+                    events.push(InputEvent::MouseMove(position.x as f32, position.y as f32));
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let btn = match button {
+                        MouseButton::Left => 1,
+                        MouseButton::Right => 2,
+                        MouseButton::Middle => 4,
+                        _ => 0,
+                    };
+                    let mut events = input_events.lock();
+                    events.push(InputEvent::MouseButton(btn, state == ElementState::Pressed));
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let dy = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+                    };
+                    let mut events = input_events.lock();
+                    events.push(InputEvent::Scroll(dy));
+                }
+                _ => {}
+            },
+            Event::DeviceEvent { event, .. } => {
+                if let DeviceEvent::MouseMotion { delta } = event {
+                    let mut events = input_events.lock();
+                    events.push(InputEvent::MouseMove(delta.0 as f32, delta.1 as f32));
+                }
             }
-            WindowEvent::CursorMoved { position, .. } => {
-                let mut events = input_events.lock();
-                events.push(InputEvent::MouseMove(position.x as f32, position.y as f32));
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                let btn = match button {
-                    MouseButton::Left => 1,
-                    MouseButton::Right => 2,
-                    MouseButton::Middle => 4,
-                    _ => 0,
-                };
-                let mut events = input_events.lock();
-                events.push(InputEvent::MouseButton(btn, state == ElementState::Pressed));
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let dy = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
-                };
-                let mut events = input_events.lock();
-                events.push(InputEvent::Scroll(dy));
+            Event::AboutToWait => {
+                service.render_frame();
+                window.request_redraw();
             }
             _ => {}
-        },
-        Event::DeviceEvent { event, .. } => {
-            if let DeviceEvent::MouseMotion { delta } = event {
-                let mut events = input_events.lock();
-                events.push(InputEvent::MouseMove(delta.0 as f32, delta.1 as f32));
-            }
         }
-        Event::AboutToWait => {
-            service.render_frame();
-            window.request_redraw();
-        }
-        _ => {}
-    }
-}).map_err(Into::into)
+    }).map_err(Into::into)
 }
