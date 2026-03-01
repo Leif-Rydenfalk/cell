@@ -1,0 +1,82 @@
+//! UI Cell - Stub Implementation
+//! 
+//! This is a minimal stub that provides the UI API but doesn't actually render anything.
+//! A proper UI implementation would require a different architecture (e.g., separate process).
+
+use anyhow::Result;
+use cell_sdk::*;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+// ========= MINIMAL PROTEIN DEFINITIONS =========
+
+#[protein]
+pub struct RegisterWindow {
+    pub window_id: String,
+    pub title: String,
+}
+
+#[protein]
+pub struct ShowWindow {
+    pub window_id: String,
+    pub visible: bool,
+}
+
+#[protein]
+pub struct AddWidget {
+    pub window_id: String,
+}
+
+#[protein]
+pub struct Ping;
+
+#[protein]
+pub struct Pong;
+
+// ========= STUB SERVICE =========
+
+#[service]
+#[derive(Clone)]
+struct UIService {
+    _placeholder: Arc<Mutex<()>>,
+}
+
+#[handler]
+impl UIService {
+    async fn ping(&self, _req: Ping) -> Result<Pong> {
+        Ok(Pong)
+    }
+    
+    async fn register_window(&self, req: RegisterWindow) -> Result<()> {
+        tracing::debug!("[UI Stub] Register window: {}", req.window_id);
+        Ok(())
+    }
+    
+    async fn show_window(&self, req: ShowWindow) -> Result<()> {
+        tracing::debug!("[UI Stub] Show window: {} = {}", req.window_id, req.visible);
+        Ok(())
+    }
+    
+    async fn add_widget(&self, _req: AddWidget) -> Result<()> {
+        tracing::debug!("[UI Stub] Add widget");
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_level(true)
+        .init();
+    
+    println!("🎨 UI Cell - Stub Implementation");
+    println!("   └─ This is a non-functional stub for API compatibility");
+    println!("   └─ Real UI would require separate process architecture");
+    
+    let service = UIService {
+        _placeholder: Arc::new(Mutex::new(())),
+    };
+    
+    service.serve("ui").await
+}

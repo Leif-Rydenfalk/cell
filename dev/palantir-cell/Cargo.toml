@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "cells/identity",
+    "cells/provenance",
+    "cells/temporal",
+    "cells/ingest-sec",
+    "cells/correlation",
+    "cells/orchestrator",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+cell-sdk = { path = "../../cell-sdk" }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dirs = "5.0"
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite", "json"] }
+chrono = "0.4"
+blake3 = "1.5"

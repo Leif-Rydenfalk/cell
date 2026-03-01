@@ -1,0 +1,20 @@
+[workspace]
+namespace = "palantir"
+members = [
+    "cells/identity",
+    "cells/provenance",
+    "cells/temporal",
+    "cells/ingest-sec",
+    "cells/correlation",
+    "cells/orchestrator",
+]
+
+[package]
+name = "palantir-core"
+version = "0.1.0"
+description = "Palantir Intelligence Platform - Cell Architecture"
+
+[metadata]
+author = "Palantir Team"
+license = "MIT"
+repository = "https://github.com/palantir/cell"

@@ -1,15 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
+    # Comment out problematic globs for now
+    # "examples/*",
+    # "cells/*",
+
+    # List only what actually exists
     "cell-core",
     "cell-codec",
     "cell-model",
-    "cell-sdk",
+    # "cell-sdk",
     "cell-macros",
-    "cell-build",
-    "examples/cell-market-bench/cells/exchange",
-    "examples/cell-market-bench/cells/trader",
-    "examples/cell-market-bench/cells/router",
+    # "cell-build",
+    # "examples/cell-market-bench/cells/exchange",
+    # "examples/cell-market-bench/cells/trader",
+    # "examples/cell-market-bench/cells/router",
 ]
 exclude = []
 

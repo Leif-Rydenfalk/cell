@@ -1,0 +1,9 @@
+[package]
+name = "asteroid"
+version = "0.1.0"
+autostart = true
+
+[neighbors]
+physics = "../physics"
+world = "../world"
+inventory = "../inventory"

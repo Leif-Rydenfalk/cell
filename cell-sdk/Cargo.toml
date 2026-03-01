@@ -1,16 +1,19 @@
 [package]
 name = "cell-sdk"
-version = { workspace = true }
-edition = { workspace = true }
+version = "0.4.1"
+edition = "2021"
+description = "SDK for building cells in the Cell distributed computing framework"
+license = "MIT"
+repository = "https://github.com/Leif-Rydenfalk/cell"
 
 [features]
 default = ["std"]
 std = []
 
 [dependencies]
-cell-core = { workspace = true }
-cell-model = { workspace = true }
-cell-macros = { workspace = true }
+cell-core = { version = "0.4.1" }
+cell-model = { version = "0.4.1" }
+cell-macros = { version = "0.4.1" }
 
 # Async runtime
 tokio = { version = "1.36", features = ["full", "time", "sync"] }
